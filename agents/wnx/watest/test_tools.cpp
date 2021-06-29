@@ -18,6 +18,7 @@
 #include "exception"            // for terminate
 #include "firewall.h"
 #include "fmt/format.h"
+#include "install_api.h"  // for terminate
 #include "on_start.h"
 #include "tools/_misc.h"
 #include "tools/_tgt.h"          // for IsDebug
@@ -91,10 +92,11 @@ TempDirPair::~TempDirPair() {
     }
 }
 
-const std::filesystem::path G_ProjectPath = PROJECT_DIR;
-const std::filesystem::path G_SolutionPath = SOLUTION_DIR;
-const std::filesystem::path G_TestPath =
-    MakePathToUnitTestFiles(G_SolutionPath);
+fs::path GetProjectRoot() { return fs::path{PROJECT_DIR}; }
+fs::path GetSolutionRoot() { return fs::path{SOLUTION_DIR}; }
+fs::path GetUnitTestFilesRoot() {
+    return MakePathToUnitTestFiles(GetSolutionRoot());
+}
 
 // below described the structure of the solution folder:
 // solution root <--- Use SOLUTION_DIR define
@@ -298,9 +300,8 @@ TempCfgFs::TempCfgFs(Mode mode) : mode_{mode} {
         cma::cfg::GetCfg().pushFolders(root_, data_);
     } else {
         cma::cfg::GetCfg().pushFoldersNoIo(root_, data_);
-        auto ret = loadContent("global:\n  enabled: yes\n  install: yes\n");
-        if (ret) XLOG::l("cant load content");
     }
+    yaml_ = YAML::Clone(cma::cfg::GetLoadedConfig());
 }
 
 TempCfgFs ::~TempCfgFs() {
@@ -308,6 +309,7 @@ TempCfgFs ::~TempCfgFs() {
     if (mode_ == Mode::standard) {
         std::filesystem::remove_all(base_);
     }
+    cma::cfg::GetCfg().setConfig(yaml_);
 }
 
 bool TempCfgFs::loadConfig(const std::filesystem::path& yml) {
@@ -384,7 +386,7 @@ bool TempCfgFs::loadContent(std::string_view content) {
 }
 
 std::filesystem::path GetFabricYml() {
-    return G_SolutionPath / "install" / "resources" /
+    return tst::GetSolutionRoot() / "install" / "resources" /
            cma::cfg::files::kDefaultMainConfig;
 }
 
@@ -452,5 +454,15 @@ FirewallOpener::~FirewallOpener() {
         cma::fw::RemoveRule(firewall_test_rule_name, argv0_);
     }
 }
+
+namespace misc {
+void CopyFailedPythonLogFileToLog(const std::filesystem::path& data) {
+    const auto& the_file =
+        tst::MakePathToUnitTestFiles() / "agent_msi.failed.python.log";
+    fs::create_directories(data / cma::cfg::dirs::kLog);
+    fs::copy_file(the_file, fs::path{cma::cfg::GetLogDir()} /
+                                cma::install::kMsiLogFileName);
+}
+}  // namespace misc
 
 }  // namespace tst

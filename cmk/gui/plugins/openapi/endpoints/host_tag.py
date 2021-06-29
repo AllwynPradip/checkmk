@@ -25,25 +25,16 @@ from cmk.gui.http import Response
 from cmk.gui.plugins.openapi import fields
 from cmk.gui.plugins.openapi.utils import problem
 from cmk.gui.plugins.openapi.utils import ProblemException
-from cmk.utils.tags import TagGroup
-from cmk.gui.watolib.tags import (
-    save_tag_group,
-    load_tag_config,
-    edit_tag_group,
-    load_tag_group,
-    update_tag_config,
-    tag_group_exists,
-    change_host_tags_in_folders,
-    TagCleanupMode,
-    OperationRemoveTagGroup,
-    RepairError,
-)
+from cmk.gui.watolib.tags import (save_tag_group, load_tag_config, edit_tag_group, load_tag_group,
+                                  update_tag_config, tag_group_exists, change_host_tags_in_folders,
+                                  TagCleanupMode, OperationRemoveTagGroup, RepairError, is_builtin)
 from cmk.gui.plugins.openapi.restful_objects import (
     Endpoint,
     request_schemas,
     response_schemas,
     constructors,
 )
+from cmk.utils.tags import BuiltinTagConfig, TagGroup
 
 
 class HostTagGroupName(fields.String):
@@ -56,9 +47,9 @@ class HostTagGroupName(fields.String):
 
     def _validate(self, value):
         super()._validate(value)
-        group_exists = tag_group_exists(value)
-        if not group_exists:
-            self.fail("should_exist", name=value)
+
+        if not tag_group_exists(value, builtin_included=True):
+            raise self.make_error("should_exist", name=value)
 
 
 HOST_TAG_GROUP_NAME = {
@@ -97,11 +88,6 @@ def create_host_tag_group(params):
 def show_host_tag_group(params):
     """Show a host tag group"""
     ident = params['name']
-    if not tag_group_exists(ident):
-        return problem(
-            404, f'Host tag group "{ident}" is not known.',
-            'The host tag group you asked for is not known. Please check for eventual misspellings.'
-        )
     tag_group = _retrieve_group(ident=ident)
     return _serve_host_tag_group(tag_group.get_dict_format())
 
@@ -111,8 +97,9 @@ def show_host_tag_group(params):
           method='get',
           response_schema=response_schemas.DomainObjectCollection)
 def list_host_tag_groups(params):
-    """Show all host tags"""
+    """Show all host tag groups"""
     tag_config = load_tag_config()
+    tag_config += BuiltinTagConfig()
     tag_groups_collection = {
         'id': 'host_tag',
         'domainType': 'host_tag_group',
@@ -136,6 +123,7 @@ def list_host_tag_groups(params):
     method='put',
     etag='both',
     path_params=[HOST_TAG_GROUP_NAME],
+    additional_status_codes=[405],
     request_schema=request_schemas.UpdateHostTagGroup,
     response_schema=response_schemas.ConcreteHostTagGroup,
 )
@@ -143,8 +131,15 @@ def update_host_tag_group(params):
     """Update a host tag group"""
     # TODO: ident verification mechanism with ParamDict replacement
     body = params['body']
-    updated_details = {x: body[x] for x in body if x != "repair"}
     ident = params['name']
+    if is_builtin(ident):
+        return problem(
+            status=405,
+            title="Built-in cannot be modified",
+            detail=f"The built-in host tag group {ident} cannot be modified",
+        )
+
+    updated_details = {x: body[x] for x in body if x != "repair"}
     tag_group = _retrieve_group(ident)
     group_details = tag_group.get_dict_format()
     group_details.update(updated_details)
@@ -164,17 +159,24 @@ def update_host_tag_group(params):
     '.../delete',
     method='delete',
     path_params=[HOST_TAG_GROUP_NAME],
-    request_schema=request_schemas.DeleteHostTagGroup,
+    additional_status_codes=[405],
+    query_params=[request_schemas.DeleteHostTagGroup],
     output_empty=True,
 )
 def delete_host_tag_group(params):
     """Delete a host tag group"""
     ident = params['name']
-    allow_repair = params['body'].get("repair", False)
+    if is_builtin(ident):
+        return problem(
+            status=405,
+            title="Built-in cannot be delete",
+            detail=f"The built-in host tag group {ident} cannot be deleted",
+        )
+
     affected = change_host_tags_in_folders(OperationRemoveTagGroup(ident), TagCleanupMode.CHECK,
                                            watolib.Folder.root_folder())
     if any(affected):
-        if not allow_repair:
+        if not params["repair"]:
             return problem(
                 401, f'Deleting this host tag group "{ident}" requires additional authorization',
                 'The host tag group you intend to delete is used by other instances. You must authorize Checkmk '

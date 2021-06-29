@@ -16,7 +16,8 @@ import cmk.gui.watolib as watolib
 import cmk.gui.i18n
 import cmk.gui.pages
 from cmk.gui.i18n import _u, _
-from cmk.gui.globals import html
+from cmk.gui.globals import html, request, transactions
+from cmk.gui.utils.urls import makeactionuri
 from cmk.gui.permissions import (
     permission_section_registry,
     PermissionSection,
@@ -27,12 +28,12 @@ from cmk.gui.page_menu import (
     PageMenuDropdown,
     PageMenuTopic,
     PageMenuEntry,
-    make_javascript_link,
 )
 from cmk.gui.utils.flashed_messages import get_flashed_messages
 from cmk.gui.breadcrumb import make_simple_page_breadcrumb
 from cmk.gui.utils.urls import make_confirm_link
 from cmk.gui.main_menu import mega_menu_registry
+from cmk.gui.page_menu import make_simple_link
 
 g_acknowledgement_time = {}
 g_modified_time = 0.0
@@ -151,13 +152,12 @@ def render_notification_table(failed_notifications):
         header = {name: idx for idx, name in enumerate(g_columns)}
         for row in failed_notifications:
             table.row()
-            table.text_cell(_("Time"),
-                            cmk.utils.render.approx_age(time.time() - row[header['time']]))
-            table.text_cell(_("Contact"), row[header['contact_name']])
-            table.text_cell(_("Plugin"), row[header['type']])
-            table.text_cell(_("Host"), row[header['host_name']])
-            table.text_cell(_("Service"), row[header['service_description']])
-            table.text_cell(_("Output"), row[header['comment']])
+            table.cell(_("Time"), cmk.utils.render.approx_age(time.time() - row[header['time']]))
+            table.cell(_("Contact"), row[header['contact_name']])
+            table.cell(_("Plugin"), row[header['type']])
+            table.cell(_("Host"), row[header['host_name']])
+            table.cell(_("Service"), row[header['service_description']])
+            table.cell(_("Output"), row[header['comment']])
 
 
 # TODO: We should really recode this to use the view and a normal view command / action
@@ -165,15 +165,13 @@ def render_page_confirm(acktime, failed_notifications):
     title = _("Confirm failed notifications")
     breadcrumb = make_simple_page_breadcrumb(mega_menu_registry.menu_monitoring(), title)
 
-    confirm_url = make_confirm_link(
-        url=html.makeactionuri_contextless([
-            ("mode", "clear_failed_notifications"),
-            ("acktime", str(acktime)),
-            ("_confirm", "1"),
-        ]),
-        message=_("Do you really want to acknowledge all failed notifications up to %s?") %
-        cmk.utils.render.date_and_time(acktime),
-    )
+    confirm_url = make_simple_link(
+        make_confirm_link(
+            url=makeactionuri(request, transactions, [("acktime", str(acktime)),
+                                                      ("_confirm", "1")]),
+            message=_("Do you really want to acknowledge all failed notifications up to %s?") %
+            cmk.utils.render.date_and_time(acktime),
+        ))
 
     page_menu = PageMenu(
         dropdowns=[
@@ -187,7 +185,7 @@ def render_page_confirm(acktime, failed_notifications):
                             PageMenuEntry(
                                 title=_("Confirm"),
                                 icon_name="save",
-                                item=make_javascript_link(confirm_url),
+                                item=confirm_url,
                                 is_shortcut=True,
                                 is_suggested=True,
                                 is_enabled=failed_notifications,
@@ -208,8 +206,8 @@ def render_page_confirm(acktime, failed_notifications):
 
 @cmk.gui.pages.register("clear_failed_notifications")
 def page_clear():
-    acktime = html.request.get_float_input_mandatory('acktime', time.time())
-    if html.request.var('_confirm'):
+    acktime = request.get_float_input_mandatory('acktime', time.time())
+    if request.var('_confirm'):
         acknowledge_failed_notifications(acktime)
 
         if config.user.authorized_login_sites():
@@ -229,5 +227,5 @@ def page_clear():
 
     failed_notifications = load_failed_notifications(before=acktime, after=acknowledged_time())
     render_page_confirm(acktime, failed_notifications)
-    if html.request.var('_confirm'):
+    if request.var('_confirm'):
         html.reload_whole_page()

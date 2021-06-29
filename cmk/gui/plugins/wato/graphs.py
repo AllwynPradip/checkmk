@@ -9,7 +9,7 @@ from cmk.gui.i18n import _
 from cmk.gui.valuespec import (
     ListOf,
     Dictionary,
-    TextUnicode,
+    TextInput,
     Age,
 )
 
@@ -37,7 +37,7 @@ class ConfigVariableGraphTimeranges(ConfigVariable):
         return ListOf(
             Dictionary(optional_keys=[],
                        elements=[
-                           ('title', TextUnicode(
+                           ('title', TextInput(
                                title=_('Title'),
                                allow_empty=False,
                            )),

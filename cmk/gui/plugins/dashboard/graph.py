@@ -17,7 +17,7 @@ from cmk.utils.type_defs import MetricName
 import cmk.gui.sites as sites
 import cmk.gui.visuals as visuals
 from cmk.gui.exceptions import MKGeneralException, MKMissingDataError, MKUserError
-from cmk.gui.globals import html
+from cmk.gui.globals import html, request
 from cmk.gui.i18n import _
 from cmk.gui.metrics import (
     get_graph_templates,
@@ -32,6 +32,7 @@ from cmk.gui.plugins.dashboard.utils import (
     DashletConfig,
     DashletId,
     macro_mapping_from_context,
+    make_mk_missing_data_error,
 )
 from cmk.gui.plugins.metrics.html_render import (
     default_dashlet_graph_render_options,
@@ -46,8 +47,8 @@ from cmk.gui.valuespec import (
     DropdownChoice,
     DropdownChoiceValue,
     DropdownChoiceWithHostAndServiceHints,
-    TextAsciiAutocomplete,
     ValueSpec,
+    autocompleter_registry,
 )
 
 
@@ -56,19 +57,18 @@ def _metric_title_from_id(metric_or_graph_id: MetricName) -> str:
     return metric_info.get(metric_id, {}).get("title", metric_id)
 
 
-class GraphTemplate(DropdownChoiceWithHostAndServiceHints):
+@autocompleter_registry.register
+class AvailableGraphs(DropdownChoiceWithHostAndServiceHints):
     """Factory of a Dropdown menu from all graph templates"""
+    ident = "available_graphs"
     _MARKER_DEPRECATED_CHOICE = "_deprecated_int_value"
 
     def __init__(self, **kwargs: Any):
         kwargs_with_defaults: Mapping[str, Any] = {
-            "css_spec": "graph-selector",
+            "css_spec": ["ajax-vals", "graph-selector", self.ident],
             "hint_label": _("graph"),
             "choices": [(None, _("Select graph"))],
             "title": _("Graph"),
-            "encode_value": False,
-            "sorted": True,
-            "no_preselect": True,
             "help": _(
                 "Select the graph to be displayed by this element. In case the current selection "
                 "displays 'Deprecated choice, please re-select', this element was created before "
@@ -114,10 +114,6 @@ class GraphTemplate(DropdownChoiceWithHostAndServiceHints):
             varprefix,
             self._MARKER_DEPRECATED_CHOICE if isinstance(value, int) else value,
         )
-
-
-class AvailableGraphs(TextAsciiAutocomplete):
-    ident = "available_graphs"
 
     @staticmethod
     def _graph_template_title(graph_template: Mapping) -> str:
@@ -253,9 +249,8 @@ class GraphDashlet(Dashlet):
             graph_recipes = resolve_graph_recipe(self._dashlet_spec["_graph_identification"])
         except MKMissingDataError:
             raise
-        except livestatus.MKLivestatusNotFoundError as livestatus_excpt:
-            raise MKMissingDataError(
-                _("Missing data needed to render this graph. Details: %s") % livestatus_excpt)
+        except livestatus.MKLivestatusNotFoundError:
+            raise make_mk_missing_data_error()
         except Exception:
             raise MKGeneralException(_("Failed to calculate a graph recipe."))
 
@@ -265,8 +260,8 @@ class GraphDashlet(Dashlet):
     def _resolve_site(host):
         # When the site is available via URL context, use it. Otherwise it is needed
         # to check all sites for the requested host
-        if html.request.has_var('site'):
-            return html.request.var('site')
+        if request.has_var('site'):
+            return request.var('site')
 
         with sites.prepend_site():
             query = "GET hosts\nFilter: name = %s\nColumns: name" % livestatus.lqencode(host)
@@ -350,7 +345,7 @@ class GraphDashlet(Dashlet):
         yield cls._vs_timerange()
         yield (
             "source",
-            GraphTemplate(),
+            AvailableGraphs(),
         )
         yield cls._vs_graph_render_options()
 
@@ -384,8 +379,10 @@ function handle_dashboard_render_graph_response(handler_data, response_body)
 {
     var nr = handler_data;
     var container = document.getElementById('dashlet_graph_' + nr);
-    container.innerHTML = response_body;
-    cmk.utils.execute_javascript_by_object(container);
+    if (container) {
+        container.innerHTML = response_body;
+        cmk.utils.execute_javascript_by_object(container);
+    }
 }
 
 """

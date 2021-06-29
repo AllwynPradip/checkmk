@@ -7,8 +7,8 @@
 import os
 import re
 import logging
-import pytest  # type: ignore[import]
-from testlib import cmk_path, cmc_path, cme_path  # type: ignore[import]
+import pytest
+from testlib import cmk_path, cmc_path, cme_path
 
 LOGGER = logging.getLogger()
 

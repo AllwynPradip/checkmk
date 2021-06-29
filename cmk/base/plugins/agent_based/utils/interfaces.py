@@ -4,16 +4,18 @@
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from functools import partial
-from collections import defaultdict
-from dataclasses import (asdict, dataclass)
 import time
+from collections import defaultdict
+from dataclasses import asdict, dataclass
+from functools import partial
 from typing import (
     Any,
     Callable,
+    Container,
     Dict,
     Iterable,
     List,
+    Literal,
     Mapping,
     MutableMapping,
     Optional,
@@ -38,7 +40,7 @@ from ..agent_based_api.v1 import (
     Result,
     Service,
     ServiceLabel,
-    State as state,
+    State,
     type_defs,
 )
 
@@ -191,8 +193,8 @@ def mac_address_from_hexstring(hexstr: str) -> str:
 # Stupid fix: Remove all 0 bytes. Hope this causes no problems.
 def cleanup_if_strings(s: str) -> str:
     if s and s != '':
-        return "".join([c for c in s if c != chr(0)]).strip()
-    return s
+        s = "".join([c for c in s if c != chr(0)]).strip()
+    return s.replace("\n", " ")
 
 
 # This variant of int() lets the string if its not
@@ -901,11 +903,11 @@ def _get_rate(
     )
 
 
-def _get_map_states(defined_mapping: Iterable[Tuple[Iterable[str], int]]) -> Mapping[str, state]:
+def _get_map_states(defined_mapping: Iterable[Tuple[Iterable[str], int]]) -> Mapping[str, State]:
     map_states = {}
     for states, mon_state in defined_mapping:
         for st in states:
-            map_states[st] = state(mon_state)
+            map_states[st] = State(mon_state)
     return map_states
 
 
@@ -920,12 +922,12 @@ def _render_status_info_group_members(
 
 def _check_status(
     interface_status: str,
-    target_states: Optional[Sequence[str]],
-    states_map: Mapping[str, state],
-) -> state:
-    mon_state = state.OK
+    target_states: Optional[Container[str]],
+    states_map: Mapping[str, State],
+) -> State:
+    mon_state = State.OK
     if target_states is not None and interface_status not in target_states:
-        mon_state = state.CRIT
+        mon_state = State.CRIT
     mon_state = states_map.get(interface_status, mon_state)
     return mon_state
 
@@ -940,17 +942,17 @@ def _check_speed(interface: Interface, targetspeed: Optional[int]) -> Result:
         speed_expected = ("" if (targetspeed is None or int(interface.speed) == targetspeed) else
                           " (expected: %s)" % render.nicspeed(targetspeed / 8))
         return Result(
-            state=state.WARN if speed_expected else state.OK,
+            state=State.WARN if speed_expected else State.OK,
             summary=f"Speed: {speed_actual}{speed_expected}",
         )
 
     if targetspeed:
         return Result(
-            state=state.OK,
+            state=State.OK,
             summary="Speed: %s (assumed)" % render.nicspeed(targetspeed / 8),
         )
 
-    return Result(state=state.OK, summary="Speed: %s" % (interface.speed_as_text or "unknown"))
+    return Result(state=State.OK, summary="Speed: %s" % (interface.speed_as_text or "unknown"))
 
 
 # TODO: Check what the relationship between Errors, Discards, and ucast/mcast actually is.
@@ -1127,7 +1129,7 @@ def _interface_name(
 ) -> Iterable[Result]:
     if group_name:
         # The detailed group info is added later on
-        yield Result(state=state.OK, summary=group_name)
+        yield Result(state=State.OK, summary=group_name)
         return
 
     if "infotext_format" in params:
@@ -1175,7 +1177,7 @@ def _interface_name(
 
     if info_interface:
         yield Result(
-            state=state.OK,
+            state=State.OK,
             summary=info_interface,
         )
 
@@ -1183,7 +1185,7 @@ def _interface_name(
 def _interface_mac(*, interface: Interface) -> Iterable[Result]:
     if interface.phys_address:
         yield Result(
-            state=state.OK,
+            state=State.OK,
             summary='MAC: %s' % render_mac_address(interface.phys_address),
         )
 
@@ -1202,11 +1204,75 @@ def _interface_status(
         target_oper_states = params.get("state")
         target_admin_states = params.get("admin_state")
 
+    state_mapping_type, state_mappings = params.get(
+        "state_mappings",
+        (
+            "independent_mappings",
+            {},
+        ),
+    )
+    yield from _check_oper_and_admin_state(
+        interface,
+        state_mapping_type=state_mapping_type,
+        state_mappings=state_mappings,
+        target_oper_states=target_oper_states,
+        target_admin_states=target_admin_states,
+    )
+
+
+def _check_oper_and_admin_state(
+    interface: Interface,
+    state_mapping_type: Literal["independent_mappings", "combined_mappings"],
+    state_mappings: Union[Iterable[Tuple[str, str, int]],  #
+                          Mapping[str, Iterable[Tuple[Iterable[str], int]]]],
+    target_oper_states: Optional[Container[str]],
+    target_admin_states: Optional[Container[str]],
+) -> Iterable[Result]:
+    if combined_mon_state := _check_oper_and_admin_state_combined(
+            interface,
+            state_mapping_type,
+            state_mappings,
+    ):
+        yield combined_mon_state
+        return
+
+    map_oper_states, map_admin_states = _get_oper_and_admin_states_maps_independent(
+        state_mapping_type,
+        state_mappings,
+    )
+
+    yield from _check_oper_and_admin_state_independent(
+        interface,
+        target_oper_states=target_oper_states,
+        target_admin_states=target_admin_states,
+        map_oper_states=map_oper_states,
+        map_admin_states=map_admin_states,
+    )
+
+
+def _get_oper_and_admin_states_maps_independent(
+    state_mapping_type: Literal["combined_mappings", "independent_mappings"],
+    state_mappings: Union[Iterable[Tuple[str, str, int]],  #
+                          Mapping[str, Iterable[Tuple[Iterable[str], int]]]],
+) -> Tuple[Iterable[Tuple[Iterable[str], int]], Iterable[Tuple[Iterable[str], int]]]:
+    if state_mapping_type == "independent_mappings":
+        assert isinstance(state_mappings, Mapping)
+        return state_mappings.get("map_operstates", []), state_mappings.get("map_admin_states", [])
+    return [], []
+
+
+def _check_oper_and_admin_state_independent(
+    interface: Interface,
+    target_oper_states: Optional[Container[str]],
+    target_admin_states: Optional[Container[str]],
+    map_oper_states: Iterable[Tuple[Iterable[str], int]],
+    map_admin_states: Iterable[Tuple[Iterable[str], int]],
+) -> Iterable[Result]:
     yield Result(
         state=_check_status(
             interface.oper_status,
             target_oper_states,
-            _get_map_states(params.get("map_operstates", [])),
+            _get_map_states(map_oper_states),
         ),
         summary=f"({interface.oper_status_name})",
         details=f"Operational state: {interface.oper_status_name}",
@@ -1219,9 +1285,40 @@ def _interface_status(
         state=_check_status(
             str(interface.admin_status),
             target_admin_states,
-            _get_map_states(params.get("map_admin_states", [])),
+            _get_map_states(map_admin_states),
         ),
         summary=f"Admin state: {statename(interface.admin_status)}",
+    )
+
+
+def _check_oper_and_admin_state_combined(
+    interface: Interface,
+    state_mapping_type: Literal["combined_mappings", "independent_mappings"],
+    state_mappings: Union[Iterable[Tuple[str, str, int]],  #
+                          Mapping[str, Iterable[Tuple[Iterable[str], int]]]],
+) -> Optional[Result]:
+    if interface.admin_status is None:
+        return None
+    if state_mapping_type == "independent_mappings":
+        return None
+    assert not isinstance(state_mappings, Mapping)
+    if (combined_mon_state := {
+        (
+            oper_state,
+            admin_state,
+        ): State(mon_state)  #
+            for oper_state, admin_state, mon_state in state_mappings
+    }.get((
+            interface.oper_status,
+            interface.admin_status,
+    ))) is None:
+        return None
+    return Result(
+        state=combined_mon_state,
+        summary=
+        f"(op. state: {interface.oper_status_name}, admin state: {statename(interface.admin_status)})",
+        details=
+        f"Operational state: {interface.oper_status_name}, Admin state: {statename(interface.admin_status)}",
     )
 
 
@@ -1250,7 +1347,7 @@ def _group_members(
         infos_group.append("[%s%s]" % (", ".join(member_info), nodeinfo))
 
     yield Result(
-        state=state.OK,
+        state=State.OK,
         summary='Members: %s' % ' '.join(infos_group),
     )
 

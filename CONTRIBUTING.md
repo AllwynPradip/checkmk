@@ -117,7 +117,7 @@ To set up the development environment do the following:
     execution of the checkers with `git commit -n`. Please don't push unchecked changes as this will
     introduce delays and additional work.
 
-    Additional helpers can be found in `scripts/`. One noteable one is `scripts/check-current-commit`
+    Additional helpers can be found in `scripts/`. One notable one is `scripts/check-current-commit`
     which checks your commit *after* it has been made. You can then fix errors and amend or squash
     your commit. You can also use this script in a rebase like such:
 
@@ -134,7 +134,9 @@ Once done, you are ready for the next chapter.
 
 1. Create your feature branch
 
-    The number one rule is to *put each piece of work on its own branch*. In most of the cases your development will be based on the *master* branch. So lets start like this:
+    The number one rule is to *put each piece of work on its own branch*. Please note that in
+    general, we only accept changes which are based on the *master* branch. There is one (rare)
+    exception, namely bugfixes which *only* affect older branches. So lets start like this:
 
     ```console
     $ git checkout master
@@ -251,7 +253,7 @@ to execute the tests for you, but that takes several minutes for each try.
 
 ## Guidelines for coding check plug-ins
 
-Respect the [Guidelines for coding check plug-ins](https://checkmk.com/cms_dev_guidelines.html).
+Respect the [Guidelines for coding check plug-ins](https://docs.checkmk.com/master/en/dev_guidelines.html).
 
 ## Commit messages
 
@@ -330,9 +332,10 @@ understand which names are really available and needed in the current namespace.
     ```python
     def get_status(file):
         if not os.path.exists(file):
-            print "file not found"
+            print("file not found")
             sys.exit(1)
-        return open(file).readline()
+        with open(file) as f:
+            return f.readline()
     ```
 
     vs.
@@ -340,9 +343,10 @@ understand which names are really available and needed in the current namespace.
     ```python
     def get_status(file):
         try:
-            return open(file).readline()
-        except EnvironmentError as e:
-            print "Unable to open file: %s" % e
+            with open(file) as f:
+                return f.readline()
+        except OSError as e:
+            print("Unable to open file: %s" % e)
             sys.exit(1)
     ```
 
@@ -414,7 +418,7 @@ understand which names are really available and needed in the current namespace.
       downsides.
     * Tuples of a fixed length: Slightly better, they have a fixed number of
       slots and are immutable. Still, one has no clue what a slot should mean.
-    * `collectons.namedtuple`: A bit better than tuples of a fixed length, at
+    * `collections.namedtuple`: A bit better than tuples of a fixed length, at
       least the slots have names now. Still no clue about the valid values of a
       slot.
     * `typing.NamedTuple`: Kind of OK, slots have names and a type now. Still
@@ -1037,7 +1041,14 @@ one name for one thing and use it consistently in all translations.
 ## Copyright and Licensing
 
 The open source part of Checkmk is licensed under the terms of the [GNU GPLv2
-License](COPYING). Any code brought in must be compatible with those terms.
+License](COPYING). Any new code must be compatible with those terms.
 
-You need to make sure that the code you send us in your pull request is GPLv2
-compatible.
+To ensure that, please always add our current licensing information to any new
+files you want to contribute. The licensing information can be found at the beginning
+of already existing files and looks something like
+
+```python
+# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
+# conditions defined in the file COPYING, which is part of this source code package.
+```

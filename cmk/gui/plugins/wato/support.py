@@ -7,7 +7,7 @@
 from cmk.gui.i18n import _
 from cmk.gui.valuespec import (
     HTTPUrl,
-    TextAscii,
+    TextInput,
 )
 
 from cmk.gui.plugins.wato import (
@@ -59,11 +59,10 @@ class ConfigVariableCrashReportTarget(ConfigVariable):
         return "crash_report_target"
 
     def valuespec(self):
-        return TextAscii(
+        return TextInput(
             title=_("Crash report fallback mail address"),
             help=_("By default crash reports will be sent to our crash reporting server. In case "
                    "this fails for some reason, the crash reports can be sent by mail to the "
                    "address configured here."),
             size=80,
-            attrencode=True,
         )

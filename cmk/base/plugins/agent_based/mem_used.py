@@ -5,11 +5,12 @@
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import time
-from typing import Dict, List, Mapping, NamedTuple, Optional, Tuple, Union
+from typing import List, Mapping, NamedTuple, Optional, Tuple, Union
 
-from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult
+from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult, InventoryResult
 
 from .agent_based_api.v1 import (
+    Attributes,
     get_average,
     get_value_store,
     Metric,
@@ -31,10 +32,8 @@ class MemBytes(NamedTuple('MemBytes', [('bytes', int), ('kb', float), ('mb', flo
         return render.bytes(self.bytes)
 
 
-def discover_mem_used(section: Dict[str, int]) -> DiscoveryResult:
-    if ("MemTotal" in section and "PageTotal" not in section and
-            not memory.is_linux_section(section)  # handled by more modern check
-       ):
+def discover_mem_used(section: memory.SectionMemUsed) -> DiscoveryResult:
+    if "MemTotal" in section:
         yield Service()
 
 
@@ -62,10 +61,13 @@ def _get_total_usage(
     return totalused, "Total (%s)" % " + ".join(details)
 
 
-def check_mem_used(params: Mapping, section: Mapping[str, int]) -> CheckResult:
+def check_mem_used(params: Mapping, section: memory.SectionMemUsed) -> CheckResult:
     # we have used a parse function that creates bytes, but this function
     # still expects kB:
-    meminfo = {k: v / 1024.0 for k, v in section.items()}
+    meminfo = {
+        k: v / 1024.0  # type: ignore[operator] # `v` is int, not object ...
+        for k, v in section.items()
+    }
 
     if isinstance(params, tuple):
         params = {"levels": params}
@@ -212,4 +214,20 @@ register.check_plugin(
     check_function=check_mem_used,
     check_default_parameters={"levels": (80.0, 90.0)},
     check_ruleset_name="memory",
+)
+
+
+def inventory_mem_used(section: memory.SectionMemUsed) -> InventoryResult:
+    yield Attributes(
+        path=["hardware", "memory"],
+        inventory_attributes={
+            "total_ram_usable": section["MemTotal"],
+            "total_swap": section["SwapTotal"],
+        },
+    )
+
+
+register.inventory_plugin(
+    name="mem_used",
+    inventory_function=inventory_mem_used,
 )

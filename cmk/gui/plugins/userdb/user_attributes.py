@@ -11,7 +11,7 @@ from cmk.gui.valuespec import (
     FixedValue,
     Alternative,
     Transform,
-    TextAscii,
+    TextInput,
     AbsoluteDate,
     Tuple,
     Dictionary,
@@ -114,7 +114,7 @@ class StartURLUserAttribute(UserAttribute):
                         title=_("Use the default start URL"),
                         totext="",
                     ),
-                    TextAscii(
+                    TextInput(
                         title=_("Use this custom start URL"),
                         help=
                         _("When you point your browser to the Check_MK GUI, usually the dashboard "
@@ -122,7 +122,6 @@ class StartURLUserAttribute(UserAttribute):
                           "URL you like here."),
                         size=80,
                         default_value="dashboard.py",
-                        attrencode=True,
                         allow_empty=False,
                         validate=utils.validate_start_url,
                     ),

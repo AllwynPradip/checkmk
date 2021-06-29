@@ -7,6 +7,7 @@
 import glob
 import logging
 import os
+from contextlib import suppress
 from pathlib import Path
 import pipes
 import pwd
@@ -15,6 +16,7 @@ import subprocess
 import sys
 import time
 import urllib.parse
+import pytest
 
 from typing import Union
 
@@ -26,7 +28,6 @@ from testlib.utils import (
     cmc_path,
     virtualenv_path,
     current_base_branch_name,
-    api_str_type,
 )
 from testlib.web_session import CMKWebSession
 from testlib.version import CMKVersion
@@ -256,15 +257,25 @@ class Site:
                 "sudo", "su", "-l", self.id, "-c",
                 pipes.quote(" ".join(pipes.quote(p) for p in cmd))
             ]))
-        sys.stdout.write("Executing: %s\n" % cmd_txt)
+        logger.info("Executing: %s", cmd_txt)
         kwargs["shell"] = True
         return subprocess.Popen(cmd_txt, *args, **kwargs)
 
     def omd(self, mode: str, *args: str) -> int:
         sudo, site_id = ([], []) if self._is_running_as_site_user() else (["sudo"], [self.id])
         cmd = sudo + ["/usr/bin/omd", mode] + site_id + list(args)
-        sys.stdout.write("Executing: %s\n" % subprocess.list2cmdline(cmd))
-        return subprocess.call(cmd)
+        logger.info("Executing: %s", subprocess.list2cmdline(cmd))
+        p = subprocess.Popen(cmd,
+                             stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT,
+                             encoding="utf-8")
+        stdout, _stderr = p.communicate()
+        logger.debug("Exit code: %d", p.returncode)
+        if stdout:
+            logger.debug("Output:")
+        for line in stdout.strip().split("\n"):
+            logger.debug("> %s", line)
+        return p.returncode
 
     def path(self, rel_path):
         return os.path.join(self.root, rel_path)
@@ -397,6 +408,7 @@ class Site:
             self._enable_cmc_core_dumps()
             self._enable_cmc_debug_logging()
             self._enable_gui_debug_logging()
+            self._tune_nagios()
 
         if self.install_test_python_modules:
             self._install_test_python_modules()
@@ -405,7 +417,7 @@ class Site:
             self._update_with_f12_files()
 
         if not os.path.exists(self.result_dir()):
-            self.makedirs(self.result_dir())
+            os.makedirs(self.result_dir())
 
     def _update_with_f12_files(self):
         paths = [
@@ -495,7 +507,7 @@ class Site:
                 'cmk.carbon': 7,
                 'cmk.core': 7,
                 'cmk.downtime': 7,
-                'cmk.helper': 7,
+                'cmk.helper': 6,
                 'cmk.livestatus': 7,
                 'cmk.notification': 7,
                 'cmk.rrd': 7,
@@ -513,6 +525,16 @@ class Site:
                 "cmk.web.automations": 10,
                 "cmk.web.background-job": 10,
             })
+
+    def _tune_nagios(self):
+        # We want nagios to process queued external commands as fast as possible.  Even if we
+        # set command_check_interval to -1, nagios is doing some sleeping in between the
+        # command processing. We reduce the sleep time here to make it a little faster.
+        self.write_file(
+            "etc/nagios/nagios.d/zzz-test-tuning.cfg", "log_passive_checks=1\n"
+            "service_inter_check_delay_method=n\n"
+            "host_inter_check_delay_method=n\n"
+            "sleep_time=0.05\n")
 
     def _install_test_python_modules(self):
         venv = virtualenv_path()
@@ -565,10 +587,13 @@ class Site:
                     #print("= BEGIN PROCESSES FAIL ==============================")
                     #self.execute(["ps", "aux"]).wait()
                     #print("= END PROCESSES FAIL ==============================")
-                    raise Exception("Could not start site %s" % self.id)
+                    logger.warning("Could not start site %s. Stop waiting.", self.id)
+                    break
                 logger.warning("The site %s is not running yet, sleeping... (round %d)", self.id, i)
                 sys.stdout.flush()
                 time.sleep(0.2)
+
+            self.ensure_running()
 
         assert os.path.ismount(self.path("tmp")), \
             "The site does not have a tmpfs mounted! We require this for good performing tests"
@@ -600,6 +625,10 @@ class Site:
 
     def exists(self):
         return os.path.exists("/omd/sites/%s" % self.id)
+
+    def ensure_running(self):
+        if not self.is_running():
+            pytest.exit("Site was not running completely while it should. Enforcing stop.")
 
     def is_running(self):
         return self.execute(["/usr/bin/omd", "status", "--bare"], stdout=open(os.devnull,
@@ -709,11 +738,7 @@ class Site:
                         {
                             'condition': {},
                             'options': {},
-                            # TODO: This should obviously be 'str' in Python 3, but the GUI is
-                            # currently in Python 2 and expects byte strings. Change this once
-                            # the GUI is based on Python 3.
-                            'value': [(api_str_type('TESTGROUP'),
-                                       (api_str_type('*gwia*'), api_str_type('')))]
+                            'value': [('TESTGROUP', ('*gwia*', ''))]
                         },
                     ],
                 }
@@ -743,7 +768,7 @@ class Site:
             start_again = True
             self.stop()
 
-        sys.stdout.write("Have livestatus port lock\n")
+        logger.info("Have livestatus port lock")
         self.set_config("LIVESTATUS_TCP", "on")
         self._gather_livestatus_port()
         self.set_config("LIVESTATUS_TCP_PORT", str(self._livestatus_port))
@@ -752,7 +777,7 @@ class Site:
         if start_again:
             self.start()
 
-        sys.stdout.write("After livestatus port lock\n")
+        logger.info("After livestatus port lock")
 
     def _gather_livestatus_port(self):
         if self.reuse and self.exists():
@@ -782,18 +807,26 @@ class Site:
             return
         logger.info("Saving to %s", self.result_dir())
 
-        shutil.copytree(self.path("var/log"), "%s/logs" % self.result_dir())
+        os.makedirs(self.result_dir(), exist_ok=True)
+
+        with suppress(FileNotFoundError):
+            shutil.copy(self.path("junit.xml"), self.result_dir())
+
+        shutil.copytree(self.path("var/log"),
+                        "%s/logs" % self.result_dir(),
+                        ignore_dangling_symlinks=True,
+                        ignore=shutil.ignore_patterns('.*'))
 
         for nagios_log_path in glob.glob(self.path("var/nagios/*.log")):
-            shutil.copytree(nagios_log_path, "%s/logs" % self.result_dir())
+            shutil.copy(nagios_log_path, "%s/logs" % self.result_dir())
 
-        cmc_core_dump = self.path("var/check_mk/core/core")
-        if os.path.exists(cmc_core_dump):
-            shutil.copytree(cmc_core_dump, "%s/cmc_core_dump" % self.result_dir())
+        with suppress(FileNotFoundError):
+            shutil.copy(self.path("var/check_mk/core/core"), "%s/cmc_core_dump" % self.result_dir())
 
-        cmc_core_dump = self.path("var/check_mk/crashes")
-        if os.path.exists(cmc_core_dump):
-            shutil.copytree(cmc_core_dump, "%s/crashes" % self.result_dir())
+        with suppress(FileNotFoundError):
+            shutil.copytree(self.path("var/check_mk/crashes"),
+                            "%s/crashes" % self.result_dir(),
+                            ignore=shutil.ignore_patterns('.*'))
 
     def result_dir(self):
         return os.path.join(os.environ.get("RESULT_PATH", self.path("results")), self.id)

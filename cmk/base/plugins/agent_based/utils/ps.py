@@ -16,8 +16,8 @@ from typing import (
     Union,
 )
 
-import collections
 import contextlib
+from dataclasses import dataclass
 import re
 import time
 
@@ -41,13 +41,46 @@ from ..agent_based_api.v1 import (
     State as state,
 )
 
-ps_info = collections.namedtuple(
-    "ps_info", ('user', 'virtual', 'physical', 'cputime', 'process_id', 'pagefile', 'usermode_time',
-                'kernelmode_time', 'handles', 'threads', 'uptime', 'cgroup'))
+from . import cpu, memory
 
-ps_info.__new__.__defaults__ = (None,) * len(ps_info._fields)  # type: ignore[attr-defined]
 
-Section = Tuple[int, List[Tuple[ps_info, List[str]]]]
+@dataclass(frozen=True)
+class PsInfo:
+    user: Optional[str] = None
+    virtual: Optional[int] = None
+    physical: Optional[int] = None
+    # TODO: not all of these should be strings, I guess.
+    cputime: Optional[str] = None
+    process_id: Optional[str] = None
+    pagefile: Optional[str] = None
+    usermode_time: Optional[str] = None
+    kernelmode_time: Optional[str] = None
+    handles: Optional[str] = None
+    threads: Optional[str] = None
+    uptime: Optional[str] = None
+    cgroup: Optional[str] = None
+
+    _FIELDS = ('user', 'virtual', 'physical', 'cputime', 'process_id', 'pagefile', 'usermode_time',
+               'kernelmode_time', 'handles', 'threads', 'uptime', 'cgroup')
+
+    @classmethod
+    def from_raw(cls, raw: str) -> 'PsInfo':
+        match = regex(r'^\((.*)\)$').match(raw)
+        if match is None:
+            raise ValueError(raw)
+
+        kwargs = dict(zip(cls._FIELDS, match.group(1).split(',')))
+        virt = kwargs.pop('virtual', '')
+        phys = kwargs.pop('physical', '')
+
+        return cls(
+            virtual=int(virt) if virt else None,
+            physical=int(phys) if phys else None,
+            **kwargs,
+        )
+
+
+Section = Tuple[int, List[Tuple[PsInfo, List[str]]]]
 
 
 def get_discovery_specs(params: Sequence[Mapping[str, Any]]):
@@ -68,6 +101,12 @@ def host_labels_ps(
     params: Sequence[Mapping[str, Any]],
     section: Section,
 ) -> HostLabelGenerator:
+    """Host label function
+
+    Labels:
+        This function creates labels according to the user configuration.
+
+    """
     specs = get_discovery_specs(params)
     for process_info, command_line in section[1]:
         for _servicedesc, pattern, userspec, cgroupspec, labels, _default_params in specs:
@@ -94,14 +133,6 @@ def maxx(a, b):
     if b is None:
         return a
     return max(a, b)
-
-
-def ps_info_tuple(entry):
-    ps_tuple_re = regex(r"^\((.*)\)$")
-    matched_ps_info = ps_tuple_re.match(entry)
-    if matched_ps_info:
-        return ps_info(*matched_ps_info.group(1).split(","))
-    return False
 
 
 def replace_service_description(service_description, match_groups, pattern):
@@ -184,28 +215,19 @@ def format_process_list(processes, html_output):
             return "%.1f%s" % (value, unit)
         return "%s%s" % (value, unit)
 
+    # keys to output and default values:
+    headers = dict.fromkeys((key for process in processes for key, _value in process), '')
+
     if html_output:
         table_bracket = "<table>%s</table>"
         line_bracket = "<tr>%s</tr>"
         cell_bracket = "<td>%.0s%s</td>"
         cell_seperator = ""
-
-        headers = []
-        headers_found = set()
-
-        for process in processes:
-            for key, _value in process:
-                if key not in headers_found:
-                    headers.append(key)
-                    headers_found.add(key)
+        header_line = "<tr><th>" + "</th><th>".join(headers) + "</th></tr>"
 
         # make sure each process has all fields from the table
-        processes_filled = []
-        for process in processes:
-            dictified = dict(process)
-            processes_filled.append([(key, dictified.get(key, "")) for key in headers])
-        processes = processes_filled
-        header_line = "<tr><th>" + "</th><th>".join(headers) + "</th></tr>"
+        processes = [{**headers, **dict(process)}.items() for process in processes]
+
     else:
         table_bracket = "%s"
         line_bracket = "%s\r\n"
@@ -214,10 +236,9 @@ def format_process_list(processes, html_output):
         header_line = ""
 
     return table_bracket % (header_line + "".join([
-        line_bracket %
-        cell_seperator.join([cell_bracket % (key, format_value(value))
-                             for key, value in process])
-        for process in processes
+        line_bracket % cell_seperator.join([
+            cell_bracket % (key, format_value(value)) for key, value in process if key in headers
+        ]) for process in processes
     ]))
 
 
@@ -374,8 +395,8 @@ class ProcessAggregator:
 
 
 def process_capture(
-    # process_lines: (Node, ps_info, cmd_line)
-    process_lines: List[Tuple[Optional[str], ps_info, List[str]]],
+    # process_lines: (Node, PsInfo, cmd_line)
+    process_lines: List[Tuple[Optional[str], PsInfo, List[str]]],
     params: Mapping[str, Any],
     cpu_cores: int,
     value_store: MutableMapping[str, Any],
@@ -404,13 +425,15 @@ def process_capture(
             process.append(("name", (command_line[0], "")))
 
         # extended performance data: virtualsize, residentsize, %cpu
-        if all(process_info[1:4]):
-            process.append(("user", (process_info.user, "")))
-            process.append(("virtual size", (int(process_info.virtual), "kB")))
-            process.append(("resident size", (int(process_info.physical), "kB")))
+        if (process_info.user is not None and process_info.virtual is not None and
+                process_info.physical is not None):
 
-            ps_aggregator.virtual_size += int(process_info.virtual)  # kB
-            ps_aggregator.resident_size += int(process_info.physical)  # kB
+            process.append(("user", (process_info.user, "")))  # type: ignore[args-type]
+            process.append(("virtual size", (process_info.virtual, "kB")))
+            process.append(("resident size", (process_info.physical, "kB")))
+
+            ps_aggregator.virtual_size += process_info.virtual  # kB
+            ps_aggregator.resident_size += process_info.physical  # kB
 
             ps_aggregator.lifetimes(process_info, process)
             ps_aggregator.cpu_usage(value_store, process_info, process)
@@ -424,15 +447,12 @@ def process_capture(
     return ps_aggregator
 
 
-SectionMem = Dict[str, float]
-SectionCpu = Dict[str, Union[float, List[float]]]
-
-
 def discover_ps(
     params: Sequence[Mapping[str, Any]],
     section_ps: Optional[Section],
-    section_mem: Optional[SectionMem],
-    section_cpu: Optional[SectionCpu],
+    section_mem: Optional[memory.SectionMem],
+    section_mem_used: Optional[Dict[str, memory.SectionMem]],
+    section_cpu: Optional[cpu.Section],
 ) -> DiscoveryResult:
     if not section_ps:
         return
@@ -500,9 +520,9 @@ def check_ps_common(
     label: str,
     item: str,
     params: Mapping[str, Any],
-    process_lines: List[Tuple[Optional[str], ps_info, List[str]]],
+    process_lines: List[Tuple[Optional[str], PsInfo, List[str]]],
     cpu_cores: int,
-    total_ram: Optional[float],
+    total_ram_map: Mapping[str, float],
 ) -> CheckResult:
     with unused_value_remover(get_value_store(), "collective") as value_store:
         processes = process_capture(process_lines, params, cpu_cores, value_store)
@@ -511,8 +531,7 @@ def check_ps_common(
 
     yield from memory_check(processes, params)
 
-    if processes.resident_size and "resident_levels_perc" in params:
-        yield from memory_perc_check(processes, params, total_ram)
+    yield from memory_perc_check(processes, params, total_ram_map)
 
     # CPU
     if processes.count:
@@ -528,7 +547,7 @@ def check_ps_common(
     if processes.min_elapsed is not None and processes.max_elapsed is not None:
         yield from uptime_check(processes.min_elapsed, processes.max_elapsed, params)
 
-    if params.get("process_info"):
+    if params.get("process_info") and processes.count:
         yield Result(
             state=state.OK,
             notice=format_process_list(processes, params["process_info"] == "html"),
@@ -553,7 +572,7 @@ def count_check(
     if processes.running_on_nodes:
         yield Result(
             state=state.OK,
-            notice="Running on nodes %s" % ", ".join(sorted(processes.running_on_nodes)),
+            summary="Running on nodes %s" % ", ".join(sorted(processes.running_on_nodes)),
         )
 
 
@@ -574,7 +593,6 @@ def memory_check(
             levels_upper=params.get(levels),
             render_func=render.bytes,
             label=label,
-            notice_only=True,
         )
         yield Metric(metric, size, levels=params.get(levels))
 
@@ -582,10 +600,17 @@ def memory_check(
 def memory_perc_check(
     processes: ProcessAggregator,
     params: Mapping[str, Any],
-    total_ram: Optional[float],
+    total_ram_map: Mapping[str, float],
 ) -> CheckResult:
     """Check levels that are in percent of the total RAM of the host"""
-    if not total_ram:
+    if not processes.resident_size or "resident_levels_perc" not in params:
+        return
+
+    nodes = processes.running_on_nodes or ("",)
+
+    try:
+        total_ram = sum(total_ram_map[node] for node in nodes)
+    except KeyError:
         yield Result(
             state=state.UNKNOWN,
             summary="Percentual RAM levels configured, but total RAM is unknown",
@@ -598,7 +623,6 @@ def memory_perc_check(
         levels_upper=params["resident_levels_perc"],
         render_func=render.percent,
         label="Percentage of total RAM",
-        notice_only=True,
     )
 
 
@@ -677,22 +701,21 @@ def uptime_check(
             levels_upper=params.get("max_age"),
             render_func=render.timespan,
             label="Running for",
-            notice_only=True,
         )
     else:
         yield from check_levels(
             min_elapsed,
+            metric_name="age_youngest",
             levels_lower=params.get("min_age"),
             render_func=render.timespan,
             label="Youngest running for",
-            notice_only=True,
         )
         yield from check_levels(
             max_elapsed,
+            metric_name="age_oldest",
             levels_upper=params.get("max_age"),
             render_func=render.timespan,
             label="Oldest running for",
-            notice_only=True,
         )
 
 
@@ -706,5 +729,4 @@ def handle_count_check(
         levels_upper=params.get("handle_count"),
         render_func=lambda d: str(int(d)),
         label="Process handles",
-        notice_only=True,
     )

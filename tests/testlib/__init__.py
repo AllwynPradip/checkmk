@@ -19,11 +19,10 @@ from typing import (
     Generator,
     MutableMapping,
     Optional,
-    Set,
 )
 
 import urllib3  # type: ignore[import]
-import freezegun  # type: ignore[import]
+import freezegun
 import pytest
 from _pytest.monkeypatch import MonkeyPatch
 
@@ -37,6 +36,7 @@ from testlib.site import Site, SiteFactory  # noqa: F401 # pylint: disable=unuse
 from testlib.version import CMKVersion  # noqa: F401 # pylint: disable=unused-import
 from testlib.web_session import CMKWebSession, APIError  # noqa: F401 # pylint: disable=unused-import
 from testlib.event_console import CMKEventConsole, CMKEventConsoleStatus  # noqa: F401 # pylint: disable=unused-import
+from testlib.compare_html import compare_html
 
 # Disable insecure requests warning message during SSL testing
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -271,7 +271,10 @@ def create_linux_test_host(request, web_fixture, site, hostname):
                 "tmp/check_mk/status_data/%s.gz" % hostname,
                 "var/check_mk/inventory/%s" % hostname,
                 "var/check_mk/inventory/%s.gz" % hostname,
-        ]:
+                "var/check_mk/autochecks/%s.mk" % hostname,
+                "tmp/check_mk/counters/%s" % hostname,
+                "tmp/check_mk/cache/%s" % hostname,
+        ] + [str(p) for p in Path("tmp/check_mk/data_source_cache/").glob(f"*/{hostname}")]:
             if os.path.exists(path):
                 site.delete_file(path)
 
@@ -308,34 +311,12 @@ class MissingCheckInfoError(KeyError):
 class BaseCheck(metaclass=abc.ABCMeta):
     """Abstract base class for Check and ActiveCheck"""
     def __init__(self, name):
-        import cmk.base.plugin_contexts  # pylint: disable=import-outside-toplevel
-        self.current_host = cmk.base.plugin_contexts.current_host
-        self.current_service = cmk.base.plugin_contexts.current_service
         self.name = name
         self.info = {}
         # we cant use the current_host context, b/c some tests rely on a persistent
         # item state across several calls to run_check
+        import cmk.base.plugin_contexts  # pylint: disable=import-outside-toplevel
         cmk.base.plugin_contexts._hostname = 'non-existent-testhost'
-
-    def _get_service(self, item: Optional[str]):
-        from cmk.utils.type_defs import CheckPluginName
-        from cmk.utils.check_utils import maincheckify
-        from cmk.base.check_utils import Service
-
-        description = self.info["service_description"]
-
-        assert description, '%r is missing a service_description' % self.name
-        if item is not None:
-            assert "%s" in description, ("Missing '%%s' formatter in service description of %r" %
-                                         self.name)
-            description = description % item
-
-        return Service(
-            item=item,
-            check_plugin_name=CheckPluginName(maincheckify(self.name)),
-            description=description,
-            parameters={},
-        )
 
 
 class Check(BaseCheck):
@@ -366,35 +347,13 @@ class Check(BaseCheck):
         if not disco_func:
             raise MissingCheckInfoError("Check '%s' " % self.name +
                                         "has no discovery function defined")
-        with self.current_host('non-existent-testhost', write_state=False):
-            return disco_func(info)
+        return disco_func(info)
 
     def run_check(self, item, params, info):
         check_func = self.info.get("check_function")
         if not check_func:
             raise MissingCheckInfoError("Check '%s' " % self.name + "has no check function defined")
-        with self.current_service(self._get_service(item)):
-            return check_func(item, params, info)
-
-    #def run_parse_with_walk(self, walk_name):
-    #    if "parse_function" not in self.info:
-    #        raise Exception("This check has no parse function defined")
-
-    #    return self.info["parse_function"]()
-
-    #def run_discovery_with_walk(self, walk_name):
-    #     # TODO: use standard walk processing code
-    #    info = self._get_walk(walk_name)
-
-    #    # TODO: use standard sanitizing code
-    #    return self.info["inventory_function"](info)
-
-    #def run_check_with_walk(self, walk_name, item, params):
-    #     # TODO: use standard walk processing code
-    #    info = self._get_walk(walk_name)
-
-    #    # TODO: use standard sanitizing code
-    #    return self.info["check_function"](item, params, info)
+        return check_func(item, params, info)
 
 
 class ActiveCheck(BaseCheck):
@@ -406,8 +365,7 @@ class ActiveCheck(BaseCheck):
         self.info = config.active_check_info[self.name[len('check_'):]]
 
     def run_argument_function(self, params):
-        with self.current_host('non-existent-testhost', write_state=False):
-            return self.info['argument_function'](params)
+        return self.info['argument_function'](params)
 
     def run_service_description(self, params):
         return self.info['service_description'](params)

@@ -54,7 +54,7 @@ Global variables:
     nagios_illegal_chars Characters not allowed to be used in service
                          descriptions. Can be used in discovery functions to
                          remove unwanted characters from a string. The unwanted
-                         chars default are: `;~!$%^&*|\'"<>?,()=
+                         chars default are: `;~!$%^&*|\'"<>?,=
 
 
     OID_BIN              TODO
@@ -315,12 +315,11 @@ def get_relative_date_human_readable(timestamp: float) -> str:
 
 set_item_state = _item_state.set_item_state
 get_item_state = _item_state.get_item_state
-get_all_item_states = _item_state.get_all_item_states
 clear_item_state = _item_state.clear_item_state
-clear_item_states_by_full_keys = _item_state.clear_item_states_by_full_keys
+
 get_rate = _item_state.get_rate
 get_average = _item_state.get_average
-# TODO: Cleanup checks and deprecate this
+
 last_counter_wrap = _item_state.last_counter_wrap
 
 SKIP = _item_state.SKIP
@@ -602,7 +601,7 @@ def get_parsed_item_data(check_function: Callable) -> Callable:
     In case of item not existing as a key in parsed or parsed[item]
     evaluating to False the decorator gives an empty return leading to
     cmk.base returning 3 (unknown state) with an item not found message
-    (see cmk/base/checking.py).
+    (see cmk/base/agent_based/checking.py).
 
     WATCH OUT:
     This will not work if valid item data evaluates to False (such as a

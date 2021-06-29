@@ -17,7 +17,7 @@ import cmk.gui.config as config
 import cmk.gui.log as log
 import cmk.gui.background_job as background_job
 from cmk.gui.i18n import _, _l
-from cmk.gui.globals import g, html, request
+from cmk.gui.globals import g, html, request, timeout_manager, transactions
 from cmk.gui.utils.html import HTML
 from cmk.gui.breadcrumb import Breadcrumb
 from cmk.gui.permissions import (
@@ -26,7 +26,7 @@ from cmk.gui.permissions import (
     permission_registry,
     Permission,
 )
-from cmk.gui.utils.urls import makeuri_contextless, make_confirm_link
+from cmk.gui.utils.urls import makeuri_contextless, make_confirm_link, makeactionuri
 
 
 @permission_section_registry.register
@@ -109,8 +109,8 @@ class GUIBackgroundProcess(background_job.BackgroundProcess):
         self._log_path_hint = _("More information can be found in ~/var/log/web.log")
 
         # Disable html request timeout
-        if html:
-            html.disable_request_timeout()
+        if timeout_manager:
+            timeout_manager.disable_timeout()
 
         # Close livestatus connections inherited from the parent process
         if g:
@@ -376,7 +376,8 @@ class JobRenderer:
         if job_status.get("may_stop"):
             html.icon_button(
                 make_confirm_link(
-                    url=html.makeactionuri([(ActionHandler.stop_job_var, job_id)]),
+                    url=makeactionuri(request, transactions,
+                                      [(ActionHandler.stop_job_var, job_id)]),
                     message=_("Stop job %s%s?") % (job_id, cls._get_extra_info(job_status)),
                 ),
                 _("Stop this job"),
@@ -385,7 +386,8 @@ class JobRenderer:
         if job_status.get("may_delete"):
             html.icon_button(
                 make_confirm_link(
-                    url=html.makeactionuri([(ActionHandler.delete_job_var, job_id)]),
+                    url=makeactionuri(request, transactions,
+                                      [(ActionHandler.delete_job_var, job_id)]),
                     message=_("Delete job %s%s?") % (job_id, cls._get_extra_info(job_status)),
                 ),
                 _("Delete this job"),
@@ -416,7 +418,7 @@ class JobRenderer:
                 ensure_str(cmk.utils.render.timespan(job_status["estimated_duration"])))
         for left, right in [
             (_("Runtime"), runtime_info),
-            (_("PID"), job_status["pid"] or ""),
+            (_("PID"), str(job_status["pid"]) or ""),
             (_("Result"), "<br>".join(loginfo["JobResult"])),
         ]:
             if right is None:
@@ -515,11 +517,13 @@ class JobRenderer:
         # Actions
         html.open_td(css="job_actions")
         if job_status.get("may_stop"):
-            html.icon_button(html.makeactionuri([(ActionHandler.stop_job_var, job_id)]),
-                             _("Stop this job"), "disable_test")
+            html.icon_button(
+                makeactionuri(request, transactions, [(ActionHandler.stop_job_var, job_id)]),
+                _("Stop this job"), "disable_test")
         if job_status.get("may_delete"):
-            html.icon_button(html.makeactionuri([(ActionHandler.delete_job_var, job_id)]),
-                             _("Delete this job"), "delete")
+            html.icon_button(
+                makeactionuri(request, transactions, [(ActionHandler.delete_job_var, job_id)]),
+                _("Delete this job"), "delete")
         html.close_td()
 
         # Job ID
@@ -608,18 +612,18 @@ class ActionHandler:
 
     def confirm_dialog_opened(self):
         for action_var in [self.stop_job_var, self.delete_job_var]:
-            if html.request.has_var(action_var):
+            if request.has_var(action_var):
                 return True
         return False
 
     def handle_actions(self) -> bool:
-        if html.request.var(self.acknowledge_job_var):
+        if request.var(self.acknowledge_job_var):
             self.acknowledge_job()
             return True
-        if html.request.var(self.stop_job_var):
+        if request.var(self.stop_job_var):
             self.stop_job()
             return True
-        if html.request.var(self.delete_job_var):
+        if request.var(self.delete_job_var):
             self.delete_job()
             return True
         return False
@@ -634,7 +638,7 @@ class ActionHandler:
         return self._did_delete_job
 
     def acknowledge_job(self):
-        job_id = html.request.var(self.acknowledge_job_var)
+        job_id = request.var(self.acknowledge_job_var)
         job = GUIBackgroundJob(job_id)
         if not job.is_available():
             return
@@ -643,7 +647,7 @@ class ActionHandler:
         job.acknowledge(config.user.id)
 
     def stop_job(self):
-        job_id = html.request.var(self.stop_job_var)
+        job_id = request.var(self.stop_job_var)
         if not job_id:
             return
 
@@ -661,7 +665,7 @@ class ActionHandler:
             html.show_message(_("Background job has been stopped"))
 
     def delete_job(self):
-        job_id = html.request.var(self.delete_job_var)
+        job_id = request.var(self.delete_job_var)
         if not job_id:
             return
 

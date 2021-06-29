@@ -5,13 +5,13 @@
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import ast
+import copy
 import dataclasses
 import logging
 import time
 from pathlib import Path
 from typing import (
     Any,
-    Dict,
     Final,
     Iterable,
     Iterator,
@@ -25,6 +25,7 @@ from typing import (
     Union,
 )
 
+from cmk.utils.exceptions import OnError
 from cmk.utils.type_defs import HostName, SectionName, ServiceDetails, ServiceState
 
 import cmk.snmplib.snmp_table as snmp_table
@@ -39,7 +40,7 @@ from cmk.snmplib.type_defs import (
 
 from . import factory
 from ._base import Fetcher, Parser, Summarizer, verify_ipaddress
-from .cache import FileCache, FileCacheFactory, PersistedSections, SectionStore
+from .cache import FileCache, FileCacheFactory, MaxAge, PersistedSections, SectionStore
 from .host_sections import HostSections
 from .type_defs import Mode, SectionNameCollection
 
@@ -61,17 +62,14 @@ class SNMPPluginStoreItem(NamedTuple):
     inventory: bool
 
     @classmethod
-    def deserialize(cls, serialized: Dict[str, Any]) -> "SNMPPluginStoreItem":
-        try:
-            return cls(
-                [BackendSNMPTree.from_json(tree) for tree in serialized["trees"]],
-                SNMPDetectSpec.from_json(serialized["detect_spec"]),
-                serialized["inventory"],
-            )
-        except (LookupError, TypeError, ValueError) as exc:
-            raise ValueError(serialized) from exc
+    def deserialize(cls, serialized: Mapping[str, Any]) -> "SNMPPluginStoreItem":
+        return cls(
+            [BackendSNMPTree.from_json(tree) for tree in serialized["trees"]],
+            SNMPDetectSpec.from_json(serialized["detect_spec"]),
+            serialized["inventory"],
+        )
 
-    def serialize(self) -> Dict[str, Any]:
+    def serialize(self) -> Mapping[str, Any]:
         return {
             "trees": [tree.to_json() for tree in self.trees],
             "detect_spec": self.detect_spec.to_json(),
@@ -99,16 +97,13 @@ class SNMPPluginStore(Mapping[SectionName, SNMPPluginStoreItem]):
         return self._store.__len__()
 
     @classmethod
-    def deserialize(cls, serialized: Dict[str, Any]) -> "SNMPPluginStore":
-        try:
-            return cls({
-                SectionName(k): SNMPPluginStoreItem.deserialize(v)
-                for k, v in serialized["plugin_store"].items()
-            })
-        except (LookupError, TypeError, ValueError) as exc:
-            raise ValueError(serialized) from exc
+    def deserialize(cls, serialized: Mapping[str, Any]) -> "SNMPPluginStore":
+        return cls({
+            SectionName(k): SNMPPluginStoreItem.deserialize(v)
+            for k, v in serialized["plugin_store"].items()
+        })
 
-    def serialize(self) -> Dict[str, Any]:
+    def serialize(self) -> Mapping[str, Any]:
         return {"plugin_store": {str(k): v.serialize() for k, v in self.items()}}
 
 
@@ -117,25 +112,28 @@ class SectionMeta:
     """Metadata for the section names."""
     checking: bool
     disabled: bool
-    fetch_interval: Optional[int]  # time / sec
+    redetect: bool
+    fetch_interval: Optional[int]
 
     def __init__(
         self,
         *,
         checking: bool,
         disabled: bool,
+        redetect: bool,
         fetch_interval: Optional[int],
     ) -> None:
         # There does not seem to be a way to have kwonly dataclasses.
         self.checking = checking
         self.disabled = disabled
+        self.redetect = redetect
         self.fetch_interval = fetch_interval
 
-    def serialize(self) -> Dict[str, Any]:
+    def serialize(self) -> Mapping[str, Any]:
         return dataclasses.asdict(self)
 
     @classmethod
-    def deserialize(cls, serialized: Dict[str, Any]) -> "SectionMeta":
+    def deserialize(cls, serialized: Mapping[str, Any]) -> "SectionMeta":
         return cls(**serialized)
 
 
@@ -148,12 +146,16 @@ class SNMPFileCache(FileCache[SNMPRawData]):
     def _to_cache_file(raw_data: SNMPRawData) -> bytes:
         return (repr({str(k): v for k, v in raw_data.items()}) + "\n").encode("utf-8")
 
+    def make_path(self, mode: Mode) -> Path:
+        return self.base_path / mode.name.lower() / self.hostname
+
 
 class SNMPFileCacheFactory(FileCacheFactory[SNMPRawData]):
     def make(self, *, force_cache_refresh: bool = False) -> SNMPFileCache:
         return SNMPFileCache(
-            path=self.path,
-            max_age=0 if force_cache_refresh else self.max_age,
+            self.hostname,
+            base_path=self.base_path,
+            max_age=MaxAge.none() if force_cache_refresh else self.max_age,
             disabled=self.disabled,
             use_outdated=False if force_cache_refresh else self.disabled,
             simulation=self.simulation,
@@ -171,8 +173,8 @@ class SNMPFetcher(Fetcher[SNMPRawData]):
         self,
         file_cache: SNMPFileCache,
         *,
-        sections: Dict[SectionName, SectionMeta],
-        on_error: str,
+        sections: Mapping[SectionName, SectionMeta],
+        on_error: OnError,
         missing_sys_description: bool,
         do_status_data_inventory: bool,
         section_store_path: Union[Path, str],
@@ -202,34 +204,50 @@ class SNMPFetcher(Fetcher[SNMPRawData]):
     def inventory_sections(self) -> Set[SectionName]:
         return {name for name, data in self.plugin_store.items() if data.inventory}
 
+    @property
+    def section_store_path(self) -> Path:
+        return self._section_store.path
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}(" + ", ".join((
+            f"{type(self.file_cache).__name__}",
+            f"sections={self.sections!r}",
+            f"on_error={self.on_error!r}",
+            f"missing_sys_description={self.missing_sys_description!r}",
+            f"do_status_data_inventory={self.do_status_data_inventory!r}",
+            f"section_store_path={self.section_store_path!r}",
+            f"snmp_config={self.snmp_config!r}",
+        )) + ")"
+
     @classmethod
-    def _from_json(cls, serialized: Dict[str, Any]) -> 'SNMPFetcher':
+    def _from_json(cls, serialized: Mapping[str, Any]) -> 'SNMPFetcher':
         # The SNMPv3 configuration is represented by a tuple of different lengths (see
         # SNMPCredentials). Since we just deserialized from JSON, we have to convert the
         # list used by JSON back to a tuple.
         # SNMPv1/v2 communities are represented by a string: Leave it untouched.
-        if isinstance(serialized["snmp_config"]["credentials"], list):
-            serialized["snmp_config"]["credentials"] = tuple(
-                serialized["snmp_config"]["credentials"])
+        serialized_ = copy.deepcopy(dict(serialized))
+        if isinstance(serialized_["snmp_config"]["credentials"], list):
+            serialized_["snmp_config"]["credentials"] = tuple(
+                serialized_["snmp_config"]["credentials"])
 
         return cls(
-            file_cache=SNMPFileCache.from_json(serialized.pop("file_cache")),
+            file_cache=SNMPFileCache.from_json(serialized_.pop("file_cache")),
             sections={
                 SectionName(s): SectionMeta.deserialize(m)
-                for s, m in serialized["sections"].items()
+                for s, m in serialized_["sections"].items()
             },
-            on_error=serialized["on_error"],
-            missing_sys_description=serialized["missing_sys_description"],
-            do_status_data_inventory=serialized["do_status_data_inventory"],
-            section_store_path=serialized["section_store_path"],
-            snmp_config=SNMPHostConfig.deserialize(serialized["snmp_config"]),
+            on_error=OnError(serialized_["on_error"]),
+            missing_sys_description=serialized_["missing_sys_description"],
+            do_status_data_inventory=serialized_["do_status_data_inventory"],
+            section_store_path=serialized_["section_store_path"],
+            snmp_config=SNMPHostConfig.deserialize(serialized_["snmp_config"]),
         )
 
-    def to_json(self) -> Dict[str, Any]:
+    def to_json(self) -> Mapping[str, Any]:
         return {
             "file_cache": self.file_cache.to_json(),
             "sections": {str(s): m.serialize() for s, m in self.sections.items()},
-            "on_error": self.on_error,
+            "on_error": self.on_error.value,
             "missing_sys_description": self.missing_sys_description,
             "do_status_data_inventory": self.do_status_data_inventory,
             "section_store_path": str(self._section_store.path),
@@ -259,32 +277,11 @@ class SNMPFetcher(Fetcher[SNMPRawData]):
         """
         return mode is Mode.CHECKING
 
-    def _is_cache_read_enabled(self, mode: Mode) -> bool:
-        """Decide whether to try to read data from cache
-
-        Fetching for SNMP data is special in that we have to list the sections to fetch
-        in advance, unlike for agent data, where we parse the data and see what we get.
-
-        For discovery, we must not fetch the pre-configured sections (which are the ones
-        in the cache), but all sections for which the detection spec evaluates to true,
-        which can be many more.
-        """
-        return mode is Mode.DISCOVERY
-
-    def _is_cache_write_enabled(self, mode: Mode) -> bool:
-        """Decide whether to write data to cache
-
-        If we write the fetching result for SNMP, we also "override" the resulting
-        sections for the next call that uses the cache. Since we use the cache for
-        DISCOVERY only, we must only write it if we're dealing with the right
-        sections for discovery.
-        """
-        return mode is Mode.DISCOVERY
-
     def _get_selection(self, mode: Mode) -> Set[SectionName]:
         """Determine the sections fetched unconditionally (without detection)"""
         if mode is Mode.CHECKING:
-            return self.checking_sections - self.disabled_sections
+            return {name for name in self.checking_sections if not self.sections[name].redetect
+                   } - self.disabled_sections
 
         if mode is Mode.FORCE_SECTIONS:
             return self.checking_sections
@@ -293,7 +290,12 @@ class SNMPFetcher(Fetcher[SNMPRawData]):
 
     def _get_detected_sections(self, mode: Mode) -> Set[SectionName]:
         """Determine the sections fetched after successful detection"""
-        if mode is Mode.INVENTORY or (mode is Mode.CHECKING and self.do_status_data_inventory):
+        if mode is Mode.CHECKING:
+            return ({name for name in self.checking_sections if self.sections[name].redetect} |
+                    (self.inventory_sections if self.do_status_data_inventory else set())
+                   ) - self.disabled_sections
+
+        if mode is Mode.INVENTORY:
             return self.inventory_sections - self.disabled_sections
 
         if mode is Mode.DISCOVERY:
@@ -347,7 +349,8 @@ class SNMPFetcher(Fetcher[SNMPRawData]):
                     raise LookupError(section_name)
             except LookupError:
                 self._logger.debug("%s: Fetching data (%s)", section_name, walk_cache_msg)
-                section = [
+
+                fetched_data[section_name] = [
                     snmp_table.get_snmp_table(
                         section_name=section_name,
                         tree=tree,
@@ -355,9 +358,6 @@ class SNMPFetcher(Fetcher[SNMPRawData]):
                         backend=self._backend,
                     ) for tree in self.plugin_store[section_name].trees
                 ]
-
-                if any(section):
-                    fetched_data[section_name] = section
 
         walk_cache.save()
 
@@ -414,18 +414,20 @@ class SNMPParser(Parser[SNMPRawData, SNMPHostSections]):
         host_sections = SNMPHostSections(dict(raw_data))
         now = int(time.time())
 
-        def fetch_interval(section_name: SectionName) -> Optional[int]:
-            fetch_interval = self.check_intervals.get(section_name)
-            if fetch_interval is None:
-                return fetch_interval
-            return now + fetch_interval
+        def lookup_persist(section_name: SectionName) -> Optional[Tuple[int, int]]:
+            if (interval := self.check_intervals.get(section_name)) is not None:
+                return now, now + interval
+            return None
 
-        host_sections.add_persisted_sections(
-            raw_data,
-            section_store=self.section_store,
-            fetch_interval=fetch_interval,
+        persisted_sections = self.section_store.update(
+            sections=raw_data,
+            lookup_persist=lookup_persist,
             now=now,
             keep_outdated=self.keep_outdated,
+        )
+
+        host_sections.add_persisted_sections(
+            persisted_sections,
             logger=self._logger,
         )
         return host_sections

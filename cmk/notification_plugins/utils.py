@@ -4,22 +4,24 @@
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from email.utils import formataddr
-from html import escape as html_escape
 import os
-from quopri import encodestring
 import re
+import requests
 import socket
 import subprocess
 import sys
+
+from email.utils import formataddr
+from html import escape as html_escape
+from http.client import responses as http_responses
+from quopri import encodestring
 from typing import Dict, List, Tuple, NamedTuple
 
-from http.client import responses as http_responses
-import requests
-
-from cmk.utils.notify import find_wato_folder
-import cmk.utils.paths
 import cmk.utils.password_store
+import cmk.utils.paths
+import cmk.utils.version as cmk_version
+from cmk.utils.notify import find_wato_folder
+from cmk.utils.store import load_text_from_file
 
 
 def collect_context() -> Dict[str, str]:
@@ -57,7 +59,12 @@ def format_address(display_name: str, email_address: str) -> str:
 
 
 def default_from_address():
-    return os.environ.get("OMD_SITE", "checkmk") + "@" + socket.getfqdn()
+    environ_default = os.environ.get("OMD_SITE", "checkmk") + "@" + socket.getfqdn()
+    if cmk_version.is_cma():
+        return load_text_from_file("/etc/nullmailer/default-from",
+                                   environ_default).replace('\n', '')
+
+    return environ_default
 
 
 def _base_url(context: Dict[str, str]) -> str:
@@ -111,7 +118,6 @@ def html_escape_context(context):
         'PARAMETER_BULK_SUBJECT',
         'PARAMETER_HOST_SUBJECT',
         'PARAMETER_SERVICE_SUBJECT',
-        'PARAMETER_FROM',
         'PARAMETER_FROM_ADDRESS',
         'PARAMETER_FROM_DISPLAY_NAME',
         'PARAMETER_REPLY_TO',
@@ -297,11 +303,16 @@ def post_request(message_constructor, url=None, headers=None):
     proxy_url = context.get("PARAMETER_PROXY_URL")
     proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
 
+    verify: bool = True
+    if "PARAMETER_IGNORE_SSL" in context:
+        verify = False
+
     try:
         response = requests.post(url=url,
                                  json=message_constructor(context),
                                  proxies=proxies,
-                                 headers=headers)
+                                 headers=headers,
+                                 verify=verify)
     except requests.exceptions.ProxyError:
         sys.stderr.write("Cannot connect to proxy: %s\n" % proxy_url)
         sys.exit(2)

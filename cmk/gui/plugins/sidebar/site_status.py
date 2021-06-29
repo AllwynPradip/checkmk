@@ -7,9 +7,11 @@
 import json
 
 from cmk.gui.i18n import _
-from cmk.gui.globals import html
+from cmk.gui.globals import html, request, transactions, response
+from cmk.gui.utils.urls import makeactionuri_contextless
 import cmk.gui.sites as sites
 import cmk.gui.config as config
+from cmk.gui.utils.escaping import escape_html_permissive
 
 from cmk.gui.plugins.sidebar import (
     SidebarSnapin,
@@ -50,29 +52,28 @@ class SiteStatus(SidebarSnapin):
             if state is None:
                 state = "missing"
                 switch = "missing"
-                text = sitename
+                text = escape_html_permissive(sitename)
 
             else:
                 if state == "disabled":
                     switch = "on"
-                    text = site["alias"]
+                    text = escape_html_permissive(site["alias"])
                 else:
                     switch = "off"
                     text = render_link(site["alias"],
                                        "view.py?view_name=sitehosts&site=%s" % sitename)
 
             html.open_tr()
-            html.open_td(class_="left")
-            html.write(text)
-            html.close_td()
+            html.td(text, class_="left")
             html.open_td(class_="state")
             if switch == "missing":
                 html.status_label(content=state, status=state, title=_("Site is missing"))
             else:
-                url = html.makeactionuri_contextless([
-                    ("_site_switch", "%s:%s" % (sitename, switch)),
-                ],
-                                                     filename="switch_site.py")
+                url = makeactionuri_contextless(request,
+                                                transactions, [
+                                                    ("_site_switch", "%s:%s" % (sitename, switch)),
+                                                ],
+                                                filename="switch_site.py")
                 html.status_label_button(
                     content=state,
                     status=state,
@@ -91,15 +92,15 @@ class SiteStatus(SidebarSnapin):
         }
 
     def _ajax_switch_site(self):
-        html.set_output_format("json")
+        response.set_content_type("application/json")
         # _site_switch=sitename1:on,sitename2:off,...
         if not config.user.may("sidesnap.sitestatus"):
             return
 
-        if not html.check_transaction():
+        if not transactions.check_transaction():
             return
 
-        switch_var = html.request.var("_site_switch")
+        switch_var = request.var("_site_switch")
         if switch_var:
             for info in switch_var.split(","):
                 sitename, onoff = info.split(":")

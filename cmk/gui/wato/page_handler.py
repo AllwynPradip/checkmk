@@ -14,7 +14,7 @@ import cmk.gui.pages
 import cmk.gui.config as config
 from cmk.gui.type_defs import PermissionName
 from cmk.gui.i18n import _
-from cmk.gui.globals import html, display_options
+from cmk.gui.globals import html, display_options, transactions, user_errors, request
 from cmk.gui.exceptions import (MKGeneralException, MKAuthException, MKUserError, FinalizeRequest)
 from cmk.gui.utils.flashed_messages import get_flashed_messages
 from cmk.gui.plugins.wato.utils.html_elements import (
@@ -51,7 +51,7 @@ else:
 #   | 3. Anzeigen von Inhalten                                             |
 #   |                                                                      |
 #   | Der Trick: welche Inhalte angezeigt werden, hängt vom Ausgang der    |
-#   | Aktion ab. Wenn man z.B. bei einem Host bei "Create new host" auf    |
+#   | Aktion ab. Wenn man z.B. bei einem Host bei "Add host" auf           |
 #   | [Save] klickt, dann kommt bei Erfolg die Inventurseite, bei Miss-    |
 #   | bleibt man auf der Neuanlegen-Seite                                  |
 #   |                                                                      |
@@ -77,16 +77,16 @@ def page_handler() -> None:
             _("Check_MK can only be configured on "
               "the managers central site."))
 
-    current_mode = html.request.var("mode") or "main"
+    current_mode = request.var("mode") or "main"
     mode_permissions, mode_class = _get_mode_permission_and_class(current_mode)
 
-    display_options.load_from_html(html)
+    display_options.load_from_html(request, html)
 
     if display_options.disabled(display_options.N):
         html.add_body_css_class("inline")
 
     # If we do an action, we aquire an exclusive lock on the complete WATO.
-    if html.is_transaction():
+    if transactions.is_transaction():
         with store.lock_checkmk_configuration():
             _wato_page_handler(current_mode, mode_permissions, mode_class)
     else:
@@ -96,7 +96,7 @@ def page_handler() -> None:
 def _wato_page_handler(current_mode: str, mode_permissions: Optional[List[PermissionName]],
                        mode_class: Type[WatoMode]) -> None:
     try:
-        init_wato_datastructures(with_wato_lock=not html.is_transaction())
+        init_wato_datastructures(with_wato_lock=not transactions.is_transaction())
     except Exception:
         # Snapshot must work in any case
         if current_mode == 'snapshot':
@@ -111,7 +111,7 @@ def _wato_page_handler(current_mode: str, mode_permissions: Optional[List[Permis
     mode = mode_class()
 
     # Do actions (might switch mode)
-    if html.is_transaction():
+    if transactions.is_transaction():
         try:
             config.user.need_permission("wato.edit")
 
@@ -144,11 +144,10 @@ def _wato_page_handler(current_mode: str, mode_permissions: Optional[List[Permis
                 raise result
 
         except MKUserError as e:
-            html.add_user_error(e.varname, str(e))
+            user_errors.add(e)
 
         except MKAuthException as e:
-            reason = e.args[0]
-            html.add_user_error(None, reason)
+            user_errors.add(MKUserError(None, e.args[0]))
 
     breadcrumb = make_main_menu_breadcrumb(mode.main_menu()) + mode.breadcrumb()
     page_menu = mode.page_menu(breadcrumb)
@@ -158,13 +157,12 @@ def _wato_page_handler(current_mode: str, mode_permissions: Optional[List[Permis
                    show_body_start=display_options.enabled(display_options.H),
                    show_top_heading=display_options.enabled(display_options.T))
 
-    if not html.is_transaction() or (cmk.gui.watolib.read_only.is_enabled() and
-                                     cmk.gui.watolib.read_only.may_override()):
+    if not transactions.is_transaction() or (cmk.gui.watolib.read_only.is_enabled() and
+                                             cmk.gui.watolib.read_only.may_override()):
         _show_read_only_warning()
 
     # Show outcome of failed action on this page
-    if html.has_user_errors():
-        html.show_user_errors()
+    html.show_user_errors()
 
     # Show outcome of previous page (that redirected to this one)
     for message in get_flashed_messages():

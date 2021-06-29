@@ -6,6 +6,7 @@
 
 import abc
 import time
+from typing import Optional, List, Tuple, TYPE_CHECKING
 
 import cmk.gui.config as config
 import cmk.gui.utils as utils
@@ -23,10 +24,21 @@ from cmk.gui.plugins.views import (
     cmp_service_name_equiv,
     cmp_string_list,
     cmp_ip_address,
+    compare_ips,
     get_tag_groups,
     get_labels,
     get_perfdata_nth_value,
 )
+from cmk.gui.valuespec import ValueSpec
+from cmk.gui.plugins.views.utils import DerivedColumnsSorter, cmp_insensitive_string
+from cmk.gui.type_defs import Row
+from cmk.gui.valuespec import (
+    Dictionary,
+    DropdownChoice,
+)
+
+if TYPE_CHECKING:
+    from cmk.gui.views import View
 
 
 def cmp_state_equiv(r):
@@ -213,7 +225,7 @@ class SorterHostLabels(ABCTagSorter):
 
     @property
     def title(self):
-        return _("Labels")
+        return _("Host labels")
 
     @property
     def columns(self):
@@ -232,7 +244,7 @@ class SorterServiceLabels(ABCTagSorter):
 
     @property
     def title(self):
-        return _("Labels")
+        return _("Service labels")
 
     @property
     def columns(self):
@@ -416,6 +428,59 @@ declare_1to1_sorter("host_servicelevel", cmp_simple_number)
 
 
 @sorter_registry.register
+class SorterCustomHostVariable(DerivedColumnsSorter):
+    _variable_name: Optional[str] = None
+
+    @property
+    def ident(self) -> str:
+        return "host_custom_variable"
+
+    @property
+    def title(self) -> str:
+        return _("Host custom attribute")
+
+    @property
+    def columns(self) -> List[str]:
+        return ['host_custom_variable_names', 'host_custom_variable_values']
+
+    def derived_columns(self, view: 'View', uuid: Optional[str]) -> None:
+        self._variable_name = uuid
+
+    def get_parameters(self) -> Optional[ValueSpec]:
+        choices: List[Tuple[str, str]] = []
+        for attr_spec in config.wato_host_attrs:
+            choices.append((attr_spec["name"], attr_spec["title"]))
+        choices.sort(key=lambda x: x[1])
+        return Dictionary(
+            elements=[
+                (
+                    "ident",
+                    DropdownChoice(
+                        choices=choices,
+                        title=_("ID"),
+                    ),
+                ),
+            ],
+            title=_("Options"),
+            optional_keys=[],
+        )
+
+    def cmp(self, r1: Row, r2: Row) -> int:
+        if self._variable_name is None:
+            return 0
+        variable_name = self._variable_name.upper()  # outwit mypy
+
+        def _get_value(row: Row) -> str:
+            try:
+                index = row['host_custom_variable_names'].index(variable_name)
+            except ValueError:
+                return ''
+            return row['host_custom_variable_values'][index]
+
+        return cmp_insensitive_string(_get_value(r1), _get_value(r2))
+
+
+@sorter_registry.register
 class SorterHostIpv4Address(Sorter):
     @property
     def ident(self):
@@ -435,14 +500,7 @@ class SorterHostIpv4Address(Sorter):
                 zip(row["host_custom_variable_names"], row["host_custom_variable_values"]))
             return custom_vars.get("ADDRESS_4", "")
 
-        def split_ip(ip):
-            try:
-                return tuple(int(part) for part in ip.split('.'))
-            except ValueError:
-                return ip
-
-        v1, v2 = split_ip(get_address(r1)), split_ip(get_address(r2))
-        return (v1 > v2) - (v1 < v2)
+        return compare_ips(get_address(r1), get_address(r2))
 
 
 @sorter_registry.register

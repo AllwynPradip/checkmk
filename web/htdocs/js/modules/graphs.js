@@ -392,7 +392,7 @@ function render_graph(graph) {
             var prev_lower = null;
             var prev_upper = null;
             ctx.save();
-            ctx.fillStyle = color + opacity;
+            ctx.fillStyle = hex_to_rgba(color + opacity);
             ctx.imageSmoothingEnabled = true; // seems no difference on FF
 
             for (j = 0; j < points.length; j++) {
@@ -411,8 +411,9 @@ function render_graph(graph) {
                     ctx.beginPath();
                     ctx.strokeStyle = color;
                     ctx.lineWidth = curve_line_width;
-                    ctx.moveTo(trans_t(t - step), trans_v(prev_upper));
-                    ctx.lineTo(trans_t(t), trans_v(upper));
+                    let mirrored = upper <= 0;
+                    ctx.moveTo(trans_t(t - step), trans_v(mirrored ? prev_lower : prev_upper));
+                    ctx.lineTo(trans_t(t), trans_v(mirrored ? lower : upper));
                     ctx.stroke();
                 }
                 prev_lower = lower;
@@ -504,6 +505,13 @@ function render_graph(graph) {
 
     // Enable interactive mouse control of graph
     graph_activate_mouse_control(graph);
+}
+
+function hex_to_rgba(color) {
+    // convert '#00112233' to 'rgba(0, 17, 34, 0.2)'
+    // NOTE: When we drop IE11 support we don't need this conversion anymore.
+    const parse = x => parseInt(color.substr(x, 2), 16);
+    return `rgba(${parse(1)}, ${parse(3)}, ${parse(5)}, ${parse(7) / 255})`;
 }
 
 function graph_vertical_axis_width(graph) {
@@ -1247,7 +1255,7 @@ function render_graph_hover_popup(graph, event, popup_data) {
         let title = row.insertCell(0);
         let color = document.createElement("div");
         utils.add_class(color, "color");
-        color.style.backgroundColor = curve.color + "4c";
+        color.style.backgroundColor = hex_to_rgba(curve.color + "4c");
         color.style.borderColor = curve.color;
         title.appendChild(color);
         title.appendChild(document.createTextNode(curve.title + ": "));

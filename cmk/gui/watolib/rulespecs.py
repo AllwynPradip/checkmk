@@ -24,6 +24,7 @@ from cmk.gui.valuespec import (
     Tuple,
     DropdownChoice,
     OptionalDropdownChoice,
+    ValueSpecText,
 )
 from cmk.gui.watolib.timeperiods import TimeperiodSelection
 from cmk.gui.watolib.automations import check_mk_local_automation
@@ -193,7 +194,7 @@ class RulespecGroupEnforcedServices(RulespecGroup):
     @property
     def help(self):
         return _(
-            "Rules to set up [cms_wato_services#manual_checks|manual services]. Services set "
+            "Rules to set up [wato_services#manual_checks|manual services]. Services set "
             "up in this way do not depend on the service discovery. This is useful if you want "
             "to enforce compliance with a specific guideline. You can for example ensure that "
             "a certain Windows service is always present on a host.")
@@ -366,6 +367,8 @@ class Rulespec(metaclass=abc.ABCMeta):
         valuespec: Callable[[], ValueSpec],
         match_type: str,
         item_type: Optional[str],
+        # WATCH OUT: passing a Callable[[], Transform] will not work (see the
+        # isinstance check in the item_spec property)!
         item_spec: Optional[Callable[[], ValueSpec]],
         item_name: Optional[Callable[[], str]],
         item_help: Optional[Callable[[], str]],
@@ -1095,8 +1098,8 @@ class CheckTypeGroupSelection(ElementSelection):
         }
         return elements
 
-    def value_to_text(self, value):
-        return "<tt>%s</tt>" % value
+    def value_to_text(self, value) -> HTML:
+        return html.render_tt(value)
 
 
 class TimeperiodValuespec(ValueSpec):
@@ -1123,11 +1126,11 @@ class TimeperiodValuespec(ValueSpec):
 
     def render_input(self, varprefix, value):
         # The display mode differs when the valuespec is activated
-        vars_copy = dict(html.request.itervars())
+        vars_copy = dict(request.itervars())
 
         # The timeperiod mode can be set by either the GUI switch or by the value itself
         # GUI switch overrules the information stored in the value
-        if html.request.has_var(self.tp_toggle_var):
+        if request.has_var(self.tp_toggle_var):
             is_active = self._is_switched_on()
         else:
             is_active = self.is_active(value)
@@ -1155,12 +1158,11 @@ class TimeperiodValuespec(ValueSpec):
                             class_=["toggle_timespecific_parameter"])
             return r
 
-    def value_to_text(self, value):
-        # TODO/Phantasm: highlight currently active timewindow
+    def value_to_text(self, value) -> ValueSpecText:
         return self._get_used_valuespec(value).value_to_text(value)
 
     def from_html_vars(self, varprefix):
-        if html.request.var(self.tp_current_mode) == "1":
+        if request.var(self.tp_current_mode) == "1":
             # Fetch the timespecific settings
             parameters = self._get_timeperiod_valuespec().from_html_vars(varprefix)
             if parameters[self.tp_values_key]:
@@ -1178,6 +1180,10 @@ class TimeperiodValuespec(ValueSpec):
     def _validate_value(self, value, varprefix):
         super(TimeperiodValuespec, self)._validate_value(value, varprefix)
         self._get_used_valuespec(value).validate_value(value, varprefix)
+
+    def validate_datatype(self, value: Any, varprefix: str) -> None:
+        super().validate_datatype(value, varprefix)
+        self._get_used_valuespec(value).validate_datatype(value, varprefix)
 
     def _get_timeperiod_valuespec(self):
         return Dictionary(
@@ -1203,7 +1209,7 @@ class TimeperiodValuespec(ValueSpec):
 
     # Checks whether the tp-mode is switched on through the gui
     def _is_switched_on(self):
-        return html.request.var(self.tp_toggle_var) == "1"
+        return request.var(self.tp_toggle_var) == "1"
 
     # Checks whether the value itself already uses the tp-mode
     def is_active(self, value):
@@ -1272,8 +1278,8 @@ class MatchItemGeneratorRules(ABCMatchItemGenerator):
                     if rulespec.title)
 
     @staticmethod
-    def is_affected_by_change(_change_action_name: str) -> bool:
-        return False
+    def is_affected_by_change(change_action_name: str) -> bool:
+        return change_action_name.endswith("-package")
 
     @property
     def is_localization_dependent(self) -> bool:

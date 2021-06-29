@@ -7,10 +7,10 @@
 # yapf: disable
 from typing import Any, Dict
 
-import pytest  # type: ignore[import]
+import pytest
 
 import cmk.utils.version as cmk_version
-from cmk.gui.globals import html
+from cmk.gui.globals import request
 import cmk.gui.plugins.visuals.utils as utils
 import cmk.gui.plugins.visuals
 import cmk.gui.views
@@ -3502,17 +3502,17 @@ def test_registered_filters(load_plugins):
 
 expected_infos: Dict[str, Dict[str, Any]] = {
     'aggr': {
-        'single_spec': [('aggr_name', 'TextUnicode')],
+        'single_spec': [('aggr_name', 'TextInput')],
         'title': u'BI Aggregation',
         'title_plural': u'BI Aggregations'
     },
     'aggr_group': {
-        'single_spec': [('aggr_group', 'TextUnicode')],
+        'single_spec': [('aggr_group', 'TextInput')],
         'title': u'BI Aggregation Group',
         'title_plural': u'BI Aggregation Groups'
     },
     'command': {
-        'single_spec': [('command_name', 'TextUnicode')],
+        'single_spec': [('command_name', 'TextInput')],
         'title': u'Command',
         'title_plural': u'Commands'
     },
@@ -3522,7 +3522,7 @@ expected_infos: Dict[str, Dict[str, Any]] = {
         'title_plural': u'Comments'
     },
     'contact': {
-        'single_spec': [('log_contact_name', 'TextUnicode')],
+        'single_spec': [('log_contact_name', 'TextInput')],
         'title': u'Contact',
         'title_plural': u'Contacts'
     },
@@ -3548,13 +3548,13 @@ expected_infos: Dict[str, Dict[str, Any]] = {
     },
     'host': {
         'multiple_site_filters': ['hostgroup'],
-        'single_spec': [('host', 'TextUnicode')],
+        'single_spec': [('host', 'TextInput')],
         'title': u'Host',
         'title_plural': u'Hosts'
     },
     'hostgroup': {
         'single_site': False,
-        'single_spec': [('hostgroup', 'TextUnicode')],
+        'single_spec': [('hostgroup', 'TextInput')],
         'title': u'Host Group',
         'title_plural': u'Host Groups'
     },
@@ -3665,13 +3665,13 @@ expected_infos: Dict[str, Dict[str, Any]] = {
     },
     'service': {
         'multiple_site_filters': ['servicegroup'],
-        'single_spec': [('service', 'TextUnicode')],
+        'single_spec': [('service', 'TextInput')],
         'title': u'Service',
         'title_plural': u'Services'
     },
     'servicegroup': {
         'single_site': False,
-        'single_spec': [('servicegroup', 'TextUnicode')],
+        'single_spec': [('servicegroup', 'TextInput')],
         'title': u'Service Group',
         'title_plural': u'Service Groups'
     },
@@ -3728,9 +3728,9 @@ def test_registered_info_attributes():
         [("host", "abc"), ("service", "äää")]),
 ])
 def test_add_context_to_uri_vars(register_builtin_html, visual, expected_vars):
-    with html.stashed_vars():
+    with request.stashed_vars():
         visuals.add_context_to_uri_vars(visual["context"], visual["single_infos"])
-        assert sorted(list(html.request.itervars())) == sorted(expected_vars)
+        assert sorted(list(request.itervars())) == sorted(expected_vars)
 
 
 @pytest.mark.parametrize("visual,expected_vars", [
@@ -3785,7 +3785,7 @@ def test_get_context_uri_vars(register_builtin_html, visual, expected_vars):
 def test_get_context_from_uri_vars(register_builtin_html, infos, single_infos, uri_vars,
         expected_context):
     for key, val in uri_vars:
-        html.request.set_var(key, val)
+        request.set_var(key, val)
 
     context = visuals.get_context_from_uri_vars(infos, single_infos)
     assert context == expected_context
@@ -3807,7 +3807,7 @@ def test_get_context_from_uri_vars(register_builtin_html, infos, single_infos, u
 ])
 def test_get_merged_context(register_builtin_html, uri_vars, visual, expected_context):
     for key, val in uri_vars:
-        html.request.set_var(key, val)
+        request.set_var(key, val)
 
     url_context = visuals.get_context_from_uri_vars(visual["infos"], visual["single_infos"])
     context = visuals.get_merged_context(url_context, visual["context"])
@@ -3841,14 +3841,14 @@ def test_context_uri_vars(register_builtin_html):
         },
     }
 
-    html.request.set_var("bla", "blub")
-    assert html.request.var("bla") == "blub"
+    request.set_var("bla", "blub")
+    assert request.var("bla") == "blub"
 
     with visuals.context_uri_vars(visual["context"], visual["single_infos"]), \
          visuals.context_uri_vars(visual2["context"], visual2["single_infos"]):
-        assert html.request.var("bla") == "blub"
-        assert html.request.var("host") == "abc"
-        assert html.request.var("ag") == "1"
-        assert html.request.var("hu") == "hu"
+        assert request.var("bla") == "blub"
+        assert request.var("host") == "abc"
+        assert request.var("ag") == "1"
+        assert request.var("hu") == "hu"
 
-    assert list(dict(html.request.itervars()).keys()) == ["bla"]
+    assert list(dict(request.itervars()).keys()) == ["bla"]

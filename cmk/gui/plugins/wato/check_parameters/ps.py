@@ -27,8 +27,7 @@ from cmk.gui.valuespec import (
     MonitoringState,
     Percentage,
     RegExp,
-    TextAscii,
-    TextUnicode,
+    TextInput,
     Transform,
     Tuple,
 )
@@ -326,11 +325,11 @@ def validate_process_discovery_descr_option(description, varprefix):
 
 
 def process_discovery_descr_option():
-    return TextUnicode(
+    return TextInput(
         title=_('Process Name'),
         allow_empty=False,
         validate=validate_process_discovery_descr_option,
-        help=_("<p>The process name may contain one or more occurances of <tt>%s</tt>. If "
+        help=_("<p>The process name may contain one or more occurrences of <tt>%s</tt>. If "
                "you do this, then the pattern must be a regular expression and be prefixed "
                "with ~. For each <tt>%s</tt> in the description, the expression has to "
                "contain one \"group\". A group is a subexpression enclosed in brackets, "
@@ -338,7 +337,7 @@ def process_discovery_descr_option():
                "When the inventory finds a process matching the pattern, it will "
                "substitute all such groups with the actual values when creating the "
                "check. That way one rule can create several checks on a host.</p>"
-               "<p>If the pattern contains more groups then occurrances of <tt>%s</tt> in "
+               "<p>If the pattern contains more groups then occurrences of <tt>%s</tt> in "
                "the service description then only the first matching subexpressions are "
                "used for the service descriptions. The matched substrings corresponding to "
                "the remaining groups are copied into the regular expression, "
@@ -353,8 +352,8 @@ def process_match_options():
     return Alternative(
         title=_("Process Matching"),
         elements=[
-            TextAscii(
-                title=_("Exact name of the process without argments"),
+            TextInput(
+                title=_("Exact name of the process without arguments"),
                 label=_("Executable:"),
                 size=50,
             ),
@@ -395,7 +394,7 @@ def user_match_options(extra_elements=None):
     return Alternative(
         title=_("Name of operating system user"),
         elements=[
-            TextAscii(title=_("Exact name of the operating system user"), label=_("User:"),
+            TextInput(title=_("Exact name of the operating system user"), label=_("User:"),
                       size=50),
             Transform(
                 RegExp(
@@ -432,7 +431,7 @@ def cgroup_match_options():
         elements=[
             Alternative(
                 elements=[
-                    TextAscii(title=_("Exact content of the operating system control group info"),
+                    TextInput(title=_("Exact content of the operating system control group info"),
                               label=_("Control group:"),
                               size=50),
                     Transform(
@@ -466,7 +465,7 @@ def cgroup_match_options():
 
 
 def _item_spec_ps():
-    return TextAscii(title=_("Discovered process name"),)
+    return TextInput(title=_("Discovered process name"),)
 
 
 def _parameter_valuespec_ps():
@@ -491,7 +490,7 @@ rulespec_registry.register(
 
 # Rule for static process checks
 def _manual_item_spec_ps():
-    return TextAscii(
+    return TextInput(
         title=_("Process Name"),
         help=_("This name will be used in the description of the service"),
         allow_empty=False,
@@ -524,7 +523,7 @@ rulespec_registry.register(
 
 
 # In version 1.2.4 the check parameters for the resulting ps check
-# where defined in the dicovery rule. We moved that to an own rule
+# where defined in the discovery rule. We moved that to an own rule
 # in the classical check parameter style. In order to support old
 # configuration we allow reading old discovery rules and ship these
 # settings in an optional sub-dictionary.
@@ -644,7 +643,7 @@ def hr_process_match_name_option():
     return Alternative(
         title=_("Process Name Matching"),
         elements=[
-            TextAscii(
+            TextInput(
                 title=_("Exact name of the textual description"),
                 size=50,
                 allow_empty=False,
@@ -678,7 +677,7 @@ def hr_process_match_path_option():
     return Alternative(
         title=_("Process Path Matching"),
         elements=[
-            TextAscii(
+            TextInput(
                 title=_("Exact name of the process path"),
                 size=50,
                 allow_empty=False,
@@ -836,7 +835,7 @@ rulespec_registry.register(
 
 # Rule for static process checks
 def _manual_item_spec_hr_ps():
-    return TextAscii(
+    return TextInput(
         title=_("Process Name"),
         help=_("This name will be used in the description of the service"),
         allow_empty=False,

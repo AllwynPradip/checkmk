@@ -9,21 +9,21 @@ hosts. Examples are the IP address and the host tags."""
 import abc
 import functools
 import re
-from typing import Any, Dict, List, Optional, Set, Tuple, Type
+from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 
 import cmk.utils.plugin_registry
+from cmk.utils.type_defs import HostName
 
 import cmk.gui.config as config
 from cmk.gui.htmllib import HTML
-from cmk.gui.globals import html
+from cmk.gui.globals import html, request
 from cmk.gui.i18n import _, _u
 from cmk.gui.exceptions import MKUserError, MKGeneralException
 from cmk.gui.valuespec import (
-    TextAscii,
+    TextInput,
     Transform,
     Checkbox,
     DropdownChoice,
-    Dictionary,
 )
 from cmk.gui.watolib.utils import host_attribute_matches
 from cmk.gui.type_defs import Choices
@@ -84,7 +84,7 @@ class HostAttributeTopicAddress(HostAttributeTopic):
 
     @property
     def title(self):
-        return _("Network Address")
+        return _("Network address")
 
     @property
     def sort_index(self):
@@ -95,11 +95,11 @@ class HostAttributeTopicAddress(HostAttributeTopic):
 class HostAttributeTopicDataSources(HostAttributeTopic):
     @property
     def ident(self):
-        return "data_sources"
+        return "monitoring_agents"
 
     @property
     def title(self):
-        return _("Data sources")
+        return _("Monitoring agents")
 
     @property
     def sort_index(self):
@@ -144,7 +144,7 @@ class HostAttributeTopicManagementBoard(HostAttributeTopic):
 
     @property
     def title(self):
-        return _("Management Board")
+        return _("Management board")
 
     @property
     def sort_index(self):
@@ -237,9 +237,9 @@ class ABCHostAttribute(metaclass=abc.ABCMeta):
         """Return the default value for new hosts"""
         return None
 
-    def paint(self, value, hostname):
+    def paint(self, value: Any, hostname: HostName) -> Tuple[str, Union[str, HTML]]:
         """Render HTML code displaying a value"""
-        return "", value
+        return "", str(value)
 
     def may_edit(self) -> bool:
         """Whether or not the user is able to edit this attribute. If
@@ -321,7 +321,7 @@ class ABCHostAttribute(metaclass=abc.ABCMeta):
             return False
         if not html:
             return True
-        return html.request.var('attr_display_%s' % self.name(), "1") == "1"
+        return request.var('attr_display_%s' % self.name(), "1") == "1"
 
     def is_visible(self, for_what: str, new: bool) -> bool:
         """Gets the type of current view as argument and returns whether or not
@@ -357,7 +357,7 @@ class ABCHostAttribute(metaclass=abc.ABCMeta):
 
     def get_tag_groups(self, value: Any) -> Dict[str, str]:
         """Each attribute may set multiple tag groups for a host
-        This is used for calculating the effective host tags when writing the hosts.mk"""
+        This is used for calculating the effective host tags when writing the hosts{.mk|.cfg}"""
         return {}
 
     @property
@@ -630,11 +630,15 @@ def _create_tag_group_attribute(tag_group):
 
 def declare_custom_host_attrs():
     for attr in transform_pre_16_host_topics(config.wato_host_attrs):
-        if attr['type'] == "TextAscii":
+        if attr['type'] == "TextInput":
             # Hack: The API does not perform validate_datatype and we can currently not enable
             # this as fix in 1.6 (see cmk/gui/plugins/webapi/utils.py::ABCHostAttributeValueSpec.validate_input()).
             # As a local workaround we use a custom validate function here to ensure we only get ascii characters
-            vs = TextAscii(title=attr['title'], help=attr['help'], validate=_validate_is_ascii)
+            vs = TextInput(
+                title=attr['title'],
+                help=attr['help'],
+                validate=_validate_is_ascii,
+            )
         else:
             raise NotImplementedError()
 
@@ -695,15 +699,15 @@ def _transform_attribute_topic_title_to_id(topic_title):
     _topic_title_to_id_map = {
         u"Basic settings": "basic",
         u"Address": "address",
-        u"Data sources": "data_sources",
-        u"Management Board": "management_board",
+        u"Monitoring agents": "monitoring_agents",
+        u"Management board": "management_board",
         u"Network Scan": "network_scan",
         u"Custom attributes": "custom_attributes",
         u"Host tags": "custom_attributes",
         u"Tags": "custom_attributes",
         u"Grundeinstellungen": "basic",
         u"Adresse": "address",
-        u"Datenquellen": "data_sources",
+        u"Monitoringagenten": "monitoring_agents",
         u"Management-Board": "management_board",
         u"Netzwerk-Scan": "network_scan",
         u"Eigene Attribute": "custom_attributes",
@@ -728,7 +732,7 @@ def collect_attributes(for_what, new, do_validate=True, varprefix=""):
     host = {}
     for attr in host_attribute_registry.attributes():
         attrname = attr.name()
-        if not html.request.var(for_what + "_change_%s" % attrname, ""):
+        if not request.var(for_what + "_change_%s" % attrname, ""):
             continue
 
         value = attr.from_html_vars(varprefix)
@@ -750,7 +754,7 @@ class ABCHostAttributeText(ABCHostAttribute, metaclass=abc.ABCMeta):
     def _size(self):
         return 25
 
-    def paint(self, value, hostname):
+    def paint(self, value: str, hostname: HostName) -> Tuple[str, Union[str, HTML]]:
         if not value:
             return "", ""
         return "", value
@@ -761,7 +765,7 @@ class ABCHostAttributeText(ABCHostAttribute, metaclass=abc.ABCMeta):
         html.text_input(varprefix + "attr_" + self.name(), value, size=self._size)
 
     def from_html_vars(self, varprefix):
-        value = html.request.get_unicode_input(varprefix + "attr_" + self.name())
+        value = request.get_unicode_input(varprefix + "attr_" + self.name())
         if value is None:
             value = ""
         return value.strip()
@@ -800,19 +804,8 @@ class ABCHostAttributeValueSpec(ABCHostAttribute):
     def default_value(self):
         return self.valuespec().default_value()
 
-    def paint(self, value, hostname):
-        vs = self.valuespec()
-        content = vs.value_to_text(value)
-
-        # This should be the job of the valuespec: value_to_text should either
-        # return a str (which is then escaped during rendering or a HTML object
-        # which is not escaped). For Dictionary we know that it cares about
-        # escaping it's values. For this reason it is OK to wrap it into HTML
-        # to prevent escaping during rendering.
-        if isinstance(vs, Dictionary):
-            content = HTML(content)
-
-        return "", content
+    def paint(self, value: Any, hostname: HostName) -> Tuple[str, Union[str, HTML]]:
+        return "", self.valuespec().value_to_text(value)
 
     def render_input(self, varprefix, value):
         self.valuespec().render_input(varprefix + self.name(), value)
@@ -833,10 +826,10 @@ class ABCHostAttributeFixedText(ABCHostAttributeText, metaclass=abc.ABCMeta):
     def render_input(self, varprefix, value):
         if value is not None:
             html.hidden_field(varprefix + "attr_" + self.name(), value)
-            html.write(value)
+            html.write_text(value)
 
     def from_html_vars(self, varprefix):
-        return html.request.var(varprefix + "attr_" + self.name())
+        return request.var(varprefix + "attr_" + self.name())
 
 
 class ABCHostAttributeNagiosText(ABCHostAttributeText):
@@ -845,7 +838,7 @@ class ABCHostAttributeNagiosText(ABCHostAttributeText):
     def nagios_name(self):
         raise NotImplementedError()
 
-    def to_nagios(self, value):
+    def to_nagios(self, value: str) -> Optional[str]:
         if value:
             return value
         return None
@@ -861,14 +854,14 @@ class ABCHostAttributeEnum(ABCHostAttribute):
     def _enumlist(self):
         raise NotImplementedError()
 
-    def paint(self, value, hostname):
+    def paint(self, value: Any, hostname: HostName) -> Tuple[str, Union[str, HTML]]:
         return "", dict(self._enumlist).get(value, self.default_value())
 
     def render_input(self, varprefix, value):
         html.dropdown(varprefix + "attr_" + self.name(), self._enumlist, value)
 
     def from_html_vars(self, varprefix):
-        return html.request.var(varprefix + "attr_" + self.name(), self.default_value())
+        return request.var(varprefix + "attr_" + self.name(), self.default_value())
 
 
 class ABCHostAttributeTag(ABCHostAttributeValueSpec, metaclass=abc.ABCMeta):
@@ -890,6 +883,9 @@ class ABCHostAttributeTag(ABCHostAttributeValueSpec, metaclass=abc.ABCMeta):
     def get_tag_groups(self, value):
         """Return set of tag groups to set (handles secondary tags)"""
         return self._tag_group.get_tag_group_config(value)
+
+    def is_show_more(self) -> bool:
+        return self._tag_group.id in ["address_family", "criticality", "networking", "piggyback"]
 
 
 class ABCHostAttributeHostTagList(ABCHostAttributeTag, metaclass=abc.ABCMeta):
@@ -958,10 +954,10 @@ class ABCHostAttributeNagiosValueSpec(ABCHostAttributeValueSpec):
     def nagios_name(self):
         raise NotImplementedError()
 
-    def to_nagios(self, value):
-        value = self.valuespec().value_to_text(value)
-        if value:
-            return value
+    def to_nagios(self, value: str) -> Optional[str]:
+        rendered = self.valuespec().value_to_text(value)
+        if rendered:
+            return str(rendered)
         return None
 
     def is_explicit(self) -> bool:

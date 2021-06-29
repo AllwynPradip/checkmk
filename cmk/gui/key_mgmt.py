@@ -16,14 +16,14 @@ import cmk.utils.store as store
 from cmk.gui.table import table_element
 import cmk.gui.config as config
 from cmk.gui.i18n import _
-from cmk.gui.globals import html, request
+from cmk.gui.globals import html, request, transactions, response
 from cmk.gui.valuespec import (
     Dictionary,
     Password,
     TextAreaUnicode,
     FileUpload,
     CascadingDropdown,
-    TextUnicode,
+    TextInput,
 )
 from cmk.gui.exceptions import MKUserError, FinalizeRequest
 from cmk.gui.breadcrumb import Breadcrumb
@@ -35,7 +35,7 @@ from cmk.gui.page_menu import (
     make_simple_link,
     make_simple_form_page_menu,
 )
-from cmk.gui.utils.urls import makeuri_contextless, make_confirm_link
+from cmk.gui.utils.urls import makeuri_contextless, make_confirm_link, makeactionuri
 from cmk.gui.plugins.wato.utils.base_modes import ActionResult, mode_url, redirect
 
 
@@ -50,7 +50,6 @@ class KeypairStore:
             return {}
 
         variables: Dict[str, Any] = {self._attr: {}}
-        # TODO: Can be changed to text IO with Python 3
         with self._path.open("rb") as f:
             exec(f.read(), variables, variables)
         return variables[self._attr]
@@ -136,8 +135,8 @@ class PageKeyManagement:
         return True
 
     def action(self) -> ActionResult:
-        if self._may_edit_config() and html.request.has_var("_delete"):
-            key_id_as_str = html.request.var("_delete")
+        if self._may_edit_config() and request.has_var("_delete"):
+            key_id_as_str = request.var("_delete")
             if key_id_as_str is None:
                 raise Exception("cannot happen")
             key_id = int(key_id_as_str)
@@ -180,7 +179,7 @@ class PageKeyManagement:
                                     ) % key["owner"]
 
                     delete_url = make_confirm_link(
-                        url=html.makeactionuri([("_delete", key_id)]),
+                        url=makeactionuri(request, transactions, [("_delete", key_id)]),
                         message=message,
                     )
                     html.icon_button(delete_url, _("Delete this key"), "delete")
@@ -189,10 +188,10 @@ class PageKeyManagement:
                     [("mode", self.download_mode), ("key", key_id)],
                 )
                 html.icon_button(download_url, _("Download this key"), "download")
-                table.cell(_("Description"), html.render_text(key["alias"]))
+                table.cell(_("Description"), key["alias"])
                 table.cell(_("Created"), cmk.utils.render.date(key["date"]))
-                table.cell(_("By"), html.render_text(key["owner"]))
-                table.cell(_("Digest (MD5)"), html.render_text(cert.digest("md5").decode("ascii")))
+                table.cell(_("By"), key["owner"])
+                table.cell(_("Digest (MD5)"), cert.digest("md5").decode("ascii"))
 
 
 class PageEditKey:
@@ -215,12 +214,12 @@ class PageEditKey:
                                           save_title=_("Create"))
 
     def action(self) -> ActionResult:
-        if html.check_transaction():
+        if transactions.check_transaction():
             value = self._vs_key().from_html_vars("key")
             # Remove the secret key from known URL vars. Otherwise later constructed URLs
             # which use the current page context will contain the passphrase which could
             # leak the secret information
-            html.request.del_var("key_p_passphrase")
+            request.del_var("key_p_passphrase")
             self._vs_key().validate_value(value, "key")
             self._create_key(value)
             return redirect(mode_url(self.back_mode))
@@ -264,7 +263,7 @@ class PageEditKey:
         return Dictionary(
             title=_("Properties"),
             elements=[
-                ("alias", TextUnicode(
+                ("alias", TextInput(
                     title=_("Description or comment"),
                     size=64,
                     allow_empty=False,
@@ -303,9 +302,9 @@ class PageUploadKey:
                                           save_title=_("Upload"))
 
     def action(self) -> ActionResult:
-        if html.check_transaction():
+        if transactions.check_transaction():
             value = self._vs_key().from_html_vars("key")
-            html.request.del_var("key_p_passphrase")
+            request.del_var("key_p_passphrase")
             self._vs_key().validate_value(value, "key")
 
             key_file = self._get_uploaded(value, "key_file")
@@ -385,7 +384,7 @@ class PageUploadKey:
         return Dictionary(
             title=_("Properties"),
             elements=[
-                ("alias", TextUnicode(
+                ("alias", TextInput(
                     title=_("Description or comment"),
                     size=64,
                     allow_empty=False,
@@ -429,11 +428,11 @@ class PageDownloadKey:
                                           save_title=_("Download"))
 
     def action(self) -> ActionResult:
-        if html.check_transaction():
+        if transactions.check_transaction():
             keys = self.load()
 
             try:
-                key_id_str = html.request.var("key")
+                key_id_str = request.var("key")
                 if key_id_str is None:
                     raise Exception("cannot happen")  # is this really the case?
                 key_id = int(key_id_str)
@@ -455,11 +454,10 @@ class PageDownloadKey:
 
     def _send_download(self, keys, key_id):
         key = keys[key_id]
-        html.response.headers["Content-Disposition"] = "Attachment; filename=%s" % self._file_name(
+        response.headers["Content-Disposition"] = "Attachment; filename=%s" % self._file_name(
             key_id, key)
-        html.response.headers["Content-type"] = "application/x-pem-file"
-        html.write_text(key["private_key"])
-        html.write_text(key["certificate"])
+        response.headers["Content-type"] = "application/x-pem-file"
+        response.set_data(key["private_key"] + key["certificate"])
 
     def _file_name(self, key_id, key):
         raise NotImplementedError()

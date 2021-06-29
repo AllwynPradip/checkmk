@@ -4,10 +4,11 @@
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+import copy
 import itertools
 import json
 import logging
-from typing import Any, Dict, Final, List, Optional, Sequence, Tuple
+from typing import Any, Final, List, Mapping, Optional, Sequence, Tuple
 
 from cmk.utils.piggyback import get_piggyback_raw_data, PiggybackRawDataInfo, PiggybackTimeSettings
 from cmk.utils.type_defs import (
@@ -15,8 +16,8 @@ from cmk.utils.type_defs import (
     ExitSpec,
     HostAddress,
     HostName,
-    ServiceState,
     ServiceDetails,
+    ServiceState,
 )
 
 from .agent import AgentFetcher, AgentHostSections, AgentSummarizer, NoCache
@@ -32,20 +33,32 @@ class PiggybackFetcher(AgentFetcher):
         address: Optional[HostAddress],
         time_settings: List[Tuple[Optional[str], str, int]],
     ) -> None:
-        super().__init__(file_cache, logging.getLogger("cmk.helper.piggyback"))
+        super().__init__(
+            file_cache,
+            logging.getLogger("cmk.helper.piggyback"),
+        )
         self.hostname: Final = hostname
         self.address: Final = address
         self.time_settings: Final = time_settings
         self._sources: List[PiggybackRawDataInfo] = []
 
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}(" + ", ".join((
+            f"{type(self.file_cache).__name__}",
+            f"hostname={self.hostname!r}",
+            f"address={self.address!r}",
+            f"time_settings={self.time_settings!r}",
+        )) + ")"
+
     @classmethod
-    def _from_json(cls, serialized: Dict[str, Any]) -> "PiggybackFetcher":
+    def _from_json(cls, serialized: Mapping[str, Any]) -> "PiggybackFetcher":
+        serialized_ = copy.deepcopy(dict(serialized))
         return cls(
-            NoCache.from_json(serialized.pop("file_cache")),
-            **serialized,
+            NoCache.from_json(serialized_.pop("file_cache")),
+            **serialized_,
         )
 
-    def to_json(self) -> Dict[str, Any]:
+    def to_json(self) -> Mapping[str, Any]:
         return {
             "file_cache": self.file_cache.to_json(),
             "hostname": self.hostname,
@@ -59,12 +72,6 @@ class PiggybackFetcher(AgentFetcher):
 
     def close(self) -> None:
         self._sources.clear()
-
-    def _is_cache_read_enabled(self, mode: Mode) -> bool:
-        return mode not in (Mode.CHECKING, Mode.FORCE_SECTIONS)
-
-    def _is_cache_write_enabled(self, mode: Mode) -> bool:
-        return True
 
     def _fetch_from_io(self, mode: Mode) -> AgentRawData:
         return AgentRawData(b"" + self._get_main_section() + self._get_source_labels_section())

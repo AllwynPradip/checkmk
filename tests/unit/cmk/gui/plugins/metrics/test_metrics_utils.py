@@ -4,14 +4,13 @@
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import List, Tuple
-
-import pytest  # type: ignore[import]
+import pytest
 
 import cmk.utils.version
 
 import cmk.gui.config
 import cmk.gui.metrics as metrics
+from cmk.gui.type_defs import Perfdata
 from cmk.gui.plugins.metrics import utils
 
 
@@ -150,13 +149,13 @@ def test_reverse_translation_metric_name(monkeypatch, canonical_name, perf_data_
         ], 'check_mk-aws_ec2_limits', ['aws_ec2_running_ondemand_instances'])
     ])
 def test_get_graph_templates(load_plugins, metric_names, check_command, graph_ids):
-    perfdata: List[Tuple] = [(n, 0, u'', None, None, None, None) for n in metric_names]
+    perfdata: Perfdata = [(n, 0, u'', None, None, None, None) for n in metric_names]
     translated_metrics = utils.translate_metrics(perfdata, check_command)
     assert set(graph_ids) == set(t['id'] for t in utils.get_graph_templates(translated_metrics))
 
 
 def test_replace_expression():
-    perfdata: List[Tuple] = [(n, len(n), u'', 120, 240, 0, 25) for n in ['load1']]
+    perfdata: Perfdata = [(n, len(n), u'', 120, 240, 0, 25) for n in ['load1']]
     translated_metrics = utils.translate_metrics(perfdata, 'check_mk-cpu.loads')
     assert utils.replace_expressions("CPU Load - %(load1:max@count) CPU Cores",
                                      translated_metrics) == 'CPU Load - 25  CPU Cores'
@@ -173,7 +172,7 @@ def test_extract_rpn(text, out):
 
 
 def test_evaluate():
-    perfdata: List[Tuple] = [(n, len(n), u'', 120, 240, 0, 24) for n in ['in', 'out']]
+    perfdata: Perfdata = [(n, len(n), u'', 120, 240, 0, 24) for n in ['in', 'out']]
     translated_metrics = utils.translate_metrics(perfdata, 'check_mk-openvpn_clients')
     assert utils.evaluate("if_in_octets,8,*@bits/s",
                           translated_metrics) == (16.0, utils.unit_info['bits/s'], '#00e060')
@@ -181,6 +180,15 @@ def test_evaluate():
     translated_metrics = utils.translate_metrics(perfdata, 'check_mk-df')
     assert utils.evaluate("fs_size,fs_used,-#e3fff9",
                           translated_metrics) == (6291456, utils.unit_info['bytes'], '#e3fff9')
+
+    # This is a terrible metric from Nagios plugins. Test is for survival instead of correctness
+    # The unit "percent" is lost on the way. Fixing this would imply also figuring out how to represent
+    # graphs for active-icmp check when host has multiple addresses.
+    assert utils.evaluate(
+        '127.0.0.1pl',
+        utils.translate_metrics(
+            utils.parse_perf_data('127.0.0.1pl=5%;80;100;;')[0],
+            "check_mk_active-icmp")) == (5, utils.unit_info[""], '#cc00ff')
 
 
 @pytest.mark.parametrize("elements, is_operator, apply_operator, apply_element, result", [

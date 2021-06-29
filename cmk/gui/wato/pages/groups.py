@@ -12,20 +12,19 @@ import cmk.utils.paths
 
 import cmk.gui.watolib as watolib
 import cmk.gui.userdb as userdb
-import cmk.gui.escaping as escaping
 from cmk.gui.table import table_element
 import cmk.gui.forms as forms
 from cmk.gui.htmllib import HTML
 from cmk.gui.exceptions import MKUserError
 from cmk.gui.i18n import _
-from cmk.gui.globals import html
+from cmk.gui.globals import html, request, transactions
+from cmk.gui.utils.urls import makeactionuri
 from cmk.gui.valuespec import (
     Dictionary,
     CascadingDropdown,
     ListChoice,
     ListOfStrings,
     ListOf,
-    TextAscii,
 )
 from cmk.gui.breadcrumb import Breadcrumb
 from cmk.gui.page_menu import (
@@ -46,6 +45,7 @@ from cmk.gui.watolib.groups import (
     load_contact_group_information,
     GroupType,
 )
+from cmk.gui.inventory import vs_inventory_path
 
 from cmk.gui.plugins.wato import (
     WatoMode,
@@ -130,11 +130,11 @@ class ModeGroups(WatoMode, metaclass=abc.ABCMeta):
         )
 
     def action(self) -> ActionResult:
-        if not html.check_transaction():
+        if not transactions.check_transaction():
             return redirect(mode_url("%s_groups" % self.type_name))
 
-        if html.request.var('_delete'):
-            delname = html.request.get_ascii_input_mandatory("_delete")
+        if request.var('_delete'):
+            delname = request.get_ascii_input_mandatory("_delete")
             usages = watolib.find_usages_of_group(delname, self.type_name)
 
             if usages:
@@ -162,7 +162,7 @@ class ModeGroups(WatoMode, metaclass=abc.ABCMeta):
         edit_url = watolib.folder_preserving_link([("mode", "edit_%s_group" % self.type_name),
                                                    ("edit", name)])
         delete_url = make_confirm_link(
-            url=html.makeactionuri([("_delete", name)]),
+            url=makeactionuri(request, transactions, [("_delete", name)]),
             message=_('Do you really want to delete the %s group "%s"?') % (self.type_name, name))
         clone_url = watolib.folder_preserving_link([("mode", "edit_%s_group" % self.type_name),
                                                     ("clone", name)])
@@ -170,8 +170,8 @@ class ModeGroups(WatoMode, metaclass=abc.ABCMeta):
         html.icon_button(clone_url, _("Create a copy of this group"), "clone")
         html.icon_button(delete_url, _("Delete"), "delete")
 
-        table.cell(_("Name"), escaping.escape_attribute(name))
-        table.cell(_("Alias"), escaping.escape_attribute(group['alias']))
+        table.cell(_("Name"), name)
+        table.cell(_("Alias"), group['alias'])
 
     def page(self) -> None:
         if not self._groups:
@@ -204,11 +204,11 @@ class ABCModeEditGroup(WatoMode, metaclass=abc.ABCMeta):
         super().__init__()
 
     def _from_vars(self) -> None:
-        self._name = html.request.get_ascii_input("edit")  # missing -> new group
+        self._name = request.get_ascii_input("edit")  # missing -> new group
         self._new = self._name is None
 
         if self._new:
-            clone_group = html.request.get_ascii_input("clone")
+            clone_group = request.get_ascii_input("clone")
             if clone_group:
                 self._name = clone_group
 
@@ -230,16 +230,16 @@ class ABCModeEditGroup(WatoMode, metaclass=abc.ABCMeta):
         pass
 
     def action(self) -> ActionResult:
-        if not html.check_transaction():
+        if not transactions.check_transaction():
             return redirect(mode_url("%s_groups" % self.type_name))
 
-        alias = html.request.get_unicode_input_mandatory("alias").strip()
+        alias = request.get_unicode_input_mandatory("alias").strip()
         self.group = {"alias": alias}
 
         self._determine_additional_group_data()
 
         if self._new:
-            self._name = html.request.get_ascii_input_mandatory("name").strip()
+            self._name = request.get_ascii_input_mandatory("name").strip()
             watolib.add_group(self._name, self.type_name, self.group)
         else:
             watolib.edit_group(self._name, self.type_name, self.group)
@@ -510,18 +510,16 @@ class ModeEditContactgroup(ABCModeEditGroup):
                 ("paths", _("Allowed to see the following entries"),
                  ListOf(
                      Dictionary(
-                         elements=[("path", TextAscii(
-                             title=_("Path"),
-                             size=60,
-                             allow_empty=False,
-                         )),
-                                   ("attributes",
-                                    ListOfStrings(
-                                        orientation="horizontal",
-                                        title=_("Attributes"),
-                                        size=15,
-                                        allow_empty=True,
-                                    ))],
+                         elements=[
+                             ("path", vs_inventory_path()),
+                             ("attributes",
+                              ListOfStrings(
+                                  orientation="horizontal",
+                                  title=_("Attributes"),
+                                  size=15,
+                                  allow_empty=True,
+                              )),
+                         ],
                          optional_keys=["attributes"],
                      ),
                      allow_empty=False,

@@ -26,7 +26,7 @@ import cmk.utils.paths
 
 import cmk.gui.i18n
 from cmk.gui.i18n import _
-from cmk.gui.globals import html, request
+from cmk.gui.globals import html, request, theme, response, output_funnel
 import cmk.gui.utils as utils
 import cmk.gui.config as config
 import cmk.gui.pagetypes as pagetypes
@@ -62,7 +62,7 @@ if cmk_version.is_managed_edition():
 # TODO: Drop once we don't support legacy snapins anymore
 from cmk.gui.plugins.sidebar.utils import (  # noqa: F401 # pylint: disable=unused-import
     snapin_registry, snapin_width, snapin_site_choice, render_link, heading, link, simplelink,
-    bulletlink, iconlink, nagioscgilink, footnotelinks, begin_footnote_links, end_footnote_links,
+    bulletlink, iconlink, footnotelinks, begin_footnote_links, end_footnote_links,
     write_snapin_exception,
 )
 
@@ -329,7 +329,7 @@ class SidebarRenderer:
         body_classes = ['side', "screenshotmode" if config.screenshotmode else None]
 
         if not config.user.may("general.see_sidebar"):
-            html.open_body(class_=body_classes, data_theme=html.get_theme())
+            html.open_body(class_=body_classes, data_theme=theme.get())
             return
 
         interval = config.sidebar_notify_interval if config.sidebar_notify_interval is not None else "null"
@@ -338,7 +338,7 @@ class SidebarRenderer:
             onload=
             'cmk.sidebar.initialize_scroll_position(); cmk.sidebar.init_messages_and_werks(%s, %s); '
             % (json.dumps(interval), json.dumps(bool(may_acknowledge()))),
-            data_theme=html.get_theme(),
+            data_theme=theme.get(),
         )
 
     def _show_sidebar(self) -> None:
@@ -515,13 +515,13 @@ class SidebarRenderer:
         styles = snapin_instance.styles()
         if styles:
             html.open_style()
-            html.write(styles)
+            html.write_text(styles)
             html.close_style()
 
     def _show_page_content(self, content: Optional['HTML']):
         html.open_div(id_="content_area")
         if content is not None:
-            html.write(content)
+            html.write_html(content)
         html.close_div()
 
     def _show_sidebar_head(self):
@@ -531,10 +531,7 @@ class SidebarRenderer:
             target="main",
             title=_("Go to main page"),
         )
-        if config.user.get_attribute("nav_hide_icons_title"):
-            html.img(html.theme_url('images/tribe29_icon_min.svg'))
-        else:
-            html.img(html.theme_url('images/tribe29_icon.svg'))
+        _render_header_icon()
         html.close_a()
         html.close_div()
 
@@ -550,6 +547,19 @@ class SidebarRenderer:
         html.close_div()
 
 
+def _render_header_icon() -> None:
+    if config.user.get_attribute("nav_hide_icons_title"):
+        if config.has_custom_logo():
+            html.img(theme.detect_icon_path(icon_name="logo", prefix="mk-"), class_="custom")
+        else:
+            html.img(theme.detect_icon_path(icon_name="icon_min", prefix="tribe29_"))
+    else:
+        if config.has_custom_logo():
+            html.img(theme.detect_icon_path(icon_name="logo", prefix="mk-"))
+        else:
+            html.img(theme.detect_icon_path(icon_name="icon", prefix="tribe29_"))
+
+
 @cmk.gui.pages.register("side")
 def page_side():
     SidebarRenderer().show()
@@ -558,12 +568,12 @@ def page_side():
 @cmk.gui.pages.register("sidebar_snapin")
 def ajax_snapin():
     """Renders and returns the contents of the requested sidebar snapin(s) in JSON format"""
-    html.set_output_format("json")
+    response.set_content_type("application/json")
     user_config = UserSidebarConfig(config.user, config.sidebar)
 
-    snapin_id = html.request.var("name")
-    snapin_ids = [snapin_id] if snapin_id else html.request.get_str_input_mandatory("names",
-                                                                                    "").split(",")
+    snapin_id = request.var("name")
+    snapin_ids = [snapin_id] if snapin_id else request.get_str_input_mandatory("names",
+                                                                               "").split(",")
 
     snapin_code: List[str] = []
     for snapin_id in snapin_ids:
@@ -579,7 +589,7 @@ def ajax_snapin():
         # them, when the core has been restarted after their initial
         # rendering
         if not snapin_instance.refresh_regularly() and snapin_instance.refresh_on_restart():
-            since = html.request.get_float_input_mandatory('since', 0)
+            since = request.get_float_input_mandatory('since', 0)
             newest = since
             for site in sites.states().values():
                 prog_start = site.get("program_start", 0)
@@ -590,40 +600,39 @@ def ajax_snapin():
                 snapin_code.append(u'')
                 continue
 
-        with html.plugged():
+        with output_funnel.plugged():
             try:
                 snapin_instance.show()
             except Exception as e:
                 write_snapin_exception(e)
                 e_message = _("Exception during element refresh (element \'%s\')"
                              ) % snapin_instance.type_name()
-                logger.error("%s %s: %s", html.request.requested_url, e_message,
-                             traceback.format_exc())
+                logger.error("%s %s: %s", request.requested_url, e_message, traceback.format_exc())
             finally:
-                snapin_code.append(html.drain())
+                snapin_code.append(output_funnel.drain())
 
-    html.write(json.dumps(snapin_code))
+    response.set_data(json.dumps(snapin_code))
 
 
 @cmk.gui.pages.register("sidebar_fold")
 def ajax_fold():
-    html.set_output_format("json")
+    response.set_content_type("application/json")
     user_config = UserSidebarConfig(config.user, config.sidebar)
-    user_config.folded = html.request.var("fold") == "yes"
+    user_config.folded = request.var("fold") == "yes"
     user_config.save()
 
 
 @cmk.gui.pages.register("sidebar_openclose")
 def ajax_openclose() -> None:
-    html.set_output_format("json")
+    response.set_content_type("application/json")
     if not config.user.may("general.configure_sidebar"):
         return None
 
-    snapin_id = html.request.var("name")
+    snapin_id = request.var("name")
     if snapin_id is None:
         return None
 
-    state = html.request.var("state")
+    state = request.var("state")
     if state not in [SnapinVisibility.OPEN.value, SnapinVisibility.CLOSED.value, "off"]:
         raise MKUserError("state", "Invalid state: %s" % state)
 
@@ -644,11 +653,11 @@ def ajax_openclose() -> None:
 
 @cmk.gui.pages.register("sidebar_move_snapin")
 def move_snapin() -> None:
-    html.set_output_format("json")
+    response.set_content_type("application/json")
     if not config.user.may("general.configure_sidebar"):
         return None
 
-    snapin_id = html.request.var("name")
+    snapin_id = request.var("name")
     if snapin_id is None:
         return None
 
@@ -659,7 +668,7 @@ def move_snapin() -> None:
     except KeyError:
         return None
 
-    before_id = html.request.var("before")
+    before_id = request.var("before")
     before_snapin: Optional[UserSidebarSnapin] = None
     if before_id:
         try:
@@ -818,7 +827,7 @@ class AjaxAddSnapin(cmk.gui.pages.AjaxPage):
         if not config.user.may("general.configure_sidebar"):
             raise MKGeneralException(_("You are not allowed to change the sidebar."))
 
-        addname = html.request.var("name")
+        addname = request.var("name")
 
         if addname is None or addname not in snapin_registry:
             raise MKUserError(None, _("Invalid sidebar element %s") % addname)
@@ -831,11 +840,11 @@ class AjaxAddSnapin(cmk.gui.pages.AjaxPage):
         user_config.add_snapin(snapin)
         user_config.save()
 
-        with html.plugged():
+        with output_funnel.plugged():
             try:
                 url = SidebarRenderer().render_snapin(snapin)
             finally:
-                snapin_code = html.drain()
+                snapin_code = output_funnel.drain()
 
         return {
             'name': addname,
@@ -849,12 +858,12 @@ class AjaxAddSnapin(cmk.gui.pages.AjaxPage):
 # TODO: This is snapin specific. Move this handler to the snapin file
 @cmk.gui.pages.register("sidebar_ajax_set_snapin_site")
 def ajax_set_snapin_site():
-    html.set_output_format("json")
-    ident = html.request.var("ident")
+    response.set_content_type("application/json")
+    ident = request.var("ident")
     if ident not in snapin_registry:
         raise MKUserError(None, _("Invalid ident"))
 
-    site = html.request.var("site")
+    site = request.var("site")
     site_choices = dict([("", _("All sites"))] + config.get_configured_site_choices())
 
     if site not in site_choices:

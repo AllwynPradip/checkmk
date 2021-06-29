@@ -27,6 +27,7 @@ from typing import (
 import redis
 from werkzeug.test import create_environ
 
+import cmk.gui.config as config
 from cmk.gui.background_job import BackgroundJobAlreadyRunning, BackgroundProcessInterface
 from cmk.gui.config import UserContext, user
 from cmk.gui.display_options import DisplayOptions
@@ -34,7 +35,9 @@ from cmk.gui.exceptions import MKAuthException
 from cmk.gui.globals import RequestContext, g, request
 from cmk.gui.gui_background_job import GUIBackgroundJob, job_registry
 from cmk.gui.htmllib import html
-from cmk.gui.http import Request
+from cmk.gui.http import Request, Response
+from cmk.gui.utils.output_funnel import OutputFunnel
+from cmk.gui.utils.theme import Theme
 from cmk.gui.i18n import _, get_current_language, get_languages, localize
 from cmk.gui.pages import get_page_handler
 from cmk.gui.type_defs import SearchQuery, SearchResult, SearchResultsByTopic
@@ -301,10 +304,17 @@ class IndexSearcher:
     @contextmanager
     def _SearchContext(self) -> Iterator[None]:
         _request = Request(create_environ())
+        _response = Response()
+        _funnel = OutputFunnel(_response)
+        _theme = Theme()
+        _theme.from_config(config.ui_theme, config.theme_choices())
         with RequestContext(
-                html_obj=html(_request),
                 req=_request,
+                resp=_response,
+                funnel=_funnel,
+                html_obj=html(_request, _response, _funnel, output_format="html"),
                 display_options=DisplayOptions(),
+                theme=_theme,
         ), UserContext(self._user_id):
             yield
 
@@ -347,7 +357,8 @@ class IndexSearcher:
         results: DefaultDict[str, List[SearchResult]],
     ) -> None:
         for category in self._redis_client.smembers(key_categories):
-            if not self._may_see_category(category):
+            # category is a Union[bytes, float, int, str]
+            if not (isinstance(category, str) and self._may_see_category(category)):
                 continue
 
             prefix_category = IndexBuilder.add_to_prefix(
@@ -396,6 +407,8 @@ class IndexSearcher:
         return (
             _("Setup"),
             _("Hosts"),
+            _("VM, Cloud, Container"),
+            _("Other integrations"),
             _("Service monitoring rules"),
             _("Service discovery rules"),
         )

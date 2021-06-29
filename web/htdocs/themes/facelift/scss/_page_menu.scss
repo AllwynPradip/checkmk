@@ -80,8 +80,10 @@ div#top_heading {
     &.default {
       div.text_container {
         position: absolute;
-        right: 6px;
+        right: 5.5px;
+        bottom: 21px;
         font-size: $font-size-small;
+        line-height: $font-size-small;
       }
 
       div.icon_container,
@@ -150,6 +152,11 @@ div#top_heading {
       padding: 0;
       margin: 0;
       vertical-align: middle;
+
+      // Needed to prevent a buggy menubar display on rule edit pages (FEED-5754)
+      &.menues {
+        width: 1px;
+      }
 
       &.shortcuts {
         width: 100%;
@@ -637,10 +644,6 @@ div#page_menu_popups div.side_popup {
 
       span.select2-container--default {
         display: inline-block;
-
-        &:last-child {
-          width: auto !important;
-        }
       }
 
       &.host_auxtags {

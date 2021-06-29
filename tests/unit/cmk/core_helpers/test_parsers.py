@@ -6,22 +6,24 @@
 
 # pylint: disable=protected-access
 
+import copy
+import itertools
 import logging
 import time
 from collections import defaultdict
 
-import pytest  # type: ignore[import]
+import pytest
 
-from testlib.base import Scenario  # type: ignore[import]
+from testlib.base import Scenario
 
-from cmk.utils.type_defs import AgentRawData, AgentRawDataSection, SectionName
+from cmk.utils.type_defs import AgentRawData, SectionName
 
-from cmk.snmplib.type_defs import SNMPRawData
+from cmk.snmplib.type_defs import SNMPRawData, SNMPRawDataSection
 
 from cmk.core_helpers.agent import AgentParser, SectionMarker
 from cmk.core_helpers.cache import PersistedSections, SectionStore
 from cmk.core_helpers.snmp import SNMPParser
-from cmk.core_helpers.type_defs import NO_SELECTION
+from cmk.core_helpers.type_defs import AgentRawDataSection, NO_SELECTION
 
 
 class TestAgentParser:
@@ -61,7 +63,7 @@ class TestAgentParser:
         )
 
     @pytest.mark.usefixtures("scenario")
-    def test_missing_host_header(self, parser):
+    def test_missing_host_header(self, parser, store):
         raw_data = AgentRawData(b"\n".join((
             b"hey!",
             b"a header",
@@ -72,9 +74,10 @@ class TestAgentParser:
         assert ahs.sections == {}
         assert ahs.cache_info == {}
         assert ahs.piggybacked_raw_data == {}
+        assert store.load() == {}
 
     @pytest.mark.usefixtures("scenario")
-    def test_piggy_name_as_hostname_is_not_piggybacked(self, parser, hostname):
+    def test_piggy_name_as_hostname_is_not_piggybacked(self, parser, store, hostname):
         raw_data = AgentRawData(b"\n".join((
             f"<<<<{hostname}>>>>".encode("ascii"),
             b"line0",
@@ -86,9 +89,10 @@ class TestAgentParser:
         assert ahs.sections == {}
         assert ahs.cache_info == {}
         assert ahs.piggybacked_raw_data == {}
+        assert store.load() == {}
 
     @pytest.mark.usefixtures("scenario")
-    def test_no_section_header_after_piggyback(self, parser):
+    def test_no_section_header_after_piggyback(self, parser, store):
         raw_data = AgentRawData(b"\n".join((
             b"<<<<piggy>>>>",
             b"line0",
@@ -99,10 +103,11 @@ class TestAgentParser:
         ahs = parser.parse(raw_data, selection=NO_SELECTION)
         assert ahs.sections == {}
         assert ahs.cache_info == {}
-        assert ahs.piggybacked_raw_data == {'piggy': [b"line0", b"line1", b"line2"]}
+        assert ahs.piggybacked_raw_data == {'piggy': []}
+        assert store.load() == {}
 
     @pytest.mark.usefixtures("scenario")
-    def test_raw_section_populates_sections(self, parser):
+    def test_raw_section_populates_sections(self, parser, store):
         raw_data = AgentRawData(b"\n".join((
             b"<<<a_section>>>",
             b"first line",
@@ -122,12 +127,57 @@ class TestAgentParser:
         }
         assert ahs.cache_info == {}
         assert ahs.piggybacked_raw_data == {}
+        assert store.load() == {}
 
     @pytest.mark.usefixtures("scenario")
-    def test_piggyback_populates_piggyback_raw_data(self, parser, monkeypatch):
-        time_time = 1000
-        monkeypatch.setattr(time, "time", lambda: time_time)
-        monkeypatch.setattr(parser, "check_interval", 10)
+    def test_merge_split_raw_sections(self, parser, store):
+        raw_data = AgentRawData(b"\n".join((
+            b"<<<a_section>>>",
+            b"first line",
+            b"second line",
+            b"<<<>>>",
+            b"<<<another_section>>>",
+            b"a line",
+            b"b line",
+            b"<<<a_section>>>",
+            b"third line",
+            b"forth line",
+            b"<<<>>>",
+            b"<<<another_section>>>",
+            b"c line",
+            b"d line",
+            b"<<<>>>",
+            b"<<<a_section:sep(124)>>>",
+            b"fifth|line",
+            b"sixth|line",
+            b"<<<>>>",
+        )))
+
+        ahs = parser.parse(raw_data, selection=NO_SELECTION)
+        assert ahs.sections == {
+            SectionName("a_section"): [
+                ["first", "line"],
+                ["second", "line"],
+                ["third", "line"],
+                ["forth", "line"],
+                ["fifth", "line"],
+                ["sixth", "line"],
+            ],
+            SectionName("another_section"): [
+                ["a", "line"],
+                ["b", "line"],
+                ["c", "line"],
+                ["d", "line"],
+            ],
+        }
+        assert ahs.cache_info == {}
+        assert ahs.piggybacked_raw_data == {}
+        assert store.load() == {}
+
+    @pytest.mark.usefixtures("scenario")
+    def test_piggyback_populates_piggyback_raw_data(self, parser, store, monkeypatch):
+        monkeypatch.setattr(time, "time", lambda c=itertools.count(1000, 50): next(c))
+        monkeypatch.setattr(parser, "cache_piggybacked_data_for", 900)
 
         raw_data = AgentRawData(b"\n".join((
             b"<<<<piggyback header>>>>",  # <- space is OK
@@ -178,15 +228,57 @@ class TestAgentParser:
                 b"first line",
             ],
         }
+        assert store.load() == {}
 
     @pytest.mark.usefixtures("scenario")
-    def test_persist_option_populates_cache_info(self, parser, mocker, monkeypatch):
-        time_time = 1000
-        time_delta = 50
-        monkeypatch.setattr(time, "time", lambda: time_time)
+    def test_merge_split_piggyback_sections(self, parser, store, monkeypatch):
+        monkeypatch.setattr(time, "time", lambda c=itertools.count(1000, 50): next(c))
+        monkeypatch.setattr(parser, "cache_piggybacked_data_for", 900)
 
         raw_data = AgentRawData(b"\n".join((
-            b"<<<section:persist(%i)>>>" % (time_time + time_delta),
+            b"<<<<piggy>>>>",
+            b"<<<a_section>>>",
+            b"first line",
+            b"second line",
+            b"<<<another_section>>>",
+            b"a line",
+            b"b line",
+            b"<<<<>>>>",
+            b"<<<<piggy>>>>",
+            b"<<<a_section>>>",
+            b"third line",
+            b"forth line",
+            b"<<<another_section>>>",
+            b"c line",
+            b"d line",
+            b"<<<<>>>>",
+        )))
+
+        ahs = parser.parse(raw_data, selection=NO_SELECTION)
+        assert ahs.sections == {}
+        assert ahs.cache_info == {}
+        assert ahs.piggybacked_raw_data == {
+            "piggy": [
+                b"<<<a_section:cached(1000,900)>>>",
+                b"first line",
+                b"second line",
+                b"third line",
+                b"forth line",
+                b"<<<another_section:cached(1000,900)>>>",
+                b"a line",
+                b"b line",
+                b"c line",
+                b"d line",
+            ],
+        }
+        assert store.load() == {}
+
+    @pytest.mark.usefixtures("scenario")
+    def test_persist_option_populates_cache_info(self, parser, store, mocker, monkeypatch):
+        monkeypatch.setattr(time, "time", lambda c=itertools.count(1000, 50): next(c))
+
+        raw_data = AgentRawData(b"\n".join((
+            b"<<<section:persist(%i)>>>" % (1000 + 50),
             b"first line",
             b"second line",
         )))
@@ -194,18 +286,19 @@ class TestAgentParser:
         ahs = parser.parse(raw_data, selection=NO_SELECTION)
 
         assert ahs.sections == {SectionName("section"): [["first", "line"], ["second", "line"]]}
-        assert ahs.cache_info == {SectionName("section"): (time_time, time_delta)}
+        assert ahs.cache_info == {SectionName("section"): (1000, 50)}
         assert ahs.piggybacked_raw_data == {}
+        assert store.load() == PersistedSections[AgentRawDataSection]({
+            SectionName("section"): (1000, 1050, [["first", "line"], ["second", "line"]]),
+        })
 
     @pytest.mark.usefixtures("scenario")
-    def test_persist_option_and_persisted_sections(self, parser, mocker, monkeypatch):
-        time_time = 1000
-        time_delta = 50
-        monkeypatch.setattr(time, "time", lambda: time_time)
+    def test_persist_option_and_persisted_sections(self, parser, store, mocker, monkeypatch):
+        monkeypatch.setattr(time, "time", lambda c=itertools.count(1000, 50): next(c))
         monkeypatch.setattr(
             SectionStore,
             "load",
-            lambda self: PersistedSections({
+            lambda self: PersistedSections[AgentRawDataSection]({
                 SectionName("persisted"): (42, 69, [["content"]]),
             }),
         )
@@ -213,7 +306,7 @@ class TestAgentParser:
         monkeypatch.setattr(SectionStore, "store", lambda self, sections: None)
 
         raw_data = AgentRawData(b"\n".join((
-            b"<<<section:persist(%i)>>>" % (time_time + time_delta),
+            b"<<<section:persist(%i)>>>" % (1000 + 50),
             b"first line",
             b"second line",
         )))
@@ -225,13 +318,58 @@ class TestAgentParser:
             SectionName("persisted"): [["content"]],
         }
         assert ahs.cache_info == {
-            SectionName("section"): (time_time, time_delta),
+            SectionName("section"): (1000, 50),
             SectionName("persisted"): (42, 27),
         }
         assert ahs.piggybacked_raw_data == {}
+        assert store.load() == PersistedSections[AgentRawDataSection]({
+            SectionName("persisted"): (42, 69, [["content"]]),
+        })
 
-    def test_section_filtering(self, parser, monkeypatch):
-        monkeypatch.setattr(time, "time", lambda: 1000)
+    def test_section_filtering_and_merging_host(self, parser, store, monkeypatch):
+        monkeypatch.setattr(time, "time", lambda c=itertools.count(1000, 50): next(c))
+        raw_data = AgentRawData(b"\n".join((
+            b"<<<deselected:persist(1000)>>>",
+            b"1st line",
+            b"2nd line",
+            b"<<<selected:persist(1000)>>>",
+            b"3rd line",
+            b"4th line",
+            b"<<<deselected:persist(1000)>>>",
+            b"5th line",
+            b"6th line",
+            b"<<<selected:persist(1000)>>>",
+            b"7th line",
+            b"8th line",
+        )))
+
+        ahs = parser.parse(raw_data, selection={SectionName("selected")})
+
+        assert ahs.sections == {
+            SectionName("selected"): [
+                ["3rd", "line"],
+                ["4th", "line"],
+                ["7th", "line"],
+                ["8th", "line"],
+            ],
+        }
+        assert ahs.cache_info == {SectionName("selected"): (1000, 0)}
+        assert ahs.piggybacked_raw_data == {}
+        assert store.load() == PersistedSections[AgentRawDataSection]({
+            SectionName("selected"): (
+                1000,
+                1000,
+                [
+                    ["3rd", "line"],
+                    ["4th", "line"],
+                    ["7th", "line"],
+                    ["8th", "line"],
+                ],
+            )
+        })
+
+    def test_section_filtering_and_merging_piggyback(self, parser, store, monkeypatch):
+        monkeypatch.setattr(time, "time", lambda c=itertools.count(1000, 50): next(c))
         raw_data = AgentRawData(b"\n".join((
             b"<<<<piggyback_header>>>>",
             b"<<<deselected>>>",
@@ -262,6 +400,7 @@ class TestAgentParser:
                 b"4th line",
             ]
         }
+        assert store.load() == {}
 
 
 class TestSectionMarker:
@@ -378,10 +517,10 @@ class TestSNMPParser:
         assert not host_sections.piggybacked_raw_data
 
     def test_with_persisted_sections(self, parser, sections, monkeypatch):
-        monkeypatch.setattr(time, "time", lambda: 1000)
+        monkeypatch.setattr(time, "time", lambda c=itertools.count(1000, 50): next(c))
         monkeypatch.setattr(parser, "check_intervals", defaultdict(lambda: 33))
         monkeypatch.setattr(
-            SectionStore, "load", lambda self: PersistedSections({
+            SectionStore, "load", lambda self: PersistedSections[AgentRawDataSection]({
                 SectionName("persisted"): (42, 69, [["content"]]),
             }))
         # Patch IO:
@@ -395,3 +534,366 @@ class TestSNMPParser:
         assert ahs.sections == all_sections
         assert ahs.cache_info == {SectionName("persisted"): (42, 27)}
         assert ahs.piggybacked_raw_data == {}
+
+
+class MockStore(SectionStore):
+    # pylint: disable=super-init-not-called, arguments-differ
+    def __init__(self, data):
+        assert isinstance(data, PersistedSections)
+        self._data = data
+
+    def store(self, data):
+        self._data = copy.copy(data)
+
+    def load(self):
+        return copy.copy(self._data)
+
+
+class TestAgentPersistentSectionHandling:
+    def test_update_with_empty_store_and_empty_raw_data(self):
+        section_store = MockStore(PersistedSections[AgentRawDataSection]({}))
+        raw_data = AgentRawData(b"")
+        parser = AgentParser(
+            "testhost",
+            section_store,
+            check_interval=0,
+            keep_outdated=True,
+            translation={},
+            encoding_fallback="ascii",
+            simulation=False,
+            logger=logging.getLogger("test"),
+        )
+
+        ahs = parser.parse(raw_data, selection=NO_SELECTION)
+        assert ahs.sections == {}
+        assert ahs.cache_info == {}
+        assert ahs.piggybacked_raw_data == {}
+        assert section_store.load() == {}
+
+    def test_update_with_store_and_empty_raw_data(self):
+        section_store = MockStore(PersistedSections[AgentRawDataSection]({
+            SectionName("stored"): (0, 0, []),
+        }))
+        raw_data = AgentRawData(b"")
+        parser = AgentParser(
+            "testhost",
+            section_store,
+            check_interval=0,
+            keep_outdated=True,
+            translation={},
+            encoding_fallback="ascii",
+            simulation=False,
+            logger=logging.getLogger("test"),
+        )
+
+        ahs = parser.parse(raw_data, selection=NO_SELECTION)
+        assert ahs.sections == {SectionName("stored"): []}
+        assert ahs.cache_info == {SectionName("stored"): (0, 0)}
+        assert ahs.piggybacked_raw_data == {}
+        assert section_store.load() == PersistedSections[AgentRawDataSection]({
+            SectionName("stored"): (0, 0, []),
+        })
+
+    def test_update_with_empty_store_and_raw_data(self):
+        raw_data = AgentRawData(b"<<<fresh>>>")
+        section_store = MockStore(PersistedSections[AgentRawDataSection]({}))
+        parser = AgentParser(
+            "testhost",
+            section_store,
+            check_interval=0,
+            keep_outdated=True,
+            translation={},
+            encoding_fallback="ascii",
+            simulation=False,
+            logger=logging.getLogger("test"),
+        )
+
+        ahs = parser.parse(raw_data, selection=NO_SELECTION)
+        assert ahs.sections == {SectionName("fresh"): []}
+        assert ahs.cache_info == {}
+        assert ahs.piggybacked_raw_data == {}
+        assert section_store.load() == {}
+
+    def test_update_with_store_and_non_persisting_raw_data(self):
+        section_store = MockStore(PersistedSections[AgentRawDataSection]({
+            SectionName("stored"): (0, 0, []),
+        }))
+        raw_data = AgentRawData(b"<<<fresh>>>")
+        parser = AgentParser(
+            "testhost",
+            section_store,
+            check_interval=0,
+            keep_outdated=True,
+            translation={},
+            encoding_fallback="ascii",
+            simulation=False,
+            logger=logging.getLogger("test"),
+        )
+
+        ahs = parser.parse(raw_data, selection=NO_SELECTION)
+        assert ahs.sections == {
+            SectionName("fresh"): [],
+            SectionName("stored"): [],
+        }
+        assert ahs.cache_info == {SectionName("stored"): (0, 0)}
+        assert ahs.piggybacked_raw_data == {}
+        assert section_store.load() == PersistedSections[AgentRawDataSection]({
+            SectionName("stored"): (0, 0, []),
+        })
+
+    def test_update_with_store_and_persisting_raw_data(self, monkeypatch):
+        monkeypatch.setattr(time, "time", lambda c=itertools.count(1000, 50): next(c))
+        section_store = MockStore(PersistedSections[AgentRawDataSection]({
+            SectionName("stored"): (0, 0, [["canned", "section"]]),
+        }))
+        raw_data = AgentRawData(b"<<<fresh:persist(10)>>>\nhello section")
+        parser = AgentParser(
+            "testhost",
+            section_store,
+            check_interval=0,
+            keep_outdated=True,
+            translation={},
+            encoding_fallback="ascii",
+            simulation=False,
+            logger=logging.getLogger("test"),
+        )
+
+        ahs = parser.parse(raw_data, selection=NO_SELECTION)
+        assert ahs.sections == {
+            SectionName("fresh"): [["hello", "section"]],
+            SectionName("stored"): [["canned", "section"]],
+        }
+        assert ahs.cache_info == {
+            SectionName("stored"): (0, 0),
+            SectionName("fresh"): (1000, -990),
+        }
+        assert ahs.piggybacked_raw_data == {}
+        assert section_store.load() == PersistedSections[AgentRawDataSection]({
+            SectionName("stored"): (0, 0, [["canned", "section"]]),
+            SectionName("fresh"): (1000, 10, [["hello", "section"]]),
+        })
+
+    def test_update_store_with_newest(self):
+        section_store = MockStore(PersistedSections[AgentRawDataSection]({
+            SectionName("section"): (0, 0, [["oldest"]]),
+        }))
+        raw_data = AgentRawData(b"<<<section>>>\nnewest")
+        parser = AgentParser(
+            "testhost",
+            section_store,
+            check_interval=0,
+            keep_outdated=True,
+            translation={},
+            encoding_fallback="ascii",
+            simulation=False,
+            logger=logging.getLogger("test"),
+        )
+
+        ahs = parser.parse(raw_data, selection=NO_SELECTION)
+        assert ahs.sections == {SectionName("section"): [["newest"]]}
+        assert ahs.cache_info == {}
+        assert ahs.piggybacked_raw_data == {}
+        assert section_store.load() == PersistedSections[AgentRawDataSection]({
+            SectionName("section"): (0, 0, [["oldest"]]),
+        })
+
+    def test_keep_outdated_false(self, monkeypatch):
+        monkeypatch.setattr(time, "time", lambda c=itertools.count(1000, 50): next(c))
+
+        raw_data = AgentRawData(b"<<<another_section>>>")
+        section_store = MockStore(PersistedSections[AgentRawDataSection]({
+            SectionName("section"): (500, 600, []),
+        }))
+        parser = AgentParser(
+            "testhost",
+            section_store,
+            check_interval=42,
+            keep_outdated=False,
+            translation={},
+            encoding_fallback="ascii",
+            simulation=False,
+            logger=logging.getLogger("test"),
+        )
+
+        ahs = parser.parse(raw_data, selection=NO_SELECTION)
+        assert ahs.sections == {SectionName('another_section'): []}
+        assert ahs.cache_info == {}
+        assert ahs.piggybacked_raw_data == {}
+        assert section_store.load() == {}
+
+    def test_keep_outdated_true(self, monkeypatch):
+        monkeypatch.setattr(time, "time", lambda c=itertools.count(1000, 50): next(c))
+
+        raw_data = AgentRawData(b"<<<another_section>>>")
+        section_store = MockStore(PersistedSections[AgentRawDataSection]({
+            SectionName("section"): (500, 600, []),
+        }))
+        parser = AgentParser(
+            "testhost",
+            section_store,
+            check_interval=42,
+            keep_outdated=True,
+            translation={},
+            encoding_fallback="ascii",
+            simulation=False,
+            logger=logging.getLogger("test"),
+        )
+
+        ahs = parser.parse(raw_data, selection=NO_SELECTION)
+        assert ahs.sections == {
+            SectionName("another_section"): [],
+            SectionName("section"): [],
+        }
+        assert ahs.cache_info == {SectionName("section"): (500, 100)}
+        assert ahs.piggybacked_raw_data == {}
+        assert section_store.load() == PersistedSections[AgentRawDataSection]({
+            SectionName("section"): (500, 600, []),
+        })
+
+
+class TestSNMPPersistedSectionHandling:
+    def test_update_with_empty_store_and_persisted(self):
+        section_store = MockStore(PersistedSections[SNMPRawDataSection]({}))
+        raw_data: SNMPRawData = {}
+        parser = SNMPParser(
+            "testhost",
+            section_store,
+            check_intervals={},
+            keep_outdated=True,
+            logger=logging.getLogger("test"),
+        )
+
+        shs = parser.parse(raw_data, selection=NO_SELECTION)
+        assert shs.sections == {}
+        assert shs.cache_info == {}
+        assert shs.piggybacked_raw_data == {}
+        assert section_store.load() == {}
+
+    def test_update_with_empty_persisted(self):
+        section_store = MockStore(PersistedSections[SNMPRawDataSection]({
+            SectionName("stored"): (0, 0, [["old"]]),
+        }))
+        raw_data: SNMPRawData = {}
+        parser = SNMPParser(
+            "testhost",
+            section_store,
+            check_intervals={},
+            keep_outdated=True,
+            logger=logging.getLogger("test"),
+        )
+
+        shs = parser.parse(raw_data, selection=NO_SELECTION)
+        assert shs.sections == {SectionName("stored"): [["old"]]}
+        assert shs.cache_info == {SectionName("stored"): (0, 0)}
+        assert shs.piggybacked_raw_data == {}
+        assert section_store.load() == {
+            SectionName("stored"): (0, 0, [["old"]]),
+        }
+
+    def test_update_with_empty_store(self):
+        section_store = MockStore(PersistedSections[SNMPRawDataSection]({}))
+        _new: SNMPRawDataSection = [["new"]]  # For the type checker only
+        raw_data: SNMPRawData = {SectionName("fresh"): _new}
+        parser = SNMPParser(
+            "testhost",
+            section_store,
+            check_intervals={},
+            keep_outdated=True,
+            logger=logging.getLogger("test"),
+        )
+
+        shs = parser.parse(raw_data, selection=NO_SELECTION)
+        assert shs.sections == {SectionName("fresh"): [["new"]]}
+        assert shs.cache_info == {}
+        assert shs.piggybacked_raw_data == {}
+        assert section_store.load() == {}
+
+    def test_update_with_persisted_and_store(self):
+        section_store = MockStore(PersistedSections[SNMPRawDataSection]({
+            SectionName("stored"): (0, 0, [["old"]]),
+        }))
+        _new: SNMPRawDataSection = [["new"]]  # For the type checker only
+        raw_data: SNMPRawData = {SectionName("fresh"): _new}
+        parser = SNMPParser(
+            "testhost",
+            section_store,
+            check_intervals={},
+            keep_outdated=True,
+            logger=logging.getLogger("test"),
+        )
+
+        shs = parser.parse(raw_data, selection=NO_SELECTION)
+        assert shs.sections == {
+            SectionName("stored"): [["old"]],
+            SectionName("fresh"): [["new"]],
+        }
+        assert shs.cache_info == {SectionName("stored"): (0, 0)}
+        assert shs.piggybacked_raw_data == {}
+        assert section_store.load() == {
+            SectionName("stored"): (0, 0, [["old"]]),
+        }
+
+    def test_check_intervals_updates_persisted(self, monkeypatch):
+        monkeypatch.setattr(time, "time", lambda c=itertools.count(1000, 50): next(c))
+
+        section_store = MockStore(PersistedSections[SNMPRawDataSection]({
+            SectionName("section"): (0, 0, [["old"]]),
+        }))
+        _new: SNMPRawDataSection = [["new"]]  # For the type checker only
+        raw_data: SNMPRawData = {SectionName("section"): _new}
+        parser = SNMPParser(
+            "testhost",
+            section_store,
+            check_intervals={SectionName("section"): 42},
+            keep_outdated=True,
+            logger=logging.getLogger("test"),
+        )
+        shs = parser.parse(raw_data, selection=NO_SELECTION)
+        assert shs.sections == {SectionName("section"): [["new"]]}
+        assert shs.cache_info == {}
+        assert shs.piggybacked_raw_data == {}
+        assert section_store.load() == PersistedSections[SNMPRawDataSection]({
+            SectionName("section"): (1000, 1042, [["new"]]),
+        })
+
+    def test_keep_outdated_false(self, monkeypatch):
+        monkeypatch.setattr(time, "time", lambda c=itertools.count(1000, 50): next(c))
+
+        section_store = MockStore(PersistedSections[SNMPRawDataSection]({
+            SectionName("section"): (500, 600, [["old"]]),
+        }))
+        parser = SNMPParser(
+            "testhost",
+            section_store,
+            check_intervals={SectionName("section"): 42},
+            keep_outdated=False,
+            logger=logging.getLogger("test"),
+        )
+        shs = parser.parse({}, selection=NO_SELECTION)
+        assert shs.sections == {}
+        assert shs.cache_info == {}
+        assert shs.piggybacked_raw_data == {}
+        assert section_store.load() == {}
+
+    def test_keep_outdated_true(self, monkeypatch):
+        monkeypatch.setattr(time, "time", lambda c=itertools.count(1000, 50): next(c))
+
+        section_store = MockStore(PersistedSections[SNMPRawDataSection]({
+            SectionName("section"): (500, 600, [["old"]]),
+        }))
+        parser = SNMPParser(
+            "testhost",
+            section_store,
+            check_intervals={SectionName("section"): 42},
+            keep_outdated=True,
+            logger=logging.getLogger("test"),
+        )
+        shs = parser.parse({}, selection=NO_SELECTION)
+        assert shs.sections == {SectionName("section"): [["old"]]}
+        assert shs.cache_info == {
+            SectionName("section"): (500, 100),
+        }
+        assert shs.piggybacked_raw_data == {}
+        assert not section_store.load() == PersistedSections[SNMPRawDataSection]({
+            SectionName("section"): (1000, 1042, [["old"]]),
+        })

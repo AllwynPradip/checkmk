@@ -5,12 +5,13 @@
 # conditions defined in the file COPYING, which is part of this source code package.
 """Helper functions for dealing with Check_MK tags"""
 
-import re
 import abc
-from typing import Any, Dict, List, Optional, Set
+import re
+from typing import Any, Dict, List, Optional, Set, Union
 
-from cmk.utils.i18n import _
 from cmk.utils.exceptions import MKGeneralException
+from cmk.utils.i18n import _
+from cmk.utils.type_defs import TaggroupID, TagID
 
 
 def get_effective_tag_config(tag_config: Dict) -> 'TagConfig':
@@ -94,8 +95,6 @@ class ABCTag(metaclass=abc.ABCMeta):
 
 
 class AuxTag(ABCTag):
-    is_aux_tag = True
-
     def __init__(self, data=None):
         super(AuxTag, self).__init__()
         if data:
@@ -196,10 +195,9 @@ class AuxTagList:
 
 
 class GroupedTag(ABCTag):
-    is_aux_tag = False
-
     def __init__(self, group, data=None):
         super(GroupedTag, self).__init__()
+        self.id: Optional[str]
         self.group = group
         self.aux_tag_ids = []
         self.parse_config(data)
@@ -221,6 +219,11 @@ class GroupedTag(ABCTag):
 class TagGroup:
     def __init__(self, data=None):
         super(TagGroup, self).__init__()
+        self.id: Optional[str]
+        self.title: Optional[str]
+        self.topic: Optional[str]
+        self.help: Optional[str]
+        self.tags: List[GroupedTag]
         self._initialize()
 
         if data:
@@ -275,6 +278,8 @@ class TagGroup:
         return
 
     def get_tag_ids(self):
+        if self.is_checkbox_tag_group:
+            return {None, self.tags[0].id}
         return {tag.id for tag in self.tags}
 
     def get_dict_format(self):
@@ -411,8 +416,12 @@ class TagConfig:
                         ])
         return response
 
-    def get_tag_or_aux_tag(self, tag_id):
-        for tag_group in self.tag_groups:
+    def get_tag_or_aux_tag(
+        self,
+        taggroupd_id: TaggroupID,
+        tag_id: Optional[TagID],
+    ) -> Optional[Union[GroupedTag, AuxTag]]:
+        for tag_group in (t_grp for t_grp in self.tag_groups if t_grp.id == taggroupd_id):
             for grouped_tag in tag_group.tags:
                 if grouped_tag.id == tag_id:
                     return grouped_tag
@@ -420,6 +429,8 @@ class TagConfig:
         for aux_tag in self.aux_tag_list.get_tags():
             if aux_tag.id == tag_id:
                 return aux_tag
+
+        return None
 
     def parse_config(self, data):
         self._initialize()
@@ -571,27 +582,27 @@ class BuiltinTagConfig(TagConfig):
         return [
             {
                 'id': 'agent',
-                'title': _('Checkmk agent'),
-                'topic': _('Data sources'),
+                'title': _('Checkmk agent / API integrations'),
+                'topic': _('Monitoring agents'),
                 'tags': [
                     {
                         'id': 'cmk-agent',
-                        'title': _('Normal Checkmk agent, or special agent if configured'),
+                        'title': _('API integrations if configured, else Checkmk agent'),
                         'aux_tags': ['tcp'],
                     },
                     {
                         'id': 'all-agents',
-                        'title': _('Normal Checkmk agent, all configured special agents'),
+                        'title': _('Configured API integrations and Checkmk agent'),
                         'aux_tags': ['tcp'],
                     },
                     {
                         'id': 'special-agents',
-                        'title': _('No Checkmk agent, all configured special agents'),
+                        'title': _('Configured API integrations, no Checkmk agent'),
                         'aux_tags': ['tcp'],
                     },
                     {
                         'id': 'no-agent',
-                        'title': _('No agent'),
+                        'title': _('No API integrations, no Checkmk agent'),
                         'aux_tags': [],
                     },
                 ],
@@ -599,7 +610,7 @@ class BuiltinTagConfig(TagConfig):
             {
                 'id': 'piggyback',
                 'title': _("Piggyback"),
-                'topic': _('Data sources'),
+                'topic': _('Monitoring agents'),
                 'help': _(
                     "By default every host has the piggyback data source "
                     "<b>Use piggyback data from other hosts if present</b>. "
@@ -632,7 +643,7 @@ class BuiltinTagConfig(TagConfig):
             {
                 'id': 'snmp_ds',
                 'title': _('SNMP'),
-                'topic': _('Data sources'),
+                'topic': _('Monitoring agents'),
                 'tags': [{
                     'id': 'no-snmp',
                     'title': _('No SNMP'),
@@ -691,17 +702,17 @@ class BuiltinTagConfig(TagConfig):
             },
             {
                 'id': 'snmp',
-                'topic': _('Data sources'),
+                'topic': _('Monitoring agents'),
                 'title': _('Monitor via SNMP'),
             },
             {
                 'id': 'tcp',
-                'topic': _('Data sources'),
+                'topic': _('Monitoring agents'),
                 'title': _('Monitor via Checkmk Agent'),
             },
             {
                 'id': 'ping',
-                'topic': _('Data sources'),
+                'topic': _('Monitoring agents'),
                 'title': _('Only ping this device'),
             },
         ]

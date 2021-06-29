@@ -37,7 +37,7 @@ Todo:
 """
 
 import enum
-from typing import Any, Dict, Type
+from typing import Any, Mapping, Type, Union
 
 from . import cache
 from ._base import Fetcher, FileCache, Parser, Summarizer, verify_ipaddress
@@ -86,6 +86,17 @@ class FetcherType(enum.Enum):
             FetcherType.TCP: TCPFetcher,
         }[self]
 
-    def from_json(self, serialized: Dict[str, Any]) -> Fetcher:
+    @staticmethod
+    def from_fetcher(fetcher: Union[Fetcher, Type[Fetcher]]) -> "FetcherType":
+        cls = type(fetcher) if isinstance(fetcher, Fetcher) else fetcher
+        return {
+            IPMIFetcher: FetcherType.IPMI,
+            PiggybackFetcher: FetcherType.PIGGYBACK,
+            ProgramFetcher: FetcherType.PROGRAM,
+            SNMPFetcher: FetcherType.SNMP,
+            TCPFetcher: FetcherType.TCP,
+        }[cls]
+
+    def from_json(self, serialized: Mapping[str, Any]) -> Fetcher:
         """Instantiate the fetcher from serialized data."""
         return self.make().from_json(serialized)

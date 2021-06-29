@@ -5,7 +5,7 @@
 # conditions defined in the file COPYING, which is part of this source code package.
 import json
 
-from cmk.gui.plugins.openapi.livestatus_helpers.testing import MockLiveStatusConnection
+from cmk.utils.livestatus_helpers.testing import MockLiveStatusConnection
 
 
 def test_openapi_list_all_downtimes(
@@ -18,7 +18,7 @@ def test_openapi_list_all_downtimes(
     live: MockLiveStatusConnection = mock_livestatus
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     live.expect_query([
         'GET downtimes',
@@ -36,13 +36,20 @@ def test_openapi_schedule_hostgroup_downtime(
     wsgi_app,
     with_automation_user,
     mock_livestatus,
+    with_groups,
 ):
     live: MockLiveStatusConnection = mock_livestatus
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
-    live.expect_query('GET hostgroups\nColumns: members\nFilter: name = example',)
+    live.add_table('hostgroups', [
+        {
+            'members': ['example.com', 'heute'],
+            'name': 'windows',
+        },
+    ])
+    live.expect_query('GET hostgroups\nColumns: members\nFilter: name = windows')
     live.expect_query(
         'COMMAND [...] SCHEDULE_HOST_DOWNTIME;example.com;1577836800;1577923200;1;0;0;test123-...;Downtime for ...',
         match_type='ellipsis',
@@ -57,7 +64,7 @@ def test_openapi_schedule_hostgroup_downtime(
             content_type='application/json',
             params=json.dumps({
                 'downtime_type': 'hostgroup',
-                'hostgroup_name': 'example',
+                'hostgroup_name': 'windows',
                 'start_time': '2020-01-01T00:00:00Z',
                 'end_time': '2020-01-02T00:00:00Z',
             }),
@@ -74,7 +81,7 @@ def test_openapi_schedule_host_downtime(
     live: MockLiveStatusConnection = mock_livestatus
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     live.expect_query('GET hosts\nColumns: name\nFilter: name = example.com')
     live.expect_query(
@@ -99,13 +106,21 @@ def test_openapi_schedule_servicegroup_downtime(
     wsgi_app,
     with_automation_user,
     mock_livestatus,
+    with_groups,
 ):
     live: MockLiveStatusConnection = mock_livestatus
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
-    live.expect_query('GET servicegroups\nColumns: members\nFilter: name = example',)
+    live.add_table('servicegroups', [
+        {
+            'members': [['example.com', 'Memory'], ['example.com', 'CPU load'],
+                        ['heute', 'CPU load']],
+            'name': 'routers',
+        },
+    ])
+    live.expect_query('GET servicegroups\nColumns: members\nFilter: name = routers')
     live.expect_query(
         'COMMAND [...] SCHEDULE_SVC_DOWNTIME;example.com;Memory;1577836800;1577923200;1;0;0;test123-...;Downtime for ...',
         match_type='ellipsis',
@@ -124,7 +139,7 @@ def test_openapi_schedule_servicegroup_downtime(
             content_type='application/json',
             params=json.dumps({
                 'downtime_type': 'servicegroup',
-                'servicegroup_name': 'example',
+                'servicegroup_name': 'routers',
                 'start_time': '2020-01-01T00:00:00Z',
                 'end_time': '2020-01-02T00:00:00Z',
             }),
@@ -141,7 +156,7 @@ def test_openapi_schedule_service_downtime(
     live: MockLiveStatusConnection = mock_livestatus
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     live.expect_query('GET hosts\nColumns: name\nFilter: name = example.com')
     live.expect_query(
@@ -167,6 +182,66 @@ def test_openapi_schedule_service_downtime(
         )
 
 
+def test_openapi_schedule_service_downtime_with_non_matching_query(
+    wsgi_app,
+    with_automation_user,
+    mock_livestatus,
+):
+    live: MockLiveStatusConnection = mock_livestatus
+    username, secret = with_automation_user
+    wsgi_app.set_authorization(('Bearer', username + " " + secret))
+    base = '/NO_SITE/check_mk/api/1.0'
+
+    live.expect_query('GET services\nColumns: description host_name\nFilter: host_name = nothing')
+
+    with live:
+        wsgi_app.post(
+            base + '/domain-types/downtime/collections/service',
+            content_type='application/json',
+            params=json.dumps({
+                'downtime_type': 'service_by_query',
+                'query': {
+                    'op': '=',
+                    'left': 'services.host_name',
+                    'right': 'nothing'
+                },
+                'start_time': '2020-01-01T00:00:00Z',
+                'end_time': '2020-01-02T00:00:00Z',
+            }),
+            status=422,
+        )
+
+
+def test_openapi_schedule_host_downtime_with_non_matching_query(
+    wsgi_app,
+    with_automation_user,
+    mock_livestatus,
+):
+    live: MockLiveStatusConnection = mock_livestatus
+    username, secret = with_automation_user
+    wsgi_app.set_authorization(('Bearer', username + " " + secret))
+    base = '/NO_SITE/check_mk/api/1.0'
+
+    live.expect_query('GET hosts\nColumns: name\nFilter: name = nothing')
+
+    with live:
+        wsgi_app.post(
+            base + '/domain-types/downtime/collections/host',
+            content_type='application/json',
+            params=json.dumps({
+                'downtime_type': 'host_by_query',
+                'query': {
+                    'op': '=',
+                    'left': 'hosts.name',
+                    'right': 'nothing'
+                },
+                'start_time': '2020-01-01T00:00:00Z',
+                'end_time': '2020-01-02T00:00:00Z',
+            }),
+            status=422,
+        )
+
+
 def test_openapi_show_downtimes_with_query(
     wsgi_app,
     with_automation_user,
@@ -176,7 +251,7 @@ def test_openapi_show_downtimes_with_query(
     live: MockLiveStatusConnection = mock_livestatus
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     live.add_table('downtimes', [{
         'id': 123,
@@ -214,6 +289,99 @@ def test_openapi_show_downtimes_with_query(
     assert len(resp.json['value']) == 1
 
 
+def test_openapi_show_downtime_with_params(
+    wsgi_app,
+    with_automation_user,
+    suppress_automation_calls,
+    mock_livestatus,
+):
+    live: MockLiveStatusConnection = mock_livestatus
+    username, secret = with_automation_user
+    wsgi_app.set_authorization(('Bearer', username + " " + secret))
+    base = '/NO_SITE/check_mk/api/1.0'
+
+    live.add_table('downtimes', [{
+        'id': 123,
+        'host_name': 'heute',
+        'service_description': 'CPU load',
+        'is_service': 1,
+        'author': 'random',
+        'start_time': 1606913913,
+        'end_time': 1606913913,
+        'recurring': 0,
+        'comment': 'literally nothing'
+    }, {
+        'id': 124,
+        'host_name': 'example.com',
+        'service_description': 'null',
+        'is_service': 0,
+        'author': 'random',
+        'start_time': 1606913913,
+        'end_time': 1606913913,
+        'recurring': 0,
+        'comment': 'some host downtime'
+    }])
+
+    live.expect_query([
+        'GET downtimes',
+        'Columns: id host_name service_description is_service author start_time end_time recurring comment',
+        'Filter: host_name = example.com', 'Filter: is_service = 0', 'And: 2'
+    ])
+    with live:
+        resp = wsgi_app.call_method(
+            'get',
+            base + '/domain-types/downtime/collections/all?host_name=example.com',
+            status=200,
+        )
+        assert resp.json_body["value"][0]['id'] == 124
+
+
+def test_openapi_show_downtime_of_non_existing_host(
+    wsgi_app,
+    with_automation_user,
+    suppress_automation_calls,
+    mock_livestatus,
+):
+    live: MockLiveStatusConnection = mock_livestatus
+    username, secret = with_automation_user
+    wsgi_app.set_authorization(('Bearer', username + " " + secret))
+    base = '/NO_SITE/check_mk/api/1.0'
+
+    live.add_table('downtimes', [{
+        'id': 123,
+        'host_name': 'heute',
+        'service_description': 'CPU load',
+        'is_service': 1,
+        'author': 'random',
+        'start_time': 1606913913,
+        'end_time': 1606913913,
+        'recurring': 0,
+        'comment': 'literally nothing'
+    }, {
+        'id': 124,
+        'host_name': 'example.com',
+        'service_description': 'null',
+        'is_service': 0,
+        'author': 'random',
+        'start_time': 1606913913,
+        'end_time': 1606913913,
+        'recurring': 0,
+        'comment': 'some host downtime'
+    }])
+
+    live.expect_query([
+        'GET downtimes',
+        'Columns: id host_name service_description is_service author start_time end_time recurring comment',
+        'Filter: host_name = nothing', 'Filter: is_service = 0', "And: 2"
+    ])
+    with live:
+        _ = wsgi_app.call_method(
+            'get',
+            base + '/domain-types/downtime/collections/all?host_name=nothing',
+            status=200,
+        )
+
+
 def test_openapi_create_host_downtime_with_query(
     wsgi_app,
     with_automation_user,
@@ -223,7 +391,7 @@ def test_openapi_create_host_downtime_with_query(
     live: MockLiveStatusConnection = mock_livestatus
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     live.add_table('downtimes', [{
         'id': 123,
@@ -296,7 +464,7 @@ def test_openapi_create_service_downtime_with_query(
     live: MockLiveStatusConnection = mock_livestatus
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     live.add_table(
         'services',
@@ -356,7 +524,7 @@ def test_openapi_create_service_downtime_with_non_matching_query(
     live: MockLiveStatusConnection = mock_livestatus
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     live.add_table(
         'services',
@@ -390,7 +558,7 @@ def test_openapi_create_service_downtime_with_non_matching_query(
                     "right": "example",
                 }
             }),
-            status=204,
+            status=422,
         )
 
 
@@ -403,7 +571,7 @@ def test_openapi_delete_downtime_with_query(
     live: MockLiveStatusConnection = mock_livestatus
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     live.add_table('downtimes', [{
         'id': 123,
@@ -449,6 +617,57 @@ def test_openapi_delete_downtime_with_query(
         )
 
 
+def test_openapi_delete_downtime_by_id(
+    wsgi_app,
+    with_automation_user,
+    suppress_automation_calls,
+    mock_livestatus,
+):
+    live: MockLiveStatusConnection = mock_livestatus
+    username, secret = with_automation_user
+    wsgi_app.set_authorization(('Bearer', username + " " + secret))
+    base = '/NO_SITE/check_mk/api/1.0'
+    live.add_table('downtimes', [{
+        'id': 123,
+        'host_name': 'heute',
+        'service_description': 'CPU load',
+        'is_service': 1,
+        'author': 'random',
+        'start_time': 1606913913,
+        'end_time': 1606913913,
+        'recurring': 0,
+        'comment': 'literally nothing'
+    }, {
+        'id': 1234,
+        'host_name': 'heute',
+        'service_description': 'Memory',
+        'is_service': 1,
+        'author': 'random',
+        'start_time': 1606913913,
+        'end_time': 1606913913,
+        'recurring': 0,
+        'comment': 'some service downtime'
+    }])
+
+    live.expect_query([
+        'GET downtimes',
+        'Columns: is_service',
+        'Filter: id = 123',
+    ])
+    live.expect_query('COMMAND [...] DEL_SVC_DOWNTIME;123', match_type='ellipsis')
+
+    with live:
+        wsgi_app.post(
+            base + '/domain-types/downtime/actions/delete/invoke',
+            content_type='application/json',
+            params=json.dumps({
+                'delete_type': 'by_id',
+                'downtime_id': '123',
+            }),
+            status=204,
+        )
+
+
 def test_openapi_delete_downtime_with_params(
     wsgi_app,
     with_automation_user,
@@ -458,7 +677,7 @@ def test_openapi_delete_downtime_with_params(
     live: MockLiveStatusConnection = mock_livestatus
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     live.add_table('downtimes', [{
         'id': 123,
@@ -500,8 +719,125 @@ def test_openapi_delete_downtime_with_params(
             content_type='application/json',
             params=json.dumps({
                 'delete_type': 'params',
-                'hostname': 'heute',
-                'services': ["CPU load", "Memory"],
+                'host_name': 'heute',
+                'service_descriptions': ["CPU load", "Memory"],
             }),
             status=204,
+        )
+
+
+def test_openapi_downtime_non_existing_instance(
+    wsgi_app,
+    with_automation_user,
+    suppress_automation_calls,
+):
+    username, secret = with_automation_user
+    wsgi_app.set_authorization(('Bearer', username + " " + secret))
+    base = '/NO_SITE/check_mk/api/1.0'
+
+    wsgi_app.post(
+        base + '/domain-types/downtime/collections/host',
+        content_type='application/json',
+        params=json.dumps({
+            'downtime_type': 'host',
+            'host_name': 'non-existant',
+            'start_time': '2020-01-01T00:00:00Z',
+            'end_time': '2020-01-02T00:00:00Z',
+        }),
+        status=400,
+    )
+
+
+def test_openapi_downtime_non_existing_groups(
+    wsgi_app,
+    with_automation_user,
+    suppress_automation_calls,
+):
+    username, secret = with_automation_user
+    wsgi_app.set_authorization(('Bearer', username + " " + secret))
+    base = '/NO_SITE/check_mk/api/1.0'
+
+    wsgi_app.post(
+        base + '/domain-types/downtime/collections/host',
+        content_type='application/json',
+        params=json.dumps({
+            'downtime_type': 'hostgroup',
+            'hostgroup_name': 'non-existant',
+            'start_time': '2020-01-01T00:00:00Z',
+            'end_time': '2020-01-02T00:00:00Z',
+        }),
+        status=400,
+    )
+
+
+def test_openapi_downtime_get_single(
+    wsgi_app,
+    with_automation_user,
+    suppress_automation_calls,
+    mock_livestatus,
+):
+    live: MockLiveStatusConnection = mock_livestatus
+    username, secret = with_automation_user
+    wsgi_app.set_authorization(('Bearer', username + " " + secret))
+    base = '/NO_SITE/check_mk/api/1.0'
+
+    live.add_table('downtimes', [{
+        'id': 123,
+        'host_name': 'heute',
+        'service_description': 'CPU load',
+        'is_service': 1,
+        'author': 'random',
+        'start_time': 1606913913,
+        'end_time': 1606913913,
+        'recurring': 0,
+        'comment': 'literally nothing'
+    }, {
+        'id': 124,
+        'host_name': 'heute',
+        'service_description': 'Memory',
+        'is_service': 1,
+        'author': 'random',
+        'start_time': 1606913913,
+        'end_time': 1606913913,
+        'recurring': 0,
+        'comment': 'some service downtime'
+    }])
+
+    live.expect_query([
+        'GET downtimes',
+        'Columns: id host_name service_description is_service author start_time end_time recurring comment',
+        'Filter: id = 123',
+    ])
+
+    with live:
+        resp = wsgi_app.call_method(
+            'get',
+            base + "/objects/downtime/123",
+            status=200,
+        )
+        assert resp.json_body["title"] == "Downtime for service: CPU load"
+
+
+def test_openapi_downtime_invalid_single(
+    wsgi_app,
+    with_automation_user,
+    suppress_automation_calls,
+    mock_livestatus,
+):
+    live: MockLiveStatusConnection = mock_livestatus
+    username, secret = with_automation_user
+    wsgi_app.set_authorization(('Bearer', username + " " + secret))
+    base = '/NO_SITE/check_mk/api/1.0'
+
+    live.expect_query([
+        'GET downtimes',
+        'Columns: id host_name service_description is_service author start_time end_time recurring comment',
+        'Filter: id = 123',
+    ])
+
+    with live:
+        _ = wsgi_app.call_method(
+            'get',
+            base + "/objects/downtime/123",
+            status=404,
         )

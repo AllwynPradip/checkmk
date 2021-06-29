@@ -6,8 +6,7 @@
 set -e
 
 INSTALL_PREFIX=""
-CPPCHECK_VERSION=1.90
-DIR_NAME=cppcheck-${CPPCHECK_VERSION}
+CPPCHECK_VERSION=2.4.1
 TARGET_DIR=/opt
 
 failure() {
@@ -77,7 +76,7 @@ git -c advice.detachedHead=false clone \
     --depth 1 \
     --branch ${CPPCHECK_VERSION} \
     https://github.com/danmar/cppcheck.git
-CPPCHECK_PATH="/opt/cppcheck-${CPPCHECK_VERSION}"
+CPPCHECK_PATH="${TARGET_DIR}/cppcheck-${CPPCHECK_VERSION}"
 
 mkdir -p cppcheck-build
 cd cppcheck-build
@@ -98,12 +97,8 @@ else
     cd $(dirname ${CPPCHECK_PATH})
     rm -f cppcheck
     ln --symbolic --force $(basename ${CPPCHECK_PATH}) cppcheck
-fi
 
-set_symlinks() {
     echo "Set symlink"
     mkdir -p "${TARGET_DIR}/bin"
-    ln -sf "${TARGET_DIR}/${DIR_NAME}/bin/"* "${TARGET_DIR}/bin"
-}
-
-set_symlinks
+    ln -sf "${TARGET_DIR}/cppcheck-${CPPCHECK_VERSION}/bin/"* "${TARGET_DIR}/bin"
+fi

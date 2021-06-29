@@ -4,14 +4,13 @@
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from pathlib import Path
 import re
+from pathlib import Path
 
-import pytest  # type: ignore[import]
+import pytest
 from six import ensure_str
 
-# No stub file
-from testlib.base import Scenario  # type: ignore[import]
+from testlib.base import Scenario
 
 import cmk.utils.paths
 import cmk.utils.piggyback as piggyback
@@ -19,16 +18,15 @@ import cmk.utils.version as cmk_version
 from cmk.utils.caching import config_cache as _config_cache
 from cmk.utils.exceptions import MKGeneralException
 from cmk.utils.rulesets.ruleset_matcher import RulesetMatchObject
-from cmk.utils.type_defs import (
-    CheckPluginName,
-    ConfigSerial,
-    HostKey,
-    LATEST_SERIAL,
-    SectionName,
-    SourceType,
-)
+from cmk.utils.type_defs import CheckPluginName, HostKey, SectionName, SourceType
 
+from cmk.core_helpers.paths import ConfigSerial, LATEST_SERIAL
+from cmk.core_helpers.type_defs import Mode
+
+import cmk.base.api.agent_based.register as agent_based_register
 import cmk.base.config as config
+from cmk.base.api.agent_based.checking_classes import CheckPlugin
+from cmk.base.api.agent_based.type_defs import ParsedSectionName, SNMPSectionPlugin
 from cmk.base.check_utils import Service
 from cmk.base.discovered_labels import DiscoveredServiceLabels, ServiceLabel
 
@@ -1692,8 +1690,8 @@ def test_host_config_max_cachefile_age_no_cluster(monkeypatch):
 
     host_config = config.HostConfig.make_host_config("xyz")
     assert not host_config.is_cluster
-    assert host_config.max_cachefile_age == config.check_max_cachefile_age
-    assert host_config.max_cachefile_age != config.cluster_max_cachefile_age
+    assert host_config.max_cachefile_age.get(Mode.CHECKING) == config.check_max_cachefile_age
+    assert host_config.max_cachefile_age.get(Mode.CHECKING) != config.cluster_max_cachefile_age
 
 
 def test_host_config_max_cachefile_age_cluster(monkeypatch):
@@ -1703,8 +1701,8 @@ def test_host_config_max_cachefile_age_cluster(monkeypatch):
 
     host_config = config.HostConfig.make_host_config("clu")
     assert host_config.is_cluster
-    assert host_config.max_cachefile_age != config.check_max_cachefile_age
-    assert host_config.max_cachefile_age == config.cluster_max_cachefile_age
+    assert host_config.max_cachefile_age.get(Mode.CHECKING) != config.check_max_cachefile_age
+    assert host_config.max_cachefile_age.get(Mode.CHECKING) == config.cluster_max_cachefile_age
 
 
 @pytest.mark.parametrize("use_new_descr,result", [
@@ -1834,7 +1832,7 @@ def test_host_ruleset_match_object_of_service(monkeypatch):
         "host_name": "xyz",
         "service_description": u"bla blä",
         "service_labels": {},
-        "service_cache_id": (u'bla blä', None),
+        "service_cache_id": (u'bla blä', hash(frozenset([]))),
     }
 
     obj = config_cache.ruleset_match_object_of_service("test-host", "CPU load")
@@ -1844,7 +1842,7 @@ def test_host_ruleset_match_object_of_service(monkeypatch):
         "host_name": "test-host",
         "service_description": "CPU load",
         "service_labels": service_labels,
-        "service_cache_id": ('CPU load', obj._generate_hash(service_labels)),
+        "service_cache_id": ('CPU load', hash(frozenset(service_labels.items()))),
     }
 
 
@@ -2116,7 +2114,7 @@ def test_save_packed_config(monkeypatch, serial):
 
 
 def test_load_packed_config(serial):
-    config.PackedConfigStore(serial).write({"abc": 1})
+    config.PackedConfigStore.from_serial(serial).write({"abc": 1})
 
     assert "abc" not in config.__dict__
     config.load_packed_config(serial)
@@ -2128,15 +2126,15 @@ def test_load_packed_config(serial):
 class TestPackedConfigStore:
     @pytest.fixture()
     def store(self, serial):
-        return config.PackedConfigStore(serial)
+        return config.PackedConfigStore.from_serial(serial)
 
     def test_latest_serial_path(self):
-        store = config.PackedConfigStore(serial=LATEST_SERIAL)
+        store = config.PackedConfigStore.from_serial(LATEST_SERIAL)
         assert store.path == Path(cmk.utils.paths.core_helper_config_dir, "latest",
                                   "precompiled_check_config.mk")
 
     def test_given_serial_path(self):
-        store = config.PackedConfigStore(serial=ConfigSerial("42"))
+        store = config.PackedConfigStore.from_serial(ConfigSerial("42"))
         assert store.path == Path(cmk.utils.paths.core_helper_config_dir, "42",
                                   "precompiled_check_config.mk")
 
@@ -2199,3 +2197,85 @@ class TestPackedConfigStore:
 ])
 def test_has_timespecific_params(params, expected_result):
     assert config.has_timespecific_params(params) is expected_result
+
+
+def test__extract_check_plugins(monkeypatch):
+    duplicate_plugin = {
+        "duplicate_plugin": {
+            "service_description": "blah",
+        },
+    }
+    registered_plugin = CheckPlugin(
+        CheckPluginName("duplicate_plugin"),
+        [],
+        "Duplicate Plugin",
+        None,  # type: ignore  # irrelevant for test
+        None,  # type: ignore  # irrelevant for test
+        None,  # type: ignore  # irrelevant for test
+        None,  # type: ignore  # irrelevant for test
+        None,  # type: ignore  # irrelevant for test
+        None,  # type: ignore  # irrelevant for test
+        None,  # type: ignore  # irrelevant for test
+        None,  # type: ignore  # irrelevant for test
+        None,  # type: ignore  # irrelevant for test
+    )
+
+    monkeypatch.setattr(
+        agent_based_register._config,
+        "registered_check_plugins",
+        {registered_plugin.name: registered_plugin},
+    )
+    monkeypatch.setattr(
+        config,
+        "check_info",
+        duplicate_plugin,
+    )
+    monkeypatch.setattr(
+        cmk.utils.debug,
+        "enabled",
+        lambda: True,
+    )
+
+    assert agent_based_register.is_registered_check_plugin(CheckPluginName("duplicate_plugin"))
+    with pytest.raises(MKGeneralException):
+        config._extract_check_plugins(validate_creation_kwargs=False)
+
+
+def test__extract_agent_and_snmp_sections(monkeypatch):
+    duplicate_plugin = {  # type: ignore
+        "duplicate_plugin": {},
+    }
+    registered_section = SNMPSectionPlugin(
+        SectionName("duplicate_plugin"),
+        ParsedSectionName("duplicate_plugin"),
+        None,  # type: ignore  # irrelevant for test
+        None,  # type: ignore  # irrelevant for test
+        None,  # type: ignore  # irrelevant for test
+        None,  # type: ignore  # irrelevant for test
+        None,  # type: ignore  # irrelevant for test
+        None,  # type: ignore  # irrelevant for test
+        None,  # type: ignore  # irrelevant for test
+        None,  # type: ignore  # irrelevant for test
+        None,  # type: ignore  # irrelevant for test
+    )
+
+    monkeypatch.setattr(
+        agent_based_register._config,
+        "registered_snmp_sections",
+        {registered_section.name: registered_section},
+    )
+    monkeypatch.setattr(
+        config,
+        "check_info",
+        duplicate_plugin,
+    )
+    monkeypatch.setattr(
+        cmk.utils.debug,
+        "enabled",
+        lambda: True,
+    )
+
+    assert agent_based_register.is_registered_section_plugin(SectionName("duplicate_plugin"))
+    config._extract_agent_and_snmp_sections(validate_creation_kwargs=False)
+    assert agent_based_register.get_section_plugin(
+        SectionName("duplicate_plugin")) == registered_section

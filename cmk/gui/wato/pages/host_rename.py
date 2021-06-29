@@ -37,8 +37,7 @@ from cmk.gui.watolib.host_rename import perform_rename_hosts
 from cmk.gui.valuespec import (
     Hostname,
     Tuple,
-    TextUnicode,
-    RegExpUnicode,
+    TextInput,
     DropdownChoice,
     RegExp,
     ListOf,
@@ -155,20 +154,22 @@ class ModeBulkRenameHost(WatoMode):
             flash(warning)
             return None
 
-        message = _(
-            "<b>Do you really want to rename to following hosts? This involves a restart of the monitoring core!</b>"
-        )
-        message += "<table>"
+        message = html.render_b(
+            _("Do you really want to rename to following hosts?"
+              "This involves a restart of the monitoring core!"))
+
+        rows = []
         for _folder, host_name, target_name in renamings:
-            message += u"<tr><td>%s</td><td> → %s</td></tr>" % (host_name, target_name)
-        message += "</table>"
+            rows.append(
+                html.render_tr(html.render_td(host_name) + html.render_td(" → %s" % target_name)))
+        message += html.render_table(HTML().join(rows))
 
         nr_rename = len(renamings)
         c = _confirm(
             _("Confirm renaming of %d %s") % (nr_rename, ungettext("host", "hosts", nr_rename)),
-            HTML(message))
+            message)
         if c:
-            title = _("Renaming of %s") % ", ".join(u"%s → %s" % x[1:] for x in renamings)
+            title = _("Renaming of %s") % ", ".join("%s → %s" % x[1:] for x in renamings)
             host_renaming_job = RenameHostsBackgroundJob(title=title)
             host_renaming_job.set_function(rename_hosts_background_job, renamings)
 
@@ -317,16 +318,16 @@ class ModeBulkRenameHost(WatoMode):
                      "group with <tt>\\1</tt>, the second with <tt>\\2</tt> and so on, for example <tt>\\1.example.org</tt>"
                  ),
                        elements=[
-                           RegExpUnicode(
+                           RegExp(
                                title=_("Regular expression for the beginning of the host name"),
                                help=_("Must contain at least one subgroup <tt>(...)</tt>"),
                                mingroups=0,
                                maxgroups=9,
                                size=30,
                                allow_empty=False,
-                               mode=RegExpUnicode.prefix,
+                               mode=RegExp.prefix,
                            ),
-                           TextUnicode(
+                           TextInput(
                                title=_("Replacement"),
                                help=
                                _("Use <tt>\\1</tt>, <tt>\\2</tt> etc. to replace matched subgroups, <tt>\\0</tt> to insert to original host name"
@@ -345,7 +346,7 @@ class ModeBulkRenameHost(WatoMode):
 
 
 def _confirm(html_title, message):
-    if not html.request.has_var("_do_confirm") and not html.request.has_var("_do_actions"):
+    if not request.has_var("_do_confirm") and not request.has_var("_do_actions"):
         # TODO: get the breadcrumb from all call sites
         wato_html_head(title=html_title, breadcrumb=Breadcrumb())
     confirm_options = [(_("Confirm"), "_do_confirm")]
@@ -381,7 +382,7 @@ class ModeRenameHost(WatoMode):
         return ModeEditHost
 
     def _from_vars(self):
-        host_name = html.request.get_ascii_input_mandatory("host")
+        host_name = request.get_ascii_input_mandatory("host")
 
         if not watolib.Folder.current().has_host(host_name):
             raise MKUserError("host", _("You called this page with an invalid host name."))
@@ -437,7 +438,7 @@ class ModeRenameHost(WatoMode):
             raise MKUserError("newname",
                               _("You cannot rename a host while you have pending changes."))
 
-        newname = html.request.var("newname")
+        newname = request.var("newname")
         self._check_new_host_name("newname", newname)
         # Creating pending entry. That makes the site dirty and that will force a sync of
         # the config to that site before the automation is being done.

@@ -22,13 +22,14 @@ import cmk.utils.store as store
 
 import cmk.gui.watolib as watolib
 import cmk.gui.config as config
-import cmk.gui.escaping as escaping
+import cmk.gui.utils.escaping as escaping
 from cmk.gui.table import table_element
 import cmk.gui.log as log
 from cmk.gui.exceptions import MKUserError, MKGeneralException
 from cmk.gui.i18n import _
 from cmk.gui.log import logger
-from cmk.gui.globals import html
+from cmk.gui.globals import html, request, transactions
+from cmk.gui.utils.urls import makeactionuri
 from cmk.gui.breadcrumb import Breadcrumb
 from cmk.gui.page_menu import (
     PageMenu,
@@ -68,9 +69,9 @@ class ModeAnalyzeConfig(WatoMode):
         self._acks = self._load_acknowledgements()
 
     def _from_vars(self):
-        self._show_ok = html.request.has_var("show_ok")
-        self._show_failed = not html.request.has_var("hide_failed")
-        self._show_ack = html.request.has_var("show_ack")
+        self._show_ok = request.has_var("show_ok")
+        self._show_failed = not request.has_var("hide_failed")
+        self._show_ack = request.has_var("show_ack")
 
     def title(self):
         return _("Analyze configuration")
@@ -99,33 +100,33 @@ class ModeAnalyzeConfig(WatoMode):
         )
 
     def action(self) -> ActionResult:
-        if not html.check_transaction():
+        if not transactions.check_transaction():
             return None
 
-        test_id = html.request.var("_test_id")
-        site_id = html.request.var("_site_id")
-        status_id = html.request.get_integer_input_mandatory("_status_id", 0)
+        test_id = request.var("_test_id")
+        site_id = request.var("_site_id")
+        status_id = request.get_integer_input_mandatory("_status_id", 0)
 
         if not test_id:
             raise MKUserError("_ack_test_id", _("Needed variable missing"))
 
-        if html.request.var("_do") in ["ack", "unack"]:
+        if request.var("_do") in ["ack", "unack"]:
             if not site_id:
                 raise MKUserError("_ack_site_id", _("Needed variable missing"))
 
             if site_id not in config.activation_sites():
                 raise MKUserError("_ack_site_id", _("Invalid site given"))
 
-        if html.request.var("_do") == "ack":
+        if request.var("_do") == "ack":
             self._acknowledge_test(test_id, site_id, status_id)
 
-        elif html.request.var("_do") == "unack":
+        elif request.var("_do") == "unack":
             self._unacknowledge_test(test_id, site_id, status_id)
 
-        elif html.request.var("_do") == "disable":
+        elif request.var("_do") == "disable":
             self._disable_test(test_id)
 
-        elif html.request.var("_do") == "enable":
+        elif request.var("_do") == "enable":
             self._enable_test(test_id)
 
         else:
@@ -171,7 +172,7 @@ class ModeAnalyzeConfig(WatoMode):
         is_test_disabled = self._is_test_disabled(test_id)
         if is_test_disabled:
             html.icon_button(
-                html.makeactionuri([
+                makeactionuri(request, transactions, [
                     ("_do", "enable"),
                     ("_test_id", worst_result.test_id),
                 ]),
@@ -180,7 +181,7 @@ class ModeAnalyzeConfig(WatoMode):
             )
         else:
             html.icon_button(
-                html.makeactionuri([
+                makeactionuri(request, transactions, [
                     ("_do", "disable"),
                     ("_test_id", worst_result.test_id),
                 ]),
@@ -222,7 +223,7 @@ class ModeAnalyzeConfig(WatoMode):
             if result.status != 0:
                 if is_acknowledged:
                     html.icon_button(
-                        html.makeactionuri([
+                        makeactionuri(request, transactions, [
                             ("_do", "unack"),
                             ("_site_id", result.site_id),
                             ("_status_id", result.status),
@@ -233,7 +234,7 @@ class ModeAnalyzeConfig(WatoMode):
                     )
                 else:
                     html.icon_button(
-                        html.makeactionuri([
+                        makeactionuri(request, transactions, [
                             ("_do", "ack"),
                             ("_site_id", result.site_id),
                             ("_status_id", result.status),
@@ -243,7 +244,7 @@ class ModeAnalyzeConfig(WatoMode):
                         "acknowledge_test",
                     )
             else:
-                html.write("")
+                html.write_text("")
 
         # Add toggleable notitication context
         table.row(class_="ac_test_details hidden", id_="test_result_details_%s" % test_id)
@@ -372,8 +373,7 @@ class ModeAnalyzeConfig(WatoMode):
             else:
                 results_data = watolib.do_remote_automation(config.site(site_id),
                                                             "check-analyze-config", [],
-                                                            timeout=html.request.request_timeout -
-                                                            10)
+                                                            timeout=request.request_timeout - 10)
 
             self._logger.debug("[%s] Finished" % site_id)
 

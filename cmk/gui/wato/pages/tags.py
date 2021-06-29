@@ -17,7 +17,7 @@ from cmk.gui.table import table_element, Table
 import cmk.gui.forms as forms
 from cmk.gui.exceptions import (MKUserError, MKGeneralException, FinalizeRequest)
 from cmk.gui.i18n import _, _u
-from cmk.gui.globals import html
+from cmk.gui.globals import html, transactions, request, output_funnel
 from cmk.gui.htmllib import HTML
 from cmk.gui.valuespec import (
     ListChoice,
@@ -25,8 +25,7 @@ from cmk.gui.valuespec import (
     Tuple,
     ListOf,
     Dictionary,
-    TextAscii,
-    TextUnicode,
+    TextInput,
     OptionalDropdownChoice,
     FixedValue,
     ID,
@@ -172,24 +171,25 @@ class ModeTags(ABCTagMode):
         )
 
     def action(self) -> ActionResult:
-        if not html.check_transaction():
+        if not transactions.check_transaction():
             return redirect(mode_url("tags"))
 
-        if html.request.has_var("_delete"):
+        if request.has_var("_delete"):
             return self._delete_tag_group()
 
-        if html.request.has_var("_del_aux"):
+        if request.has_var("_del_aux"):
             return self._delete_aux_tag()
 
-        if html.request.var("_move"):
+        if request.var("_move"):
             return self._move_tag_group()
 
         return redirect(mode_url("tags"))
 
     def _delete_tag_group(self) -> ActionResult:
-        del_id = html.get_item_input("_delete", dict(self._tag_config.get_tag_group_choices()))[1]
+        del_id = request.get_item_input("_delete",
+                                        dict(self._tag_config.get_tag_group_choices()))[1]
 
-        if not html.request.has_var("_repair") and self._is_cleaning_up_user_tag_group_to_builtin(
+        if not request.has_var("_repair") and self._is_cleaning_up_user_tag_group_to_builtin(
                 del_id):
             message: Union[bool,
                            str] = _("Transformed the user tag group \"%s\" to builtin.") % del_id
@@ -237,8 +237,8 @@ class ModeTags(ABCTagMode):
         return builtin_tg.get_tag_ids() == user_tg.get_tag_ids()
 
     def _delete_aux_tag(self) -> ActionResult:
-        del_id = html.get_item_input("_del_aux",
-                                     dict(self._tag_config.aux_tag_list.get_choices()))[1]
+        del_id = request.get_item_input("_del_aux",
+                                        dict(self._tag_config.aux_tag_list.get_choices()))[1]
 
         # Make sure that this aux tag is not begin used by any tag group
         for group in self._tag_config.tag_groups:
@@ -267,8 +267,8 @@ class ModeTags(ABCTagMode):
 
     # Mypy wants the explicit return, pylint does not like it.
     def _move_tag_group(self) -> ActionResult:  # pylint: disable=useless-return
-        move_nr = html.request.get_integer_input_mandatory("_move")
-        move_to = html.request.get_integer_input_mandatory("_index")
+        move_nr = request.get_integer_input_mandatory("_move")
+        move_to = request.get_integer_input_mandatory("_index")
 
         moved = self._tag_config.tag_groups.pop(move_nr)
         self._tag_config.tag_groups.insert(move_to, moved)
@@ -336,9 +336,9 @@ class ModeTags(ABCTagMode):
                 table.cell(_("Actions"), css="buttons")
                 self._show_tag_icons(tag_group, nr)
 
-                table.text_cell(_("ID"), tag_group.id)
-                table.text_cell(_("Title"), tag_group.title)
-                table.text_cell(_("Topic"), tag_group.topic or _("Tags"))
+                table.cell(_("ID"), tag_group.id)
+                table.cell(_("Title"), tag_group.title)
+                table.cell(_("Topic"), tag_group.topic or _("Tags"))
                 table.cell(_("Demonstration"), sortable=False)
                 if tag_group.help:
                     html.help(tag_group.help)
@@ -383,11 +383,11 @@ class ModeTags(ABCTagMode):
                 table.cell(_("Actions"), css="buttons")
                 self._show_aux_tag_icons(aux_tag)
 
-                table.text_cell(_("ID"), aux_tag.id)
+                table.cell(_("ID"), aux_tag.id)
 
-                table.text_cell(_("Title"), _u(aux_tag.title))
-                table.text_cell(_("Topic"), _u(aux_tag.topic) or _("Tags"))
-                table.text_cell(
+                table.cell(_("Title"), _u(aux_tag.title))
+                table.cell(_("Topic"), _u(aux_tag.topic) or _("Tags"))
+                table.cell(
                     _("Tags using this auxiliary tag"), ", ".join(
                         sorted(tag.id
                                for tag in self._get_tags_using_aux_tag(aux_tag)
@@ -421,7 +421,7 @@ class ABCEditTagMode(ABCTagMode, metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     def _is_new_tag(self):
-        return html.request.var("edit") is None
+        return request.var("edit") is None
 
     def _basic_elements(self, id_title):
         if self._new:
@@ -439,13 +439,13 @@ class ABCEditTagMode(ABCTagMode, metaclass=abc.ABCMeta):
 
         return [
             ("id", vs_id),
-            ("title", TextUnicode(
+            ("title", TextInput(
                 title=_("Title"),
                 size=60,
                 allow_empty=False,
             )),
             ("topic", self._get_topic_valuespec()),
-            ("help", TextUnicode(
+            ("help", TextInput(
                 title=_("Help"),
                 size=60,
             )),
@@ -455,7 +455,7 @@ class ABCEditTagMode(ABCTagMode, metaclass=abc.ABCMeta):
         return OptionalDropdownChoice(
             title=_("Topic") + "<sup>*</sup>",
             choices=self._effective_config.get_topic_choices(),
-            explicit=TextUnicode(),
+            explicit=TextInput(),
             otherlabel=_("Create new topic"),
             default_value=None,
             help=_("Different tags can be grouped in topics to make the visualization and "
@@ -497,11 +497,11 @@ class ModeTagUsage(ABCTagMode):
         table.cell(_("Actions"), css="buttons")
         self._show_tag_group_icons(tag_group)
 
-        table.text_cell(_("Tag group"), _u(tag_group.choice_title))
+        table.cell(_("Tag group"), _u(tag_group.choice_title))
         # TODO: This check shouldn't be necessary if we get our types right.
-        if tag.title is None or tag.id is None or tag_group.id is None:
+        if tag.title is None or tag_group.id is None:
             raise Exception("uninitialized tag/tag group")
-        table.text_cell(_("Tag"), _u(tag.title))
+        table.cell(_("Tag"), _u(tag.title))
 
         operation = OperationReplaceGroupedTags(tag_group.id,
                                                 remove_tag_ids=[tag.id],
@@ -545,8 +545,8 @@ class ModeTagUsage(ABCTagMode):
         table.cell(_("Actions"), css="buttons")
         self._show_aux_tag_icons(aux_tag)
 
-        table.text_cell(_("Tag"), _u(aux_tag.choice_title))
-        table.text_cell(_("Used by tags"))
+        table.cell(_("Tag"), _u(aux_tag.choice_title))
+        table.cell(_("Used by tags"))
         _show_aux_tag_used_by_tags(self._get_tags_using_aux_tag(aux_tag))
 
         # TODO: This check shouldn't be necessary if we get our types right.
@@ -596,10 +596,10 @@ class ModeEditAuxtag(ABCEditTagMode):
             self._aux_tag = self._tag_config.aux_tag_list.get_aux_tag(self._id)
 
     def _get_id(self):
-        if not html.request.has_var("edit"):
+        if not request.has_var("edit"):
             return None
 
-        return html.get_item_input("edit", dict(self._tag_config.aux_tag_list.get_choices()))[1]
+        return request.get_item_input("edit", dict(self._tag_config.aux_tag_list.get_choices()))[1]
 
     def title(self):
         if self._new:
@@ -613,7 +613,7 @@ class ModeEditAuxtag(ABCEditTagMode):
                                           button_name="save")
 
     def action(self) -> ActionResult:
-        if not html.check_transaction():
+        if not transactions.check_transaction():
             return redirect(mode_url("tags"))
 
         vs = self._valuespec()
@@ -679,7 +679,7 @@ class ModeEditTagGroup(ABCEditTagMode):
         self._tag_group = cmk.utils.tags.TagGroup() if tg is None else tg
 
     def _get_id(self):
-        return html.request.var("edit", html.request.var("tag_id"))
+        return request.var("edit", request.var("tag_id"))
 
     def title(self):
         if self._new:
@@ -693,7 +693,7 @@ class ModeEditTagGroup(ABCEditTagMode):
                                           button_name="save")
 
     def action(self) -> ActionResult:
-        if not html.check_transaction():
+        if not transactions.check_transaction():
             return redirect(mode_url("tags"))
 
         vs = self._valuespec()
@@ -734,11 +734,14 @@ class ModeEditTagGroup(ABCEditTagMode):
 
         # Now check, if any folders, hosts or rules are affected
         message = _rename_tags_after_confirmation(self.breadcrumb(), operation)
-        if message:
-            self._save_tags_and_update_hosts(changed_hosttags_config.get_dict_format())
-            add_change("edit-hosttags", _("Edited host tag group %s (%s)") % (message, self._id))
-            if isinstance(message, str):
-                flash(message)
+        if message is False:
+            return FinalizeRequest(code=200)
+
+        self._save_tags_and_update_hosts(changed_hosttags_config.get_dict_format())
+        add_change("edit-hosttags", _("Edited host tag group %s (%s)") % (message, self._id))
+        if isinstance(message, str):
+            flash(message)
+
         return redirect(mode_url("tags"))
 
     def page(self):
@@ -780,7 +783,7 @@ class ModeEditTagGroup(ABCEditTagMode):
                 Tuple(
                     elements=[
                         Transform(
-                            TextAscii(
+                            TextInput(
                                 title=_("Tag ID"),
                                 size=40,
                                 regex="^[-a-z0-9A-Z_]*$",
@@ -791,7 +794,7 @@ class ModeEditTagGroup(ABCEditTagMode):
                             forth=lambda x: "" if x is None else x,
                             back=lambda x: None if not x else x,
                         ),
-                        TextUnicode(
+                        TextInput(
                             title=_("Title") + "*",
                             allow_empty=False,
                             size=60,
@@ -836,7 +839,7 @@ def _rename_tags_after_confirmation(breadcrumb: Breadcrumb,
         False: "Question dialog" shown
         str: Action done after "question" dialog
     """
-    repair_mode = html.request.var("_repair")
+    repair_mode = request.var("_repair")
     if repair_mode is not None:
         try:
             mode = TagCleanupMode(repair_mode)
@@ -861,24 +864,27 @@ def _rename_tags_after_confirmation(breadcrumb: Breadcrumb,
         change_host_tags_in_folders(operation, TagCleanupMode.CHECK, watolib.Folder.root_folder())
 
     if affected_folders:
-        message += _("Affected folders with an explicit reference to this tag "
-                     "group and that are affected by the change") + ":"
-        with html.plugged():
+        with output_funnel.plugged():
+            html.write_text(
+                _("Affected folders with an explicit reference to this tag "
+                  "group and that are affected by the change") + ":")
             _show_affected_folders(affected_folders)
-            message += HTML(html.drain())
+            message += HTML(output_funnel.drain())
 
     if affected_hosts:
-        message += _("Hosts where this tag group is explicitely set "
-                     "and that are effected by the change") + ":"
-        with html.plugged():
+        with output_funnel.plugged():
+            html.write_text(
+                _("Hosts where this tag group is explicitely set "
+                  "and that are effected by the change") + ":")
             _show_affected_hosts(affected_hosts)
-            message += HTML(html.drain())
+            message += HTML(output_funnel.drain())
 
     if affected_rulesets:
-        message += _("Rulesets that contain rules with references to the changed tags") + ":"
-        with html.plugged():
+        with output_funnel.plugged():
+            html.write_text(
+                _("Rulesets that contain rules with references to the changed tags") + ":")
             _show_affected_rulesets(affected_rulesets)
-            message += HTML(html.drain())
+            message += HTML(output_funnel.drain())
 
     if message:
         wato_html_head(title=operation.confirm_title(), breadcrumb=breadcrumb)

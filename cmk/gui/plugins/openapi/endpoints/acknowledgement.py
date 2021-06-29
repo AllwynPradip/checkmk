@@ -17,15 +17,15 @@ from urllib.parse import unquote
 
 from cmk.gui import config, sites, http
 from cmk.gui.plugins.openapi import fields
-from cmk.gui.plugins.openapi.livestatus_helpers.commands.acknowledgments import (
+from cmk.gui.livestatus_utils.commands.acknowledgments import (
     acknowledge_host_problem,
     acknowledge_hostgroup_problem,
     acknowledge_service_problem,
     acknowledge_servicegroup_problem,
 )
-from cmk.gui.plugins.openapi.livestatus_helpers.expressions import And
-from cmk.gui.plugins.openapi.livestatus_helpers.queries import Query
-from cmk.gui.plugins.openapi.livestatus_helpers.tables import Hosts, Services
+from cmk.utils.livestatus_helpers.expressions import And
+from cmk.utils.livestatus_helpers.queries import Query
+from cmk.utils.livestatus_helpers.tables import Hosts, Services
 from cmk.gui.plugins.openapi.restful_objects import (
     constructors,
     Endpoint,
@@ -45,6 +45,7 @@ SERVICE_DESCRIPTION = {
           'cmk/create',
           method='post',
           tag_group='Monitoring',
+          skip_locking=True,
           additional_status_codes=[422],
           status_descriptions={
               422: 'The query yielded no result.',
@@ -94,7 +95,7 @@ def set_acknowledgement_on_hosts(params):
             )
         except ValueError:
             raise ProblemException(
-                404,
+                400,
                 title="Hostgroup could not be found.",
                 detail=f"Unknown hostgroup: {host_group}",
             )
@@ -130,9 +131,9 @@ def set_acknowledgement_on_hosts(params):
           'cmk/create_service',
           method='post',
           tag_group='Monitoring',
-          additional_status_codes=[404, 422],
+          skip_locking=True,
+          additional_status_codes=[422],
           status_descriptions={
-              404: 'Unknown service.',
               422: 'Service was not in a problem state.',
           },
           request_schema=request_schemas.AcknowledgeServiceRelatedProblem,
@@ -156,7 +157,7 @@ def set_acknowledgement_on_services(params):
                             Services.description == description)).first(live)
         if not service:
             raise ProblemException(
-                status=404,
+                status=400,
                 title=f'Service {description!r}@{host_name!r} could not be found.',
             )
         if not service.state:
@@ -188,7 +189,7 @@ def set_acknowledgement_on_services(params):
             )
         except ValueError:
             raise ProblemException(
-                status=404,
+                status=400,
                 title="Servicegroup could not be found.",
                 detail=f"Unknown servicegroup: {service_group}",
             )

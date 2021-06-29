@@ -8,7 +8,7 @@ import abc
 import os
 import pprint
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Type, Union
+from typing import Any, Dict, List, Optional, Type
 
 from six import ensure_str
 
@@ -83,7 +83,6 @@ class ABCConfigDomain(abc.ABC):
             return {}
 
         try:
-            # TODO: Can be changed to text IO with Python 3
             with filename.open("rb") as f:
                 exec(f.read(), settings, settings)
 
@@ -215,8 +214,7 @@ config_variable_group_registry = ConfigVariableGroupRegistry()
 
 
 class ConfigVariable:
-    def group(self):
-        # type () -> Type[ConfigVariableGroup]
+    def group(self) -> Type[ConfigVariableGroup]:
         """Returns the class of the configuration variable group this configuration variable belongs to"""
         raise NotImplementedError()
 
@@ -250,8 +248,8 @@ class ConfigVariable:
         """Whether or not to show this option on the global settings page"""
         return True
 
-    def hint(self) -> Union[str, HTML]:
-        return ""
+    def hint(self) -> HTML:
+        return HTML()
 
 
 class ConfigVariableRegistry(cmk.utils.plugin_registry.Registry[Type[ConfigVariable]]):

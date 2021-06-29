@@ -29,7 +29,7 @@ from cmk.gui.watolib.utils import (
     multisite_dir,
     wato_root_dir,
 )
-from cmk.utils.tags import TagGroup, TagConfig
+from cmk.utils.tags import TagGroup, TagConfig, BuiltinTagConfig
 
 
 class TagConfigFile(WatoSimpleConfigFile):
@@ -111,6 +111,7 @@ def load_tag_group(ident: str) -> Optional[TagGroup]:
 
     """
     tag_config = load_tag_config()
+    tag_config += BuiltinTagConfig()
     return tag_config.get_tag_group(ident)
 
 
@@ -128,9 +129,17 @@ def save_tag_group(tag_group: TagGroup):
     update_tag_config(tag_config)
 
 
-def tag_group_exists(ident: str) -> bool:
+def is_builtin(ident: str) -> bool:
+    """Verify if a tag group is a built-in"""
+    tag_config = BuiltinTagConfig()
+    return tag_config.tag_group_exists(ident)
+
+
+def tag_group_exists(ident: str, builtin_included=False) -> bool:
     """Verify if a tag group exists"""
     tag_config = load_tag_config()
+    if builtin_included:
+        tag_config += BuiltinTagConfig()
     return tag_config.tag_group_exists(ident)
 
 
@@ -270,7 +279,7 @@ class OperationRemoveAuxTag(ABCTagGroupOperation):
 
 
 class OperationReplaceGroupedTags(ABCOperation):
-    def __init__(self, tag_group_id: str, remove_tag_ids: List[str],
+    def __init__(self, tag_group_id: str, remove_tag_ids: List[Optional[str]],
                  replace_tag_ids: Dict[str, str]) -> None:
         super(OperationReplaceGroupedTags, self).__init__()
         self.tag_group_id = tag_group_id
@@ -411,7 +420,7 @@ def _change_host_tags_in_rule(operation, mode, ruleset, rule):
     if not isinstance(operation, OperationReplaceGroupedTags):
         raise NotImplementedError()
 
-    tag_map: List[_Tuple[str, Any]] = list(operation.replace_tag_ids.items())
+    tag_map: List[_Tuple[Optional[str], Any]] = list(operation.replace_tag_ids.items())
     tag_map += [(tag_id, False) for tag_id in operation.remove_tag_ids]
 
     # Removal or renaming of single tag choices
@@ -436,7 +445,7 @@ def _change_host_tags_in_rule(operation, mode, ruleset, rule):
 
         # In case it needs to be replaced with a new value, do it now
         if new_tag:
-            was_negated = isinstance(dict, current_value) and "$ne" in current_value
+            was_negated = isinstance(current_value, dict) and "$ne" in current_value
             new_value = {"$ne": new_tag} if was_negated else new_tag
             rule.conditions.host_tags[operation.tag_group_id] = new_value
         elif mode == TagCleanupMode.DELETE:
@@ -535,25 +544,25 @@ def _extend_user_modified_tag_groups(host_tags):
     tag_choices = [c[0] for c in tag_group[2]]
 
     if "no-agent" not in tag_choices:
-        tag_group[2].insert(0, ("no-agent", _("No agent"), []))
+        tag_group[2].insert(0, ("no-agent", _("No API integrations, no Checkmk agent"), []))
 
     if "special-agents" not in tag_choices:
         tag_group[2].insert(
-            0, ("special-agents", _("No Checkmk agent, all configured special agents"), ["tcp"]))
+            0, ("special-agents", _("Configured API integrations, no Checkmk agent"), ["tcp"]))
 
     if "all-agents" not in tag_choices:
         tag_group[2].insert(
-            0, ("all-agents", _("Normal Checkmk agent, all configured special agents"), ["tcp"]))
+            0, ("all-agents", _("Configured API integrations and Checkmk agent"), ["tcp"]))
 
     if "cmk-agent" not in tag_choices:
         tag_group[2].insert(
-            0, ("cmk-agent", _("Normal Checkmk agent, or special agent if configured"), ["tcp"]))
+            0, ("cmk-agent", _("API integrations if configured, else Checkmk agent"), ["tcp"]))
     else:
         # Change title of cmk-agent tag choice and move to top
         for index, tag_choice in enumerate(tag_group[2]):
             if tag_choice[0] == "cmk-agent":
                 tag_choice_list = list(tag_group[2].pop(index))
-                tag_choice_list[1] = _("Normal Checkmk agent, or special agent if configured")
+                tag_choice_list[1] = _("API integrations if configured, else Checkmk agent")
                 tag_group[2].insert(0, tuple(tag_choice_list))
                 break
 

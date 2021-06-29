@@ -4,7 +4,7 @@
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 # pylint: disable=undefined-variable
-import pytest  # type: ignore[import]
+import pytest
 
 from cmk.utils.exceptions import MKAgentError, MKEmptyAgentData, MKTimeout
 from cmk.utils.piggyback import PiggybackRawDataInfo
@@ -143,6 +143,44 @@ class TestAgentSummarizerDefault_OnlyFrom:
             1,
             "Unexpected allowed IP ranges (exceeding: somewhere_else, missing: deep_space)(!)",
         )
+
+
+class TestAgentSummarizerDefault_Fails:
+    @pytest.fixture
+    def summarizer(self):
+        return AgentSummarizerDefault(
+            ExitSpec(),
+            is_cluster=False,
+            agent_min_version=0,
+            agent_target_version=None,
+            only_from=None,
+        )
+
+    @pytest.fixture
+    def mode(self):
+        # Only Mode.CHECKING triggers _check_agent_update
+        return Mode.CHECKING
+
+    def test_update_agent_fail(self, summarizer, mode):
+        assert summarizer.summarize_check_mk_section(
+            [
+                ["version:"],
+                ["agentos:"],
+                ["UpdateFailed:", "what"],
+                ["UpdateRecoverAction:", "why"],
+            ],
+            mode=Mode.CHECKING,
+        ) == (1, 'what why')
+
+    def test_update_agent_success(self, summarizer, mode):
+        assert summarizer.summarize_check_mk_section(
+            [
+                ["version:"],
+                ["agentos:"],
+                ["UpdateFailed:", "what"],
+            ],
+            mode=mode,
+        ) == (0, '')
 
 
 class TestAgentSummarizerDefault_CheckVersion:

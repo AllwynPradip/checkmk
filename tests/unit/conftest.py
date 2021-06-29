@@ -8,6 +8,8 @@ import socket
 import shutil
 import logging
 from pathlib import Path
+from unittest import mock
+from typing import Any, Mapping, NamedTuple
 
 from fakeredis import FakeRedis  # type: ignore[import]
 import pytest
@@ -23,11 +25,9 @@ import cmk.utils.version as cmk_version
 # TODO: Extract the livestatus mock to some other place to reduce the dependencies here.
 import cmk.gui.default_permissions
 
-# No stub file
-from cmk.gui.plugins.openapi.livestatus_helpers.testing import mock_livestatus
-from testlib import is_managed_repo, is_enterprise_repo  # type: ignore[import]
-# No stub file
-from testlib.debug_utils import cmk_debug_enabled  # type: ignore[import]
+from cmk.gui.livestatus_utils.testing import mock_livestatus
+from testlib import is_managed_repo, is_enterprise_repo
+from testlib.debug_utils import cmk_debug_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ def fixture_edition_short(monkeypatch, request):
 @pytest.fixture(autouse=True, scope="function")
 def patch_omd_site(monkeypatch):
     monkeypatch.setenv("OMD_SITE", "NO_SITE")
-    monkeypatch.setattr(cmk_version, "omd_site", lambda: "NO_SITE")
+    cmk_version.omd_site.cache_clear()
 
     _touch(cmk.utils.paths.htpasswd_file)
     store.makedirs(cmk.utils.paths.autochecks_dir)
@@ -63,6 +63,7 @@ def patch_omd_site(monkeypatch):
     store.makedirs(cmk.utils.paths.var_dir + '/php-api')
     store.makedirs(cmk.utils.paths.var_dir + '/wato/php-api')
     store.makedirs(cmk.utils.paths.var_dir + "/wato/auth")
+    store.makedirs(cmk.utils.paths.tmp_dir + "/wato/activation")
     store.makedirs(cmk.utils.paths.omd_root + '/var/log')
     store.makedirs(cmk.utils.paths.omd_root + '/tmp/check_mk')
     store.makedirs(cmk.utils.paths.default_config_dir + '/conf.d/wato')
@@ -70,6 +71,9 @@ def patch_omd_site(monkeypatch):
     store.makedirs(cmk.utils.paths.default_config_dir + '/mkeventd.d/wato')
     _touch(cmk.utils.paths.default_config_dir + '/mkeventd.mk')
     _touch(cmk.utils.paths.default_config_dir + '/multisite.mk')
+
+    yield
+    cmk_version.omd_site.cache_clear()
 
 
 def _touch(path):
@@ -207,8 +211,8 @@ class FixPluginLegacy:
         return self._check_variables
 
 
-@pytest.fixture(scope="session")
-def fix_register():
+@pytest.fixture(scope="session", name='fix_register')
+def fix_register_fixture():
     yield FixRegister()
 
 
@@ -272,3 +276,17 @@ def use_fakeredis_client(monkeypatch):
         "Redis",
         FakeRedis,
     )
+
+
+class _MockVSManager(NamedTuple):
+    active_service_interface: Mapping[str, Any]
+
+
+@pytest.fixture(scope="function")
+def initialised_item_state():
+    mock_vs = _MockVSManager({})
+    with mock.patch(
+            "cmk.base.api.agent_based.value_store._global_state._active_host_value_store",
+            mock_vs,
+    ):
+        yield

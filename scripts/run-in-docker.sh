@@ -20,15 +20,16 @@ echo "Running in Docker Container $TEST_CONTAINER (workdir $PWD)"
 docker pull $TEST_CONTAINER
 docker run -t -a stdout -a stderr \
     --init \
-    -u "$UID:$UID" \
+    -u "$UID:$(id -g)" \
     -v "$REPO_DIR:$REPO_DIR" \
     -v "/var/run/docker.sock:/var/run/docker.sock" \
-    --group-add=docker \
+    --group-add=$(getent group docker | cut -d: -f3) \
     -w "$PWD" \
     -e JUNIT_XML \
     -e PYLINT_ARGS \
     -e PYTEST_ADDOPTS \
     -e DOCKER_ADDOPTS \
+    -e MYPY_ADDOPTS \
     -e PYTHON_FILES \
     -e RESULTS \
     -e WORKDIR \

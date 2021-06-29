@@ -5,8 +5,9 @@
 # conditions defined in the file COPYING, which is part of this source code package.
 
 from cmk.gui.i18n import _
-from cmk.gui.globals import html
+from cmk.gui.globals import html, request, response
 from cmk.gui.htmllib import HTML
+from cmk.gui.utils.mobile import is_mobile
 
 from cmk.gui.plugins.views import (
     multisite_builtin_views,
@@ -109,7 +110,7 @@ multisite_builtin_views.update({
             ('site_host', False),
             ('svcdescr', False),
         ],
-        'title': _('Search'),
+        'title': _('Service search'),
         'topic': 'overview',
     }),
 
@@ -153,7 +154,7 @@ multisite_builtin_views.update({
             ('stateage', False),
             ('svcdescr', False),
         ],
-        'title': _('Problems (all)'),
+        'title': _('Service problems (all)'),
         'topic': 'problems',
     }),
 
@@ -203,7 +204,7 @@ multisite_builtin_views.update({
             ('stateage', False),
             ('svcdescr', False),
         ],
-        'title': _('Problems (unhandled)'),
+        'title': _('Service problems (unhandled)'),
         'topic': 'problems',
     }),
 
@@ -355,7 +356,7 @@ multisite_builtin_views.update({
             'opthostgroup',
         ],
         'sorters': [],
-        'title': _('Search'),
+        'title': _('Host search'),
         'topic': 'overview',
     }),
 
@@ -394,7 +395,7 @@ multisite_builtin_views.update({
             'host_acknowledged',
         ],
         'sorters': [],
-        'title': _('Problems (all)'),
+        'title': _('Host problems (all)'),
         'topic': 'problems'
     }),
 
@@ -432,7 +433,7 @@ multisite_builtin_views.update({
             'opthostgroup',
         ],
         'sorters': [],
-        'title': _('Problems (unhandled)'),
+        'title': _('Host problems (unhandled)'),
         'topic': 'problems'
     }),
 
@@ -460,7 +461,7 @@ multisite_builtin_views.update({
         'public': True,
         'show_filters': [],
         'sorters': [('log_time', False), ('log_lineno', False)],
-        'title': 'Events',
+        'title': _('Events'),
         'topic': 'history'
     }),
 
@@ -494,7 +495,7 @@ multisite_builtin_views.update({
             ('host', 'mobile_hostsvcnotifications', ''),
             ('service_description', 'mobile_svcnotifications', ''),
             ('log_time', None, ''),
-            ('log_contact_name', 'mobile_contactnotifications', ''),
+            ('log_contact_name', None, ''),
             ('log_type', None, ''),
             ('log_plugin_output', None, ''),
         ],
@@ -505,8 +506,8 @@ multisite_builtin_views.update({
             'log_plugin_output',
             'logtime',
         ],
-        'sorters': [('log_time', False), ('log_lineno', False)],
-        'title': _('Notifications'),
+        'sorters': [('log_time', True), ('log_lineno', True)],
+        'title': _('History'),
         'topic': 'history'
     }),
 
@@ -636,7 +637,7 @@ multisite_builtin_views.update({
         'num_columns': 2,
         'painters': [
             ('log_time', None, ''),
-            ('log_contact_name', 'mobile_contactnotifications', ''),
+            ('log_contact_name', None, ''),
             ('log_type', None, ''),
             ('host', 'mobile_hostsvcnotifications', ''),
             ('service_description', 'mobile_svcnotifications', ''),
@@ -675,7 +676,7 @@ multisite_builtin_views.update({
         'num_columns': 2,
         'painters': [
             ('log_time', None, ''),
-            ('log_contact_name', 'mobile_contactnotifications', ''),
+            ('log_contact_name', None, ''),
             ('host', None, ''),
             ('log_state', None, ''),
             ('log_plugin_output', None, ''),
@@ -704,7 +705,7 @@ multisite_builtin_views.update({
 
 
 def render_mobile_table(rows, view, group_cells, cells, num_columns, show_checkboxes):
-    if not html.mobile:
+    if not is_mobile(request, response):
         html.show_error(_("This view can only be used in mobile mode."))
         return
 
@@ -731,11 +732,13 @@ def render_mobile_table(rows, view, group_cells, cells, num_columns, show_checkb
             if n > 0 and n % num_columns == 0:
                 html.close_tr()
                 html.open_tr(class_="%s0" % odd)
+
             if n == len(cells) - 1 and n % num_columns != (num_columns - 1):
-                tdattrs = 'colspan="%d"' % (num_columns - (n % num_columns))
+                colspan = num_columns - (n % num_columns)
             else:
-                tdattrs = ""
-            cell.paint(row, tdattrs=tdattrs)
+                colspan = None
+
+            cell.paint(row, colspan=colspan)
         html.close_row()
     html.close_table()
     html.javascript('$("table.mobile a").attr("data-ajax", "false");')
@@ -761,7 +764,7 @@ class LayoutMobileTable(Layout):
 
 
 def render_mobile_list(rows, view, group_cells, cells, num_columns, show_checkboxes):
-    if not html.mobile:
+    if not is_mobile(request, response):
         html.show_error(_("This view can only be used in mobile mode."))
         return
 
@@ -777,9 +780,7 @@ def render_mobile_list(rows, view, group_cells, cells, num_columns, show_checkbo
         rendered_cells = [cell.render(row) for cell in cells]
         if rendered_cells:  # First cell (assumedly state) is left
             rendered_class, rendered_content = rendered_cells[0]
-            html.open_p(class_=["ui-li-aside", "ui-li-desc", rendered_class])
-            html.write(rendered_content)
-            html.close_p()
+            html.p(rendered_content, class_=["ui-li-aside", "ui-li-desc", rendered_class])
 
             if len(rendered_cells) > 1:
                 content = HTML(" &middot; ").join(
@@ -792,9 +793,7 @@ def render_mobile_list(rows, view, group_cells, cells, num_columns, show_checkbo
                     html.open_p(class_="ui-li-desc")
                     cell.paint_as_header()
                     html.write_text(': ')
-                    html.open_span(class_=rendered_class)
-                    html.write(rendered_content)
-                    html.close_span()
+                    html.span(rendered_content, class_=rendered_class)
                     html.close_p()
 
         html.close_li()
@@ -822,7 +821,7 @@ class LayoutMobileList(Layout):
 
 
 def render_mobile_dataset(rows, view, group_cells, cells, num_columns, show_checkboxes):
-    if not html.mobile:
+    if not is_mobile(request, response):
         html.show_error(_("This view can only be used in mobile mode."))
         return
 
@@ -837,9 +836,7 @@ def render_mobile_dataset(rows, view, group_cells, cells, num_columns, show_chec
                 continue  # Omit empty cells
 
             html.open_tr(class_="header")
-            html.open_th()
-            html.write(cell.title())
-            html.close_th()
+            html.th(cell.title())
             html.close_tr()
 
             html.open_tr(class_="data")

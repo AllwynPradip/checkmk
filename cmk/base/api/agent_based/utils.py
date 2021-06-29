@@ -9,16 +9,16 @@ These are meant to be exposed in the API
 """
 import itertools
 import re
-from typing import Any, Callable, Dict, Generator, Optional, overload, Tuple, Union
+from typing import Any, Callable, Dict, Generator, MutableMapping, Optional, overload, Tuple, Union
 
 import cmk.utils.debug
 from cmk.utils.exceptions import MKGeneralException
+from cmk.utils.type_defs import HostName
 
 import cmk.base.plugin_contexts as plugin_contexts  # pylint: disable=cmk-module-layer-violation
 import cmk.base.prediction  # pylint: disable=cmk-module-layer-violation
 from cmk.base.api.agent_based.checking_classes import IgnoreResultsError, Metric, Result, State
 from cmk.base.api.agent_based.section_classes import SNMPDetectSpecification
-from cmk.base.api.agent_based.type_defs import ValueStore
 
 #     ____       _            _
 #    |  _ \  ___| |_ ___  ___| |_   ___ _ __   ___  ___
@@ -376,7 +376,7 @@ def check_levels_predictive(
 
     try:
         ref_value, levels_tuple = cmk.base.prediction.get_levels(
-            plugin_contexts.host_name(),
+            HostName(plugin_contexts.host_name()),
             plugin_contexts.service_description(),
             metric_name,
             levels,
@@ -432,7 +432,7 @@ class GetRateError(IgnoreResultsError):
 
 
 def get_rate(
-    value_store: ValueStore,
+    value_store: MutableMapping[str, Any],
     key: str,
     time: float,
     value: float,
@@ -500,7 +500,7 @@ def get_rate(
 
 
 def get_average(
-    value_store: ValueStore,
+    value_store: MutableMapping[str, Any],
     key: str,
     time: float,
     value: float,

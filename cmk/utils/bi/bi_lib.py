@@ -17,6 +17,7 @@ from typing import (
     Dict,
     Type,
     Tuple,
+    Iterable,
 )
 
 from cmk.utils.bi.bi_schema import Schema
@@ -32,6 +33,7 @@ from marshmallow.fields import (
 )
 
 from functools import partial
+
 ReqList = partial(MList, required=True)
 ReqDict = partial(MDict, required=True)
 ReqConstant = partial(Constant, required=True)
@@ -41,6 +43,9 @@ ReqNested = partial(Nested, required=True)
 ReqBoolean = partial(Boolean, required=True)
 
 SearchResult = Dict[str, str]
+SearchResults = List[SearchResult]
+ActionArgument = Tuple[str, ...]
+ActionArguments = List[ActionArgument]
 
 import cmk.utils.plugin_registry as plugin_registry
 from cmk.utils.macros import (
@@ -59,6 +64,9 @@ from cmk.utils.type_defs import (
     HostState,
     ServiceState,
     ServiceDetails,
+    TaggroupID,
+    TaggroupIDToTagCondition,
+    TagID,
 )
 
 
@@ -104,7 +112,7 @@ BIServiceData = NamedTuple("BIServiceData", [
 
 BIHostData = NamedTuple("BIHostData", [
     ("site_id", str),
-    ("tags", Set[str]),
+    ("tags", Set[Tuple[TaggroupID, TagID]]),
     ("labels", MapGroup2Value),
     ("folder", str),
     ("services", Dict[str, BIServiceData]),
@@ -150,7 +158,7 @@ BIHostSearchMatch = NamedTuple("BIHostSearchMatch", [
 ])
 
 BIServiceSearchMatch = NamedTuple("BIServiceSearchMatch", [
-    ("host", BIHostData),
+    ("host_match", BIHostSearchMatch),
     ("service_description", str),
     ("match_groups", tuple),
 ])
@@ -198,6 +206,7 @@ def create_nested_schema(base_schema,
         base_schema,
         default=default_config,
         example=example,
+        description="TODO: Hier muß Andreas noch etwas reinschreiben!",
     )
 
 
@@ -363,7 +372,7 @@ class ABCBISearcher(metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def get_service_description_matches(self, hosts: List[BIHostData],
+    def get_service_description_matches(self, host_matches: List[BIHostSearchMatch],
                                         pattern: str) -> List[BIServiceSearchMatch]:
         raise NotImplementedError()
 
@@ -373,8 +382,12 @@ class ABCBISearcher(metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def filter_host_tags(self, hosts: List[BIHostData], condition: Dict) -> List[BIHostData]:
-        raise NotImplementedError()
+    def filter_host_tags(
+        self,
+        hosts: List[BIHostData],
+        tag_conditions: TaggroupIDToTagCondition,
+    ) -> List[BIHostData]:
+        ...
 
 
 class ABCBIStatusFetcher(metaclass=abc.ABCMeta):
@@ -395,7 +408,7 @@ class ABCBICompiledNode(metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def services_of_host(self, host_name: str) -> Set[ServiceName]:
+    def services_of_host(self, host_name: HostName) -> Set[ServiceName]:
         raise NotImplementedError()
 
     @abc.abstractmethod
@@ -451,8 +464,21 @@ class ABCBIAction(metaclass=abc.ABCMeta):
     def serialize(self) -> Dict[str, Any]:
         raise NotImplementedError()
 
+    def _generate_action_arguments(self, search_results: List[Dict[str, str]],
+                                   macros: MacroMapping) -> ActionArguments:
+        raise NotImplementedError()
+
+    def execute_search_results(self, search_results, macros: MacroMapping,
+                               bi_searcher) -> Iterable[ABCBICompiledNode]:
+        action_arguments = self._generate_action_arguments(search_results, macros)
+        for argument in self._deduplicate_action_arguments(action_arguments):
+            yield from self.execute(argument, bi_searcher)
+
+    def _deduplicate_action_arguments(self, arguments: ActionArguments) -> ActionArguments:
+        return list(dict.fromkeys(arguments).keys())
+
     @abc.abstractmethod
-    def execute(self, search_result: Dict[str, str],
+    def execute(self, argument: ActionArgument,
                 bi_searcher: ABCBISearcher) -> List[ABCBICompiledNode]:
         raise NotImplementedError()
 

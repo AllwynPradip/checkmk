@@ -4,16 +4,18 @@
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Dict, List, Tuple
+from contextlib import nullcontext
+from typing import Dict, List, Tuple, ContextManager
 
 import time
 
-import cmk.gui.escaping as escaping
 import cmk.gui.config as config
 import cmk.gui.sites as sites
 from cmk.gui.log import logger
 from cmk.gui.i18n import _
-from cmk.gui.globals import html
+from cmk.gui.globals import html, request, transactions, response
+from cmk.gui.utils.urls import makeactionuri_contextless
+from cmk.gui.htmllib import foldable_container
 from cmk.gui.plugins.sidebar import (
     PageHandlers,
     SidebarSnapin,
@@ -52,21 +54,19 @@ class MasterControlSnapin(SidebarSnapin):
             sites.live().set_prepend_site(False)
 
         for site_id, site_alias in config.sorted_sites():
-            if not config.is_single_local_site():
-                html.begin_foldable_container("master_control",
-                                              site_id,
-                                              True,
-                                              site_alias,
-                                              icon="foldable_sidebar")
-
-            try:
-                self._show_master_control_site(site_id, site_status_info, items)
-            except Exception as e:
-                logger.exception("error rendering master control for site %s", site_id)
-                write_snapin_exception(e)
-            finally:
-                if not config.is_single_local_site():
-                    html.end_foldable_container()
+            container: ContextManager[bool] = foldable_container(
+                treename="master_control",
+                id_=site_id,
+                isopen=True,
+                title=site_alias,
+                icon="foldable_sidebar") if not config.is_single_local_site() else nullcontext(
+                    False)
+            with container:
+                try:
+                    self._show_master_control_site(site_id, site_status_info, items)
+                except Exception as e:
+                    logger.exception("error rendering master control for site %s", site_id)
+                    write_snapin_exception(e)
 
     def _core_toggles(self) -> List[Tuple[str, str]]:
         return [
@@ -121,12 +121,13 @@ class MasterControlSnapin(SidebarSnapin):
                 continue
 
             colvalue = site_info[i]
-            url = html.makeactionuri_contextless([
-                ("site", site_id),
-                ("switch", colname),
-                ("state", "%d" % (1 - colvalue)),
-            ],
-                                                 filename="switch_master_state.py")
+            url = makeactionuri_contextless(request,
+                                            transactions, [
+                                                ("site", site_id),
+                                                ("switch", colname),
+                                                ("state", "%d" % (1 - colvalue)),
+                                            ],
+                                            filename="switch_master_state.py")
             onclick = "cmk.ajax.get_url('%s', cmk.utils.update_contents, 'snapin_master_control')" % url
 
             html.open_tr()
@@ -152,17 +153,17 @@ class MasterControlSnapin(SidebarSnapin):
         }
 
     def _ajax_switch_masterstate(self) -> None:
-        html.set_output_format("text")
+        response.set_content_type("text/plain")
 
         if not config.user.may("sidesnap.master_control"):
             return
 
-        if not html.check_transaction():
+        if not transactions.check_transaction():
             return
 
-        site = html.request.get_ascii_input_mandatory("site")
-        column = html.request.get_ascii_input_mandatory("switch")
-        state = html.request.get_integer_input_mandatory("state")
+        site = request.get_ascii_input_mandatory("site")
+        column = request.get_ascii_input_mandatory("switch")
+        state = request.get_integer_input_mandatory("state")
         commands = {
             ("enable_notifications", 1): "ENABLE_NOTIFICATIONS",
             ("enable_notifications", 0): "DISABLE_NOTIFICATIONS",
@@ -180,7 +181,7 @@ class MasterControlSnapin(SidebarSnapin):
 
         command = commands.get((column, state))
         if not command:
-            html.write(_("Command %s/%d not found") % (escaping.escape_attribute(column), state))
+            html.write_text(_("Command %s/%d not found") % (column, state))
             return
 
         sites.live().command("[%d] %s" % (int(time.time()), command), site)

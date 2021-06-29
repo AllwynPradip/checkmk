@@ -5,8 +5,8 @@
 # conditions defined in the file COPYING, which is part of this source code package.
 
 from datetime import datetime
-import pytest  # type: ignore[import]
-from freezegun import freeze_time  # type: ignore[import]
+import pytest
+from freezegun import freeze_time
 from cmk.utils.type_defs import CheckPluginName
 from cmk.base.plugins.agent_based.agent_based_api.v1 import (
     Service,
@@ -19,6 +19,7 @@ import cmk.base.plugins.agent_based.utils.sap_hana as sap_hana
 import cmk.base.plugins.agent_based.utils.df as df
 
 from cmk.base.api.agent_based import value_store
+
 NOW_SIMULATED = "1988-06-08 17:00:00.000000"
 NOW_EPOCH = (datetime.strptime(NOW_SIMULATED, "%Y-%m-%d %H:%M:%S.%f") -
              datetime(1970, 1, 1)).total_seconds()

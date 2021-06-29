@@ -35,7 +35,7 @@ import cmk.gui.key_mgmt as key_mgmt
 from cmk.gui.valuespec import (
     Password,
     Dictionary,
-    TextUnicode,
+    TextInput,
     DropdownChoice,
     Checkbox,
     Alternative,
@@ -50,7 +50,7 @@ from cmk.gui.valuespec import (
 )
 from cmk.gui.exceptions import MKUserError, MKGeneralException, FinalizeRequest
 from cmk.gui.i18n import _
-from cmk.gui.globals import html, request
+from cmk.gui.globals import html, request, transactions, user_errors
 from cmk.gui.main_menu import mega_menu_registry
 from cmk.gui.breadcrumb import Breadcrumb, make_simple_page_breadcrumb
 from cmk.gui.page_menu import (
@@ -61,7 +61,8 @@ from cmk.gui.page_menu import (
     make_simple_link,
     make_simple_form_page_menu,
 )
-from cmk.gui.utils.urls import makeuri_contextless, make_confirm_link
+from cmk.gui.utils.urls import (makeuri_contextless, make_confirm_link, makeactionuri,
+                                makeactionuri_contextless)
 from cmk.gui.utils.flashed_messages import flash
 from cmk.gui.plugins.wato.utils.base_modes import ActionResult, redirect
 
@@ -427,8 +428,9 @@ class Jobs(BackupEntityCollection):
                 table.row()
                 table.cell(_("Actions"), css="buttons")
                 delete_url = make_confirm_link(
-                    url=html.makeactionuri_contextless([("mode", "backup"), ("_action", "delete"),
-                                                        ("_job", job_ident)]),
+                    url=makeactionuri_contextless(request, transactions, [("mode", "backup"),
+                                                                          ("_action", "delete"),
+                                                                          ("_job", job_ident)]),
                     message=_("Do you really want to delete this job?"),
                 )
                 edit_url = makeuri_contextless(
@@ -451,7 +453,7 @@ class Jobs(BackupEntityCollection):
                                      "backup_state")
 
                 if not job.is_running():
-                    start_url = html.makeactionuri_contextless([
+                    start_url = makeactionuri_contextless(request, transactions, [
                         ("mode", "backup"),
                         ("_action", "start"),
                         ("_job", job_ident),
@@ -459,7 +461,7 @@ class Jobs(BackupEntityCollection):
 
                     html.icon_button(start_url, _("Manually start this backup"), "backup_start")
                 else:
-                    stop_url = html.makeactionuri_contextless([
+                    stop_url = makeactionuri_contextless(request, transactions, [
                         ("mode", "backup"),
                         ("_action", "stop"),
                         ("_job", job_ident),
@@ -467,7 +469,7 @@ class Jobs(BackupEntityCollection):
 
                     html.icon_button(stop_url, _("Stop this backup job"), "backup_stop")
 
-                table.cell(_("Name"), html.render_text(job.title()))
+                table.cell(_("Name"), job.title())
 
                 css = "state0"
                 state_txt = job.state_name(state["state"])
@@ -481,14 +483,15 @@ class Jobs(BackupEntityCollection):
                     css = ""
 
                 table.cell(_("State"), css=css)
-                html.write(html.render_span(state_txt))
+                html.write_html(html.render_span(state_txt))
 
                 table.cell(_("Runtime"))
                 if state["started"]:
-                    html.write(_("Started at %s") % render.date_and_time(state["started"]))
+                    html.write_text(_("Started at %s") % render.date_and_time(state["started"]))
                     duration = time.time() - state["started"]
                     if state["state"] == "finished":
-                        html.write(", Finished at %s" % render.date_and_time(state["finished"]))
+                        html.write_text(", Finished at %s" %
+                                        render.date_and_time(state["finished"]))
                         duration = state["finished"] - state["started"]
 
                     if "size" in state:
@@ -496,7 +499,7 @@ class Jobs(BackupEntityCollection):
                     else:
                         size_txt = ""
 
-                    html.write(
+                    html.write_text(
                         _(" (Duration: %s, %sIO: %s/s)") % (
                             render.timespan(duration),
                             size_txt,
@@ -506,10 +509,10 @@ class Jobs(BackupEntityCollection):
                 table.cell(_("Next run"))
                 schedule = job.schedule()
                 if not schedule:
-                    html.write(_("Only execute manually"))
+                    html.write_text(_("Only execute manually"))
 
                 elif schedule["disabled"]:
-                    html.write(_("Disabled"))
+                    html.write_text(_("Disabled"))
 
                 elif schedule["timeofday"]:
                     # find the next time of all configured times
@@ -517,7 +520,7 @@ class Jobs(BackupEntityCollection):
                     for timespec in schedule["timeofday"]:
                         times.append(next_scheduled_time(schedule["period"], timespec))
 
-                    html.write(time.strftime("%Y-%m-%d %H:%M", time.localtime(min(times))))
+                    html.write_text(time.strftime("%Y-%m-%d %H:%M", time.localtime(min(times))))
 
     def jobs_using_target(self, target):
         jobs = []
@@ -625,16 +628,16 @@ class PageBackup:
         return True
 
     def action(self) -> ActionResult:
-        ident = html.request.var("_job")
+        ident = request.var("_job")
         jobs = self.jobs()
         try:
             job = jobs.get(ident)
         except KeyError:
             raise MKUserError("_job", _("This backup job does not exist."))
 
-        action = html.request.var("_action")
+        action = request.var("_action")
 
-        if not html.check_transaction():
+        if not transactions.check_transaction():
             return redirect(makeuri_contextless(request, [("mode", "backup")]))
 
         if action == "delete" and self._may_edit_config():
@@ -674,7 +677,7 @@ class PageBackup:
 class PageEditBackupJob:
     def __init__(self):
         super(PageEditBackupJob, self).__init__()
-        job_ident = html.request.var("job")
+        job_ident = request.var("job")
 
         if job_ident is not None:
             try:
@@ -769,7 +772,7 @@ class PageEditBackupJob:
         return Dictionary(
             title=_("Backup job"),
             elements=ident_attr + [
-                ("title", TextUnicode(
+                ("title", TextInput(
                     title=_("Title"),
                     allow_empty=False,
                     size=64,
@@ -832,7 +835,7 @@ class PageEditBackupJob:
         return sorted(self.targets().choices(), key=lambda x_y1: x_y1[1].title())
 
     def action(self) -> ActionResult:
-        if not html.check_transaction():
+        if not transactions.check_transaction():
             return redirect(makeuri_contextless(request, [("mode", "backup")]))
 
         vs = self.vs_backup_job()
@@ -918,22 +921,20 @@ class PageAbstractBackupJobState:
 
         html.open_tr(class_=["data", "even0"])
         html.td(_("State"), class_=["left", "legend"])
-        html.open_td(class_=["state", css])
-        html.write(state_txt)
-        html.close_td()
+        html.td(state_txt, class_=["state", css])
         html.close_tr()
 
         html.open_tr(class_=["data", "odd0"])
         html.td(_("Runtime"), class_="left")
         html.open_td()
         if state["started"]:
-            html.write(_("Started at %s") % render.date_and_time(state["started"]))
+            html.write_text(_("Started at %s") % render.date_and_time(state["started"]))
             duration = time.time() - state["started"]
             if state["state"] == "finished":
-                html.write(", Finished at %s" % render.date_and_time(state["started"]))
+                html.write_text(", Finished at %s" % render.date_and_time(state["started"]))
                 duration = state["finished"] - state["started"]
 
-            html.write(_(" (Duration: %s)") % render.timespan(duration))
+            html.write_text(_(" (Duration: %s)") % render.timespan(duration))
         html.close_td()
         html.close_tr()
 
@@ -955,7 +956,7 @@ class PageBackupJobState(PageAbstractBackupJobState):
         self._from_vars()
 
     def _from_vars(self):
-        job_ident = html.request.var("job")
+        job_ident = request.var("job")
         if job_ident is not None:
             try:
                 self._job = self.jobs().get(job_ident)
@@ -1008,14 +1009,16 @@ class Target(BackupEntity):
                 table.cell(_("Actions"), css="buttons")
 
                 delete_url = make_confirm_link(
-                    url=html.makeactionuri([("_action", "delete"), ("_backup", backup_ident)]),
+                    url=makeactionuri(request, transactions, [("_action", "delete"),
+                                                              ("_backup", backup_ident)]),
                     message=_("Do you really want to delete this backup?"),
                 )
 
                 html.icon_button(delete_url, _("Delete this backup"), "delete")
 
                 start_url = make_confirm_link(
-                    url=html.makeactionuri([("_action", "start"), ("_backup", backup_ident)]),
+                    url=makeactionuri(request, transactions, [("_action", "start"),
+                                                              ("_backup", backup_ident)]),
                     message=_("Do you really want to start the restore of this backup?"),
                 )
 
@@ -1031,26 +1034,26 @@ class Target(BackupEntity):
                 else:
                     from_info += " (Version: %s)" % info["cma_version"]
 
-                table.cell(_("Backup-ID"), html.render_text(backup_ident))
-                table.cell(_("From"), html.render_text(from_info))
+                table.cell(_("Backup-ID"), backup_ident)
+                table.cell(_("From"), from_info)
                 table.cell(_("Finished"), render.date_and_time(info["finished"]))
                 table.cell(_("Size"), render.fmt_bytes(info["size"]))
                 table.cell(_("Encrypted"))
                 if info["config"]["encrypt"] is not None:
-                    html.write(info["config"]["encrypt"])
+                    html.write_text(info["config"]["encrypt"])
                 else:
                     html.write_text(_("No"))
 
                 if info["type"] == "Appliance":
                     table.cell(_("Clustered"))
                     if "cma_cluster" not in info:
-                        html.write(_("Standalone"))
+                        html.write_text(_("Standalone"))
                     else:
-                        html.write(_("Clustered"))
+                        html.write_text(_("Clustered"))
                         if not info["cma_cluster"]["is_inactive"]:
-                            html.write(" (%s)" % _("Active node"))
+                            html.write_text(" (%s)" % _("Active node"))
                         else:
-                            html.write(" (%s)" % _("Standby node"))
+                            html.write_text(" (%s)" % _("Standby node"))
 
     def backups(self):
         return self.type().backups()
@@ -1068,12 +1071,11 @@ class Targets(BackupEntityCollection):
 
     def show_list(self, title=None, editable=True):
         title = title if title else _("Targets")
-        html.open_h2()
-        html.write(title)
-        html.close_h2()
+        html.h2(title)
         if not editable and is_site():
-            html.write("<p>%s</p>" % _("These backup targets can not be edited here. You need to "
-                                       "open the device backup management."))
+            html.p(
+                _("These backup targets can not be edited here. You need to "
+                  "open the device backup management."))
 
         with table_element(sortable=False, searchable=False) as table:
 
@@ -1091,8 +1093,9 @@ class Targets(BackupEntityCollection):
 
                 if editable:
                     delete_url = make_confirm_link(
-                        url=html.makeactionuri_contextless([("mode", "backup_targets"),
-                                                            ("target", target_ident)]),
+                        url=makeactionuri_contextless(request, transactions,
+                                                      [("mode", "backup_targets"),
+                                                       ("target", target_ident)]),
                         message=_("Do you really want to delete this target?"),
                     )
                     edit_url = makeuri_contextless(
@@ -1103,7 +1106,7 @@ class Targets(BackupEntityCollection):
                     html.icon_button(edit_url, _("Edit this backup target"), "edit")
                     html.icon_button(delete_url, _("Delete this backup target"), "delete")
 
-                table.cell(_("Title"), html.render_text(target.title()))
+                table.cell(_("Title"), target.title())
 
                 target_class = target.type_class()
                 vs_target = target_class(target.type_params()).valuespec()
@@ -1157,10 +1160,10 @@ class PageBackupTargets:
         )
 
     def action(self) -> ActionResult:
-        if not html.check_transaction():
+        if not transactions.check_transaction():
             return redirect(makeuri_contextless(request, [("mode", "backup_targets")]))
 
-        ident = html.request.var("target")
+        ident = request.var("target")
         targets = self.targets()
         try:
             target = targets.get(ident)
@@ -1193,7 +1196,7 @@ class PageBackupTargets:
 class PageEditBackupTarget:
     def __init__(self):
         super(PageEditBackupTarget, self).__init__()
-        target_ident = html.request.var("target")
+        target_ident = request.var("target")
 
         if target_ident is not None:
             try:
@@ -1248,7 +1251,7 @@ class PageEditBackupTarget:
         return Dictionary(
             title=_("Backup target"),
             elements=ident_attr + [
-                ("title", TextUnicode(
+                ("title", TextInput(
                     title=_("Title"),
                     allow_empty=False,
                     size=64,
@@ -1270,7 +1273,7 @@ class PageEditBackupTarget:
             raise MKUserError(varprefix, _("This ID is already used by another backup target."))
 
     def action(self) -> ActionResult:
-        if not html.check_transaction():
+        if not transactions.check_transaction():
             return redirect(makeuri_contextless(request, [("mode", "backup_targets")]))
 
         vs = self.vs_backup_target()
@@ -1650,7 +1653,7 @@ class PageBackupRestore:
         raise NotImplementedError()
 
     def _load_target(self):
-        ident = html.request.var("target")
+        ident = request.var("target")
         if ident is None:
             self._target_ident = None
             self._target = None
@@ -1687,7 +1690,8 @@ class PageBackupRestore:
                                     icon_name="backup_stop",
                                     item=make_simple_link(
                                         make_confirm_link(
-                                            url=html.makeactionuri([("_action", "stop")]),
+                                            url=makeactionuri(request, transactions,
+                                                              [("_action", "stop")]),
                                             message=_(
                                                 "Do you really want to stop the restore of "
                                                 "this backup? This will - leave your environment in "
@@ -1701,7 +1705,8 @@ class PageBackupRestore:
                                     title=_("Complete the restore"),
                                     icon_name="save",
                                     item=make_simple_link(
-                                        html.makeactionuri([("_action", "complete")])),
+                                        makeactionuri(request, transactions,
+                                                      [("_action", "complete")])),
                                     is_shortcut=True,
                                     is_suggested=True,
                                     is_enabled=self._restore_was_started(),
@@ -1715,13 +1720,13 @@ class PageBackupRestore:
         )
 
     def action(self) -> ActionResult:
-        action = html.request.var("_action")
-        backup_ident = html.request.var("_backup")
+        action = request.var("_action")
+        backup_ident = request.var("_backup")
 
         if action is None:
             return None  # Only choosen the target
 
-        if not html.check_transaction():
+        if not transactions.check_transaction():
             return redirect(makeuri_contextless(request, [("mode", "backup_restore")]))
 
         if action == "delete":
@@ -1784,19 +1789,19 @@ class PageBackupRestore:
         if html.form_submitted("key"):
             try:
                 value = self._vs_key().from_html_vars("_key")
-                if html.request.has_var("_key_p_passphrase"):
+                if request.has_var("_key_p_passphrase"):
                     self._vs_key().validate_value(value, "_key")
                     passphrase = value["passphrase"]
 
                     # Validate the passphrase
                     key_mgmt.decrypt_private_key(key["private_key"], passphrase)
 
-                    html.check_transaction()  # invalidate transid
+                    transactions.check_transaction()  # invalidate transid
                     RestoreJob(self._target_ident, backup_ident, passphrase).start()
                     flash(_("The restore has been started."))
                     return redirect(makeuri_contextless(request, [("mode", "backup_restore")]))
             except MKUserError as e:
-                html.add_user_error(e.varname, e)
+                user_errors.add(e)
 
         # Special handling for Checkmk / CMA differences
         if is_site():

@@ -18,11 +18,12 @@ import cmk.gui.userdb as userdb
 import cmk.gui.permissions as permissions
 import cmk.gui.config as config
 import cmk.gui.watolib as watolib
+from cmk.gui.htmllib import foldable_container
 from cmk.gui.table import table_element
 import cmk.gui.forms as forms
 from cmk.gui.exceptions import MKUserError
 from cmk.gui.i18n import _
-from cmk.gui.globals import html, request
+from cmk.gui.globals import html, request, transactions
 from cmk.gui.valuespec import (
     Age,
     Alternative,
@@ -39,9 +40,7 @@ from cmk.gui.valuespec import (
     ListOf,
     ListOfStrings,
     RegExp,
-    RegExpUnicode,
-    TextAscii,
-    TextUnicode,
+    TextInput,
     Transform,
     Tuple,
     rule_option_elements,
@@ -76,7 +75,7 @@ from cmk.gui.page_menu import (
     make_simple_form_page_menu,
     make_display_options_dropdown,
 )
-from cmk.gui.utils.urls import makeuri
+from cmk.gui.utils.urls import makeuri, makeactionuri
 
 NotificationRule = Dict[str, Any]
 
@@ -144,7 +143,7 @@ class ABCNotificationsMode(ABCEventsMode):
                  ],
              )),
             ("match_notification_comment",
-             RegExpUnicode(
+             RegExp(
                  title=_("Match notification comment"),
                  help=
                  _("This match only makes sense for custom notifications. When a user creates "
@@ -153,7 +152,7 @@ class ABCNotificationsMode(ABCEventsMode):
                    "make a condition of that comment. It is a regular expression matching the beginning "
                    "of the comment."),
                  size=60,
-                 mode=RegExpUnicode.prefix,
+                 mode=RegExp.prefix,
              )),
             ("match_ec",
              Alternative(
@@ -202,12 +201,12 @@ class ABCNotificationsMode(ABCEventsMode):
                                   choices=cmk.gui.mkeventd.syslog_facilities,
                               )),
                              ("match_comment",
-                              RegExpUnicode(
+                              RegExp(
                                   title=_("Match event comment"),
                                   help=
                                   _("This is a regular expression for matching the event's comment."
                                    ),
-                                  mode=RegExpUnicode.prefix,
+                                  mode=RegExp.prefix,
                               )),
                          ])
                  ]))
@@ -291,7 +290,7 @@ class ABCNotificationsMode(ABCEventsMode):
                                      _("Context information about this rule"),
                                      "url",
                                      target="_blank")
-                    html.write("&nbsp;")
+                    html.write_text("&nbsp;")
                 html.write_text(rule["description"])
                 table.cell(_("Contacts"))
 
@@ -300,22 +299,21 @@ class ABCNotificationsMode(ABCEventsMode):
                     html.i(_("(no one)"))
                 else:
                     for line in infos:
-                        html.write("&bullet; %s" % line)
+                        html.write_text("&bullet; %s" % line)
                         html.br()
 
                 table.cell(_("Conditions"), css="rule_conditions")
                 num_conditions = len([key for key in rule if key.startswith("match_")])
                 if num_conditions:
                     title = _("%d conditions") % num_conditions
-                    html.begin_foldable_container(
-                        treename="rule_%s_%d" % (userid, nr),
-                        id_="%s" % nr,
-                        isopen=False,
-                        title=title,
-                        indent=False,
-                    )
-                    html.write(vs_match_conditions.value_to_text(rule))
-                    html.end_foldable_container()
+                    with foldable_container(
+                            treename="rule_%s_%d" % (userid, nr),
+                            id_=str(nr),
+                            isopen=False,
+                            title=title,
+                            indent=False,
+                    ):
+                        html.write_text(vs_match_conditions.value_to_text(rule))
                 else:
                     html.i(_("(no conditions)"))
 
@@ -372,7 +370,7 @@ class ABCNotificationsMode(ABCEventsMode):
                 config.user.may(permission_name))
 
     def _rule_links(self, rule, nr, profilemode, userid):
-        anavar = html.request.var("analyse", "")
+        anavar = request.var("analyse", "")
 
         if profilemode:
             listmode = "user_notifications_p"
@@ -493,7 +491,7 @@ class ModeNotifications(ABCNotificationsMode):
                             'emblem': 'disable' if self._show_user_rules else 'enable'
                         },
                         item=make_simple_link(
-                            html.makeactionuri([
+                            makeactionuri(request, transactions, [
                                 ("_show_user", "" if self._show_user_rules else "1"),
                             ])),
                     ),
@@ -504,7 +502,7 @@ class ModeNotifications(ABCNotificationsMode):
                             'emblem': 'disable' if self._show_backlog else "enable",
                         },
                         item=make_simple_link(
-                            html.makeactionuri([
+                            makeactionuri(request, transactions, [
                                 ("_show_backlog", "" if self._show_backlog else "1"),
                             ])),
                         is_shortcut=True,
@@ -517,7 +515,7 @@ class ModeNotifications(ABCNotificationsMode):
                             'emblem': 'disable' if self._show_bulks else "enable",
                         },
                         item=make_simple_link(
-                            html.makeactionuri([
+                            makeactionuri(request, transactions, [
                                 ("_show_bulks", "" if self._show_bulks else "1"),
                             ])),
                         is_shortcut=True,
@@ -527,24 +525,24 @@ class ModeNotifications(ABCNotificationsMode):
             ))
 
     def action(self) -> ActionResult:
-        if html.request.has_var("_show_user"):
-            if html.check_transaction():
-                self._show_user_rules = bool(html.request.var("_show_user"))
+        if request.has_var("_show_user"):
+            if transactions.check_transaction():
+                self._show_user_rules = bool(request.var("_show_user"))
                 self._save_notification_display_options()
 
-        elif html.request.has_var("_show_backlog"):
-            if html.check_transaction():
-                self._show_backlog = bool(html.request.var("_show_backlog"))
+        elif request.has_var("_show_backlog"):
+            if transactions.check_transaction():
+                self._show_backlog = bool(request.var("_show_backlog"))
                 self._save_notification_display_options()
 
-        elif html.request.has_var("_show_bulks"):
-            if html.check_transaction():
-                self._show_bulks = bool(html.request.var("_show_bulks"))
+        elif request.has_var("_show_bulks"):
+            if transactions.check_transaction():
+                self._show_bulks = bool(request.var("_show_bulks"))
                 self._save_notification_display_options()
 
-        elif html.request.has_var("_replay"):
-            if html.check_transaction():
-                nr = html.request.get_integer_input_mandatory("_replay")
+        elif request.has_var("_replay"):
+            if transactions.check_transaction():
+                nr = request.get_integer_input_mandatory("_replay")
                 watolib.check_mk_local_automation("notification-replay", [str(nr)], None)
                 flash(_("Replayed notifiation number %d") % (nr + 1))
                 return None
@@ -634,11 +632,11 @@ class ModeNotifications(ABCNotificationsMode):
                 table.cell(_("Contact"), contact)
                 table.cell(_("Method"), method)
                 table.cell(_("Bulk ID"), bulk_id)
-                table.cell(_("Max. Age (sec)"), "%s" % interval, css="number")
-                table.cell(_("Age (sec)"), "%d" % age, css="number")
+                table.cell(_("Max. Age (sec)"), str(interval), css="number")
+                table.cell(_("Age (sec)"), str(age), css="number")
                 if interval and age >= interval:
                     html.icon("warning", _("Age of oldest notification is over maximum age"))
-                table.cell(_("Timeperiod"), "%s" % timeperiod)
+                table.cell(_("Timeperiod"), str(timeperiod))
                 table.cell(_("Max. Count"), str(maxcount), css="number")
                 table.cell(_("Count"), str(len(uuids)), css="number")
                 if len(uuids) >= maxcount:
@@ -675,15 +673,15 @@ class ModeNotifications(ABCNotificationsMode):
                                  onclick="cmk.wato.toggle_container('notification_context_%d')" %
                                  nr)
 
-                replay_url = html.makeactionuri([("_replay", str(nr))])
+                replay_url = makeactionuri(request, transactions, [("_replay", str(nr))])
                 html.icon_button(replay_url, _("Replay this notification, send it again!"),
                                  "reload_cmk")
 
-                if (html.request.var("analyse") and
-                        nr == html.request.get_integer_input_mandatory("analyse")):
+                if (request.var("analyse") and
+                        nr == request.get_integer_input_mandatory("analyse")):
                     html.icon("rulematch", _("You are analysing this notification"))
 
-                table.cell(_("Nr."), nr + 1, css="number")
+                table.cell(_("Nr."), str(nr + 1), css="number")
                 if "MICROTIME" in context:
                     date: str = time.strftime("%Y-%m-%d %H:%M:%S",
                                               time.localtime(int(context["MICROTIME"]) / 1000000.0))
@@ -746,8 +744,8 @@ class ModeNotifications(ABCNotificationsMode):
     # TODO: Refactor this
     def _show_rules(self):
         # Do analysis
-        if html.request.var("analyse"):
-            nr = html.request.get_integer_input_mandatory("analyse")
+        if request.var("analyse"):
+            nr = request.get_integer_input_mandatory("analyse")
             analyse = watolib.check_mk_local_automation("notification-analyse", [str(nr)], None)
         else:
             analyse = False
@@ -781,11 +779,12 @@ class ModeNotifications(ABCNotificationsMode):
                     table.cell(_("Plugin parameters"), ", ".join(parameters))
                     table.cell(_("Bulking"))
                     if bulk:
-                        html.write(_("Time horizon") + ": " + Age().value_to_text(bulk["interval"]))
+                        html.write_text(_("Time horizon") + ": ")
+                        html.write_text(Age().value_to_text(bulk["interval"]))
                         html.write_text(", %s: %d" % (_("Maximum count"), bulk["count"]))
-                        html.write(", %s %s" %
-                                   (_("group by"), self._vs_notification_bulkby().value_to_text(
-                                       bulk["groupby"])))
+                        html.write_text(", %s " % (_("group by")))
+                        html.write_text(self._vs_notification_bulkby().value_to_text(
+                            bulk["groupby"]))
 
     def _vs_notification_scripts(self):
         return DropdownChoice(title=_("Notification Script"),
@@ -799,7 +798,8 @@ class ABCUserNotificationsMode(ABCNotificationsMode):
         self._start_async_repl = False
 
     def _from_vars(self):
-        self._users = userdb.load_users(lock=html.is_transaction() or html.request.has_var("_move"))
+        self._users = userdb.load_users(
+            lock=transactions.is_transaction() or request.has_var("_move"))
 
         try:
             user = self._users[self._user_id()]
@@ -816,19 +816,19 @@ class ABCUserNotificationsMode(ABCNotificationsMode):
         return _("Custom notification table for user %s") % self._user_id()
 
     def action(self) -> ActionResult:
-        if not html.check_transaction():
+        if not transactions.check_transaction():
             return redirect(self.mode_url(user=self._user_id()))
 
-        if html.request.has_var("_delete"):
-            nr = html.request.get_integer_input_mandatory("_delete")
+        if request.has_var("_delete"):
+            nr = request.get_integer_input_mandatory("_delete")
             del self._rules[nr]
             userdb.save_users(self._users)
             self._add_change("notification-delete-user-rule",
                              _("Deleted notification rule %d of user %s") % (nr, self._user_id()))
 
-        elif html.request.has_var("_move"):
-            from_pos = html.request.get_integer_input_mandatory("_move")
-            to_pos = html.request.get_integer_input_mandatory("_index")
+        elif request.has_var("_move"):
+            from_pos = request.get_integer_input_mandatory("_move")
+            to_pos = request.get_integer_input_mandatory("_index")
             rule = self._rules[from_pos]
             del self._rules[from_pos]  # make to_pos now match!
             self._rules[to_pos:to_pos] = [rule]
@@ -894,7 +894,7 @@ class ModeUserNotifications(ABCUserNotificationsMode):
         return self.mode_url(user=self._user_id())
 
     def _user_id(self):
-        return html.request.get_unicode_input("user")
+        return request.get_unicode_input("user")
 
     def page_menu(self, breadcrumb: Breadcrumb) -> PageMenu:
         menu = PageMenu(
@@ -1040,14 +1040,14 @@ class ABCEditNotificationRuleMode(ABCNotificationsMode):
 
     # TODO: Refactor this
     def _from_vars(self):
-        self._edit_nr = html.request.get_integer_input_mandatory("edit", -1)
-        self._clone_nr = html.request.get_integer_input_mandatory("clone", -1)
+        self._edit_nr = request.get_integer_input_mandatory("edit", -1)
+        self._clone_nr = request.get_integer_input_mandatory("clone", -1)
         self._new = self._edit_nr < 0
 
         self._rules = self._load_rules()
 
         if self._new:
-            if self._clone_nr >= 0 and not html.request.var("_clear"):
+            if self._clone_nr >= 0 and not request.var("_clear"):
                 self._rule = {}
                 try:
                     self._rule.update(self._rules[self._clone_nr])
@@ -1126,7 +1126,7 @@ class ABCEditNotificationRuleMode(ABCNotificationsMode):
                 ("contact_match_macros",
                  ListOf(
                      Tuple(elements=[
-                         TextAscii(
+                         TextInput(
                              title=_("Name of the macro"),
                              help=
                              _("As configured in the users settings. Do not add a leading underscore."
@@ -1208,7 +1208,7 @@ class ABCEditNotificationRuleMode(ABCNotificationsMode):
                    "<tt>NOTIFY_SERVICE_FOO</tt>."),
              )),
             ("bulk_subject",
-             TextAscii(
+             TextInput(
                  title=_("Subject for bulk notifications"),
                  help=
                  _("Customize the subject for bulk notifications and overwrite "
@@ -1344,7 +1344,7 @@ class ABCEditNotificationRuleMode(ABCNotificationsMode):
                     help=
                     _("The given parameters are available in scripts as NOTIFY_PARAMETER_1, NOTIFY_PARAMETER_2, etc."
                      ),
-                    valuespec=TextUnicode(size=24),
+                    valuespec=TextInput(size=24),
                     orientation="horizontal",
                 )
 
@@ -1384,7 +1384,7 @@ class ABCEditNotificationRuleMode(ABCNotificationsMode):
                                           button_name="save")
 
     def action(self) -> ActionResult:
-        if not html.check_transaction():
+        if not transactions.check_transaction():
             return self._back_mode()
 
         vs = self._valuespec()
@@ -1437,7 +1437,7 @@ class ModeEditNotificationRule(ABCEditNotificationRuleMode):
         return ModeNotifications
 
     def _load_rules(self) -> List[NotificationRule]:
-        return load_notification_rules(lock=html.is_transaction())
+        return load_notification_rules(lock=transactions.is_transaction())
 
     def _save_rules(self, rules: List[NotificationRule]) -> None:
         save_notification_rules(rules)
@@ -1461,7 +1461,7 @@ class ModeEditNotificationRule(ABCEditNotificationRuleMode):
 
 class ABCEditUserNotificationRuleMode(ABCEditNotificationRuleMode):
     def _load_rules(self) -> List[NotificationRule]:
-        self._users = userdb.load_users(lock=html.is_transaction())
+        self._users = userdb.load_users(lock=transactions.is_transaction())
         if self._user_id() not in self._users:
             raise MKUserError(
                 None, _("The user you are trying to edit "
@@ -1502,7 +1502,7 @@ class ModeEditUserNotificationRule(ABCEditUserNotificationRuleMode):
         return ModeUserNotifications
 
     def _user_id(self):
-        return html.request.get_unicode_input_mandatory("user")
+        return request.get_unicode_input_mandatory("user")
 
     def _back_mode(self) -> ActionResult:
         return redirect(mode_url("user_notifications", user=self._user_id()))

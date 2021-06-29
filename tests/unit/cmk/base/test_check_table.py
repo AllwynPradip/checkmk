@@ -10,9 +10,9 @@ import re
 
 from typing import Dict, List
 
-import pytest  # type: ignore[import]
+import pytest
 # No stub file
-from testlib.base import Scenario  # type: ignore[import]
+from testlib.base import Scenario
 
 from cmk.utils.exceptions import MKGeneralException
 from cmk.utils.type_defs import CheckPluginName

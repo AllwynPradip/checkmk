@@ -134,22 +134,23 @@ def service_levels():
     return config.mkeventd_service_levels
 
 
-def action_choices(omit_hidden=False):
+def action_choices(omit_hidden=False) -> List[Tuple[str, str]]:
     # The possible actions are configured in mkeventd.mk,
     # not in multisite.mk (like the service levels). That
     # way we have not direct access to them but need
     # to load them from the configuration.
-    return [ ( "@NOTIFY", _("Send monitoring notification")) ] + \
-           [ (a["id"], a["title"])
+    return ([("@NOTIFY", _("Send monitoring notification"))] +
+            [(a["id"], a["title"])
              for a in eventd_configuration().get("actions", [])
-             if not omit_hidden or not a.get("hidden") ]
+             if not omit_hidden or not a.get("hidden")])
 
 
 cached_config = None
 
 
-def eventd_configuration():
+def eventd_configuration() -> ec.ConfigFromWATO:
     global cached_config
+    # TODO: Huh??? Why do we use html simply as a tag here???
     if cached_config and cached_config[0] is html:
         return cached_config[1]
 
@@ -164,22 +165,22 @@ def daemon_running() -> bool:
     return _socket_path().exists()
 
 
-# Note: in order to be able to simulate an original IP address
-# we put hostname|ipaddress into the host name field. The EC
-# recognizes this and unpacks the data correctly.
-def send_event(event):
-    # "<%PRI%>@%TIMESTAMP%;%SL% %HOSTNAME% %syslogtag% %msg%\n"
-    prio = (event["facility"] << 3) + event["priority"]
+def send_event(event) -> str:
+    syslog_message_str = repr(
+        ec.SyslogMessage(
+            facility=event["facility"],
+            severity=event["priority"],
+            timestamp=time.time(),
+            host_name=event["host"],
+            application=event["application"],
+            text=event["text"],
+            ip_address=event["ipaddress"],
+            service_level=event["sl"],
+        ))
 
-    rfc = [
-        "<%d>@%d" % (prio, int(time.time())),
-        "%d %s|%s %s: %s\n" %
-        (event["sl"], event["host"], event["ipaddress"], event["application"], event["text"]),
-    ]
+    execute_command("CREATE", [syslog_message_str], site=event["site"])
 
-    execute_command("CREATE", [ensure_str(r) for r in rfc], site=event["site"])
-
-    return ";".join(rfc)
+    return syslog_message_str
 
 
 def get_local_ec_status():

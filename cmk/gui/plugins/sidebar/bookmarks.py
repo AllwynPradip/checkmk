@@ -12,11 +12,12 @@ import cmk.utils.store as store
 import cmk.gui.config as config
 import cmk.gui.pagetypes as pagetypes
 from cmk.gui.i18n import _
-from cmk.gui.globals import html
+from cmk.gui.globals import request
 from cmk.gui.exceptions import MKUserError
+from cmk.gui.htmllib.foldable_container import foldable_container
 
 from cmk.gui.valuespec import (
-    TextUnicode,
+    TextInput,
     ListOf,
     Transform,
     Tuple,
@@ -79,7 +80,7 @@ class BookmarkList(pagetypes.Overridable):
             [
                 # sort-index, key, valuespec
                 (2.5, "default_topic",
-                 TextUnicode(
+                 TextInput(
                      title=_("Default Topic") + "<sup>*</sup>",
                      size=50,
                      allow_empty=False,
@@ -95,12 +96,12 @@ class BookmarkList(pagetypes.Overridable):
                         Transform(
                             Tuple(
                                 elements=[
-                                    (TextUnicode(
+                                    (TextInput(
                                         title=_("Title") + "<sup>*</sup>",
                                         size=30,
                                         allow_empty=False,
                                     )),
-                                    (TextUnicode(
+                                    (TextInput(
                                         title=_("URL"),
                                         size=50,
                                         allow_empty=False,
@@ -134,7 +135,7 @@ class BookmarkList(pagetypes.Overridable):
                     title=_("Individual topic"),
                     choices=choices,
                     default_value=choices[0][0] if choices else "",
-                    explicit=TextUnicode(
+                    explicit=TextInput(
                         size=30,
                         allow_empty=False,
                     ),
@@ -251,23 +252,21 @@ class Bookmarks(SidebarSnapin):
 
     def show(self):
         for topic, bookmarks in self._get_bookmarks_by_topic():
-            html.begin_foldable_container(
-                treename="bookmarks",
-                id_=topic,
-                isopen=False,
-                title=topic,
-                indent=False,
-                icon="foldable_sidebar",
-            )
+            with foldable_container(
+                    treename="bookmarks",
+                    id_=topic,
+                    isopen=False,
+                    title=topic,
+                    indent=False,
+                    icon="foldable_sidebar",
+            ):
 
-            for bookmark in bookmarks:
-                icon = bookmark["icon"]
-                if not icon:
-                    icon = "bookmark_list"
+                for bookmark in bookmarks:
+                    icon = bookmark["icon"]
+                    if not icon:
+                        icon = "bookmark_list"
 
-                iconlink(bookmark["title"], bookmark["url"], icon)
-
-            html.end_foldable_container()
+                    iconlink(bookmark["title"], bookmark["url"], icon)
 
         begin_footnote_links()
         link(_("Add Bookmark"), "javascript:void(0)", onclick="cmk.sidebar.add_bookmark()")
@@ -292,8 +291,8 @@ class Bookmarks(SidebarSnapin):
         return ["admin", "user", "guest"]
 
     def _ajax_add_bookmark(self):
-        title = html.request.var("title")
-        url = html.request.var("url")
+        title = request.var("title")
+        url = request.var("url")
         if title and url:
             BookmarkList.validate_url(url, "url")
             self._add_bookmark(title, url)
@@ -310,7 +309,7 @@ class Bookmarks(SidebarSnapin):
         bookmarks.save_user_instances()
 
     def _try_shorten_url(self, url):
-        referer = html.request.referer
+        referer = request.referer
         if referer:
             ref_p = urllib.parse.urlsplit(referer)
             url_p = urllib.parse.urlsplit(url)

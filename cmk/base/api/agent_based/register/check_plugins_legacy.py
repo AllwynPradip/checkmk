@@ -23,7 +23,7 @@ from cmk.base.api.agent_based.checking_classes import (
 )
 from cmk.base.api.agent_based.register.check_plugins import create_check_plugin
 from cmk.base.api.agent_based.checking_classes import CheckPlugin
-from cmk.base.api.agent_based.type_defs import Parameters
+from cmk.base.api.agent_based.type_defs import Parameters, ParametersTypeAlias
 
 # There are so many check_info keys, make sure we didn't miss one.
 CONSIDERED_KEYS = {
@@ -49,7 +49,7 @@ def _get_default_parameters(
     check_legacy_info: Dict[str, Any],
     factory_settings: Dict[str, Dict[str, Any]],
     check_context: Dict[str, Any],
-) -> Optional[Dict[str, Any]]:
+) -> Optional[ParametersTypeAlias]:
     """compute default parameters"""
     params_variable_name = check_legacy_info.get("default_levels_variable")
     if not params_variable_name:
@@ -127,7 +127,12 @@ def _resolve_string_parameters(
     try:
         context = get_check_context(check_name)
         # string may look like '{"foo": bar}', in the worst case.
-        return eval(params_unresolved, context, context)
+        # This evaluation was needed in the past to resolve references to variables in context and
+        # to evaluate data structure declarations containing references to variables.
+        # Since Checkmk 2.0 we have a better API and need it only for compatibility. The parameters
+        # are resolved now *before* they are written to the autochecks file, and earlier autochecks
+        # files are resolved during cmk-update-config.
+        return eval(params_unresolved, context, context)  # pylint: disable=eval-used
     except Exception:
         raise ValueError("Invalid check parameter string '%s' found in discovered service %r" %
                          (params_unresolved, check_name))
@@ -264,7 +269,7 @@ def _create_wrapped_parameters(
     check_info_dict: Dict[str, Any],
     factory_settings: Dict[str, Dict],
     get_check_context: Callable,
-) -> Dict[str, Any]:
+) -> ParametersTypeAlias:
     """compute default parameters and wrap them in a dictionary"""
     default_parameters = _get_default_parameters(
         check_info_dict,
@@ -287,12 +292,13 @@ def _create_cluster_legacy_mode_from_hell(check_function: Callable) -> Callable:
         #
         # If legacy plugins are executed on clusters, the original check function is called,
         # as it is impossible to recreate the "complex" behavior of the legacy API using the new API.
-        # We maintain an extra code path in cmk/base/checking.py for those cases.
+        # We maintain an extra code path in cmk/base/agent_based/checking.py for those cases.
         #
         # Unfortunately, when discovering cluster hosts, this function will still be called, as
         # part of the code designed for the new API is used.
-        # Since fixing this issue would dramatically worsen the code in cmk/base/checking.py,
-        # We simply issue an Message here, similar to the preview for counter based checks:
+        # Since fixing this issue would dramatically worsen the code in
+        # cmk/base/agent_based/checking.py, we simply issue an Message here, similar to the preview
+        # for counter based checks:
         yield Result(
             state=State.OK,
             summary="Service preview for legacy plugins on clusters not available.",

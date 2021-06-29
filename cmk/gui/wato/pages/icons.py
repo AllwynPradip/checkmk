@@ -16,7 +16,7 @@ import cmk.gui.config as config
 from cmk.gui.table import table_element
 from cmk.gui.exceptions import MKUserError
 from cmk.gui.i18n import _
-from cmk.gui.globals import html
+from cmk.gui.globals import html, transactions, theme, request
 from cmk.gui.valuespec import (
     IconSelector,
     ImageUpload,
@@ -86,7 +86,7 @@ class ModeIcons(WatoMode):
 
     def _validate_icon(self, value, varprefix):
         file_name = value[0]
-        browser_url = html.theme_url("images/icon_%s" % file_name)
+        browser_url = theme.url("images/icon_%s" % file_name)
         if os.path.exists("%s/share/check_mk/web/htdocs/%s" % (cmk.utils.paths.omd_root, browser_url)) \
            or os.path.exists("%s/share/check_mk/web/htdocs/images/icons/%s" % (cmk.utils.paths.omd_root, file_name)):
             raise MKUserError(
@@ -95,16 +95,16 @@ class ModeIcons(WatoMode):
                   'choose another name for your icon.'))
 
     def action(self) -> ActionResult:
-        if not html.check_transaction():
+        if not transactions.check_transaction():
             return redirect(self.mode_url())
 
-        if html.request.has_var("_delete"):
-            icon_name = html.request.var("_delete")
+        if request.has_var("_delete"):
+            icon_name = request.var("_delete")
             if icon_name in self._load_custom_icons():
                 os.remove("%s/local/share/check_mk/web/htdocs/images/icons/%s.png" %
                           (cmk.utils.paths.omd_root, icon_name))
 
-        elif html.request.has_var("_do_upload"):
+        elif request.has_var("_do_upload"):
             vs_upload = self._vs_upload()
             icon_info = vs_upload.from_html_vars('_upload_icon')
             vs_upload.validate_value(icon_info, '_upload_icon')
@@ -157,5 +157,5 @@ class ModeIcons(WatoMode):
                 html.icon_button(delete_url, _("Delete this Icon"), "delete")
 
                 table.cell(_("Icon"), html.render_icon(icon_name), css="buttons")
-                table.text_cell(_("Name"), icon_name)
-                table.text_cell(_("Category"), IconSelector.category_alias(category_name))
+                table.cell(_("Name"), icon_name)
+                table.cell(_("Category"), IconSelector.category_alias(category_name))

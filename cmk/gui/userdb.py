@@ -12,6 +12,7 @@ import os
 import traceback
 import copy
 import ast
+import shutil
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from contextlib import suppress
@@ -32,13 +33,13 @@ import cmk.gui.gui_background_job as gui_background_job
 from cmk.gui.exceptions import MKUserError, MKInternalError, MKAuthException
 from cmk.gui.log import logger
 from cmk.gui.valuespec import (
-    TextAscii,
+    TextInput,
     DropdownChoice,
     ValueSpec,
 )
 import cmk.gui.i18n
 from cmk.gui.i18n import _
-from cmk.gui.globals import g, html, request, local, session
+from cmk.gui.globals import g, html, request, local, session, response
 import cmk.gui.plugins.userdb
 from cmk.gui.plugins.userdb.htpasswd import Htpasswd
 from cmk.gui.plugins.userdb.ldap_connector import MKLDAPException
@@ -156,9 +157,12 @@ def is_customer_user_allowed_to_login(user_id: UserId) -> bool:
     if not cmk_version.is_managed_edition():
         return True
 
-    user = config.LoggedInUser(user_id)
+    try:
+        import cmk.gui.cme.managed as managed  # pylint: disable=no-name-in-module
+    except ImportError:
+        return True
 
-    import cmk.gui.cme.managed as managed  # pylint: disable=no-name-in-module
+    user = config.LoggedInUser(user_id)
     if managed.is_global(user.customer_id):
         return True
 
@@ -296,9 +300,8 @@ class UserSelection(DropdownChoice):
 
         return lambda: get_wato_users(none_value)
 
-    def value_to_text(self, value):
-        text = DropdownChoice.value_to_text(self, value)
-        return text.split(" - ")[-1]
+    def value_to_text(self, value) -> str:
+        return str(super().value_to_text(value)).split(" - ")[-1]
 
 
 def on_succeeded_login(username: UserId) -> str:
@@ -321,6 +324,28 @@ def on_failed_login(username: UserId) -> None:
                 users[username]["locked"] = True
 
         save_users(users)
+
+    if config.log_logon_failures:
+        log_details: List[str] = []
+        if users.get(username):
+            log_msg_until_locked: int = config.lock_on_logon_failures - users[username][
+                "num_failed_logins"]
+            log_msg_locked: str = "No"
+            if users[username].get("locked"):
+                log_msg_locked = "Yes"
+                if log_msg_until_locked == 0:
+                    log_msg_locked += " (now)"
+
+            log_details.extend([
+                "existing: Yes",
+                "locked: %s" % log_msg_locked,
+                "failed logins until locked: %d" % log_msg_until_locked,
+            ])
+        else:
+            log_details.extend(["existing: No", "locked: N/A", "failed logins until locked: N/A"])
+
+        auth_logger.warn("Login failed for username: %s (%s), client: %s", username,
+                         ", ".join(log_details), request.remote_ip)
 
 
 def on_logout(username: UserId, session_id: str) -> None:
@@ -350,8 +375,10 @@ def on_end_of_request(user_id: UserId) -> None:
 
     assert user_id == session.user_id
     session_infos = _load_session_infos(user_id, lock=True)
-    _refresh_session(user_id, session.session_info)
-    session_infos[session.session_info.session_id] = session.session_info
+    if session_infos:
+        _refresh_session(user_id, session.session_info)
+        session_infos[session.session_info.session_id] = session.session_info
+
     _save_session_infos(user_id, session_infos)
 
 
@@ -471,7 +498,7 @@ def _cleanup_old_sessions(session_infos: Dict[str, SessionInfo]) -> Dict[str, Se
 
     return {
         s.session_id: s
-        for s in sorted(session_infos.values(), key=lambda s: s.last_activity)[:20]
+        for s in sorted(session_infos.values(), key=lambda s: s.last_activity, reverse=True)[:20]
         if time.time() - s.last_activity < 86400 * 7
     }
 
@@ -522,6 +549,14 @@ def _convert_session_info(value: str) -> Dict[str, SessionInfo]:
             flashes=[],
         ),
     }
+
+
+def _convert_start_url(value: str) -> str:
+    # TODO in Version 2.0.0 and 2.0.0p1 the value was written without repr(),
+    # remove the if condition one day
+    if value.startswith("'") and value.endswith("'"):
+        return ast.literal_eval(value)
+    return value
 
 
 #.
@@ -610,13 +645,19 @@ def declare_user_attribute(name: str,
             )
 
 
-def load_users(lock: bool = False) -> Users:
-    filename = _root_dir() + "contacts.mk"
+def load_contacts() -> Dict[str, Any]:
+    return store.load_from_mk_file(_contacts_filepath(), "contacts", {})
 
+
+def _contacts_filepath() -> str:
+    return _root_dir() + "contacts.mk"
+
+
+def load_users(lock: bool = False) -> Users:
     if lock:
         # Note: the lock will be released on next save_users() call or at
         #       end of page request automatically.
-        store.aquire_lock(filename)
+        store.aquire_lock(_contacts_filepath())
 
     if 'users' in g:
         return g.users
@@ -624,10 +665,9 @@ def load_users(lock: bool = False) -> Users:
     # First load monitoring contacts from Checkmk's world. If this is
     # the first time, then the file will be empty, which is no problem.
     # Execfile will the simply leave contacts = {} unchanged.
-    contacts = store.load_from_mk_file(filename, "contacts", {})
+    contacts = load_contacts()
 
     # Now load information about users from the GUI config world
-    filename = _multisite_dir() + "users.mk"
     users = store.load_from_mk_file(_multisite_dir() + "users.mk", "multisite_users", {})
 
     # Merge them together. Monitoring users not known to Multisite
@@ -672,8 +712,7 @@ def load_users(lock: bool = False) -> Users:
             return []
 
     # FIXME TODO: Consolidate with htpasswd user connector
-    filename = cmk.utils.paths.htpasswd_file
-    for line in readlines(filename):
+    for line in readlines(cmk.utils.paths.htpasswd_file):
         line = line.strip()
         if ':' in line:
             uid, password = line.strip().split(":")[:2]
@@ -725,7 +764,7 @@ def load_users(lock: bool = False) -> Users:
                     ('enforce_pw_change', lambda x: bool(utils.saveint(x))),
                     ('idle_timeout', _convert_idle_timeout),
                     ('session_info', _convert_session_info),
-                    ('start_url', lambda x: None if x == "None" else x),
+                    ('start_url', _convert_start_url),
                     ('ui_theme', lambda x: x),
                     ('ui_sidebar_position', lambda x: None if x == "None" else x),
                 ]:
@@ -876,7 +915,7 @@ def _save_user_profiles(updated_profiles: Users) -> None:
             remove_custom_attr(user_id, "idle_timeout")
 
         if user.get("start_url") is not None:
-            save_custom_attr(user_id, "start_url", user["start_url"])
+            save_custom_attr(user_id, "start_url", repr(user["start_url"]))
         else:
             remove_custom_attr(user_id, "start_url")
 
@@ -1091,8 +1130,8 @@ def update_config_based_user_attributes() -> None:
     _clear_config_based_user_attributes()
 
     for attr in config.wato_user_attrs:
-        if attr["type"] == "TextAscii":
-            vs = TextAscii(title=attr['title'], help=attr['help'])
+        if attr["type"] == "TextInput":
+            vs = TextInput(title=attr['title'], help=attr['help'])
         else:
             raise NotImplementedError()
 
@@ -1252,12 +1291,12 @@ def ajax_sync() -> None:
             job.start()
         except background_job.BackgroundJobAlreadyRunning as e:
             raise MKUserError(None, _("Another user synchronization is already running: %s") % e)
-        html.write('OK Started synchronization\n')
+        response.set_data('OK Started synchronization\n')
     except Exception as e:
         logger.exception("error synchronizing user DB")
         if config.debug:
             raise
-        html.write('ERROR %s\n' % e)
+        response.set_data('ERROR %s\n' % e)
 
 
 @gui_background_job.job_registry.register
@@ -1312,3 +1351,88 @@ class UserSyncBackgroundJob(gui_background_job.GUIBackgroundJob):
         job_interface.send_progress_update(_("Finalizing synchronization"))
         general_userdb_job()
         return True
+
+
+def execute_user_profile_cleanup_job() -> None:
+    """This function is called by the GUI cron job once a minute.
+
+    Errors are logged to var/log/web.log. """
+    job = UserProfileCleanupBackgroundJob()
+    if job.is_active():
+        logger.debug("Job is already running: Skipping this time")
+        return
+
+    interval = 3600
+    with suppress(FileNotFoundError):
+        if time.time() - UserProfileCleanupBackgroundJob.last_run_path().stat().st_mtime < interval:
+            logger.debug("Job was already executed within last %d seconds", interval)
+            return
+
+    job.set_function(job.do_execute)
+    job.start()
+
+
+@gui_background_job.job_registry.register
+class UserProfileCleanupBackgroundJob(gui_background_job.GUIBackgroundJob):
+    job_prefix = "user_profile_cleanup"
+
+    @staticmethod
+    def last_run_path() -> Path:
+        return Path(cmk.utils.paths.var_dir, "wato", "last_user_profile_cleanup.mk")
+
+    @classmethod
+    def gui_title(cls) -> str:
+        return _("User profile cleanup")
+
+    def __init__(self) -> None:
+        super().__init__(
+            self.job_prefix,
+            title=self.gui_title(),
+            lock_wato=False,
+            stoppable=False,
+        )
+
+    def do_execute(self, job_interface):
+        try:
+            self._do_cleanup()
+            job_interface.send_result_message(_("Job finished"))
+        finally:
+            UserProfileCleanupBackgroundJob.last_run_path().touch(exist_ok=True)
+
+    def _do_cleanup(self):
+        """Cleanup abandoned profile directories
+
+        The cleanup is done like this:
+
+        - Load the userdb to get the list of locally existing users
+        - Iterate over all use profile directories and find all directories that don't belong to an
+          existing user
+        - For each of these directories find the most recent written file
+        - In case the most recent written file is older than 30 days delete the profile directory
+        - Create an audit log entry for each removed directory
+        """
+        users = set(load_users().keys())
+        if not users:
+            self._logger.warning("Found no users. Be careful and not cleaning up anything.")
+            return
+
+        profile_base_dir = Path(config.config_dir)
+        profiles = set(profile_dir.name for profile_dir in profile_base_dir.iterdir())
+
+        abandoned_profiles = sorted(profiles - users)
+        if not abandoned_profiles:
+            self._logger.warning("Found no abandoned profile.")
+            return
+
+        self._logger.info("Found %d abandoned profiles", len(abandoned_profiles))
+        self._logger.debug("Profiles: %s", ", ".join(abandoned_profiles))
+
+        for profile_name in abandoned_profiles:
+            profile_dir = profile_base_dir / profile_name
+            last_mtime = max((p.stat().st_mtime for p in profile_dir.glob("*.mk")), default=0.0)
+            if time.time() - last_mtime > 2592000:
+                try:
+                    self._logger.info("Removing abandoned profile directory: %s", profile_name)
+                    shutil.rmtree(profile_dir)
+                except OSError:
+                    self._logger.debug("Could not delete %s", profile_dir, exc_info=True)

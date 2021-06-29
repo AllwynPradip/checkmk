@@ -4,8 +4,8 @@
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-import pytest  # type: ignore[import]
-from testlib import Check  # type: ignore[import]
+import pytest
+from testlib import Check
 from checktestlib import BasicCheckResult
 
 pytestmark = pytest.mark.checks
@@ -77,7 +77,7 @@ pytestmark = pytest.mark.checks
                   ('ra32e_sensors.voltage', "Sensor 8", {
                       'voltage': (210, 180)
                   },
-                   BasicCheckResult(1, 'Voltage: 200 V (warn/crit below 210/180 V)',
+                   BasicCheckResult(1, 'Voltage: 200.0 V (warn/crit below 210.0 V/180.0 V)',
                                     [('voltage', 200)])),
                   ('ra32e_sensors', "Sensor 1", {
                       'levels_lower': (30.0, 25.0)

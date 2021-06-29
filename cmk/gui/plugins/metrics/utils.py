@@ -13,7 +13,6 @@ from collections import OrderedDict
 from itertools import chain
 from typing import (
     Any,
-    AnyStr,
     Callable,
     Container,
     Dict,
@@ -28,7 +27,7 @@ from typing import (
     Union,
 )
 
-from six import ensure_binary, ensure_str
+from six import ensure_str
 
 import livestatus
 
@@ -49,16 +48,22 @@ from cmk.gui.exceptions import MKGeneralException, MKUserError
 from cmk.gui.globals import g, html
 from cmk.gui.i18n import _
 from cmk.gui.log import logger
-from cmk.gui.type_defs import Choices, RenderableRecipe, Row
+from cmk.gui.utils.html import HTML
+from cmk.gui.type_defs import (
+    Choices,
+    RenderableRecipe,
+    Row,
+    Perfdata,
+    TranslatedMetrics,
+    PerfometerSpec,
+)
 from cmk.gui.valuespec import (
     DropdownChoiceValue,
     DropdownChoiceWithHostAndServiceHints,
-    TextAsciiAutocomplete,
+    autocompleter_registry,
 )
 
 LegacyPerfometer = Tuple[str, Any]
-Perfometer = Dict[str, Any]
-TranslatedMetrics = Dict[str, Dict[str, Any]]
 Atom = TypeVar('Atom')
 TransformedAtom = TypeVar('TransformedAtom')
 StackElement = Union[Atom, TransformedAtom]
@@ -83,7 +88,7 @@ class AutomaticDict(OrderedDict):
 unit_info: Dict[str, Any] = {}
 metric_info: Dict[str, Dict[str, Any]] = {}
 check_metrics: Dict[str, Dict[str, Any]] = {}
-perfometer_info: List[Union[LegacyPerfometer, Perfometer]] = []
+perfometer_info: List[Union[LegacyPerfometer, PerfometerSpec]] = []
 # _AutomaticDict is used here to provide some list methods.
 # This is needed to maintain backwards-compatibility.
 graph_info: 'OrderedDict[str, GraphTemplate]' = AutomaticDict("manual_graph_template")
@@ -191,25 +196,35 @@ def indexed_color(idx, total):
     return rgb_color_to_hex_color(red * offset, green * offset, blue * offset)
 
 
-def parse_perf_values(data_str):
+def parse_perf_values(
+    data_str: str
+) -> Tuple[str, str, Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]]:
     "convert perf str into a tuple with values"
     varname, values = data_str.split("=", 1)
     varname = cmk.utils.pnp_cleanup(varname.replace("\"", "").replace("\'", ""))
 
     value_parts = values.split(";")
-    while len(value_parts) < 5:
-        value_parts.append(None)
+    value = value_parts.pop(0)
 
-    return varname, value_parts[0], value_parts[1:]
+    # Optional warn, crit, min, max fields
+    num_fields = len(value_parts)
+    other_parts = (
+        value_parts[0] if num_fields > 0 else None,
+        value_parts[1] if num_fields > 1 else None,
+        value_parts[2] if num_fields > 2 else None,
+        value_parts[3] if num_fields > 3 else None,
+    )
+
+    return varname, value, other_parts
 
 
-def split_unit(value_text):
+def split_unit(value_text: str) -> Tuple[Optional[float], Optional[str]]:
     "separate value from unit"
 
     if not value_text.strip():
         return None, None
 
-    def digit_unit_split(value_text):
+    def digit_unit_split(value_text: str) -> int:
         for i, char in enumerate(value_text):
             if char not in '0123456789.,-':
                 return i
@@ -224,7 +239,8 @@ def split_unit(value_text):
     return None, unit_name
 
 
-def parse_perf_data(perf_data_string: str, check_command: Optional[str] = None) -> Tuple[List, str]:
+def parse_perf_data(perf_data_string: str,
+                    check_command: Optional[str] = None) -> Tuple[Perfdata, str]:
     """ Convert perf_data_string into perf_data, extract check_command"""
     # Strip away arguments like in "check_http!-H checkmk.com"
     if check_command is None:
@@ -244,18 +260,25 @@ def parse_perf_data(perf_data_string: str, check_command: Optional[str] = None) 
     check_command = check_command.replace(".", "_")  # see function maincheckify
 
     # Parse performance data, at least try
-    perf_data = []
+    perf_data: Perfdata = []
 
     for part in parts:
         try:
             varname, value_text, value_parts = parse_perf_values(part)
 
             value, unit_name = split_unit(value_text)
-            if value is None:
+            if value is None or unit_name is None:
                 continue  # ignore useless empty variable
 
-            perf_data_tuple = (varname, value, unit_name) + tuple(map(_float_or_int, value_parts))
-            perf_data.append(perf_data_tuple)
+            perf_data.append((
+                varname,
+                value,
+                unit_name,
+                _float_or_int(value_parts[0]),
+                _float_or_int(value_parts[1]),
+                _float_or_int(value_parts[2]),
+                _float_or_int(value_parts[3]),
+            ))
         except Exception as exc:
             logger.exception("Failed to parse perfdata '%s'", perf_data_string)
             if config.debug:
@@ -264,7 +287,7 @@ def parse_perf_data(perf_data_string: str, check_command: Optional[str] = None) 
     return perf_data, check_command
 
 
-def _float_or_int(val):
+def _float_or_int(val: Optional[str]) -> Optional[float]:
     """"45.0" -> 45.0, "45" -> 45"""
     if val is None:
         return None
@@ -278,13 +301,9 @@ def _float_or_int(val):
             return None
 
 
-# TODO: Slightly funny typing, fix this when we use Python 3.
-def _split_perf_data(perf_data_string: AnyStr) -> List[AnyStr]:
-    "Split the perf data string into parts. Preserve quoted strings!"
-    parts = shlex.split(ensure_str(perf_data_string))
-    if isinstance(perf_data_string, bytes):
-        return [ensure_binary(s) for s in parts]
-    return [ensure_str(s) for s in parts]
+def _split_perf_data(perf_data_string: str) -> List[str]:
+    """Split the perf data string into parts. Preserve quoted strings!"""
+    return shlex.split(perf_data_string)
 
 
 def perfvar_translation(perfvar_name, check_command):
@@ -352,7 +371,7 @@ def get_metric_info(metric_name, color_index):
     return mi, color_index
 
 
-def translate_metrics(perf_data: List[Tuple], check_command: str) -> TranslatedMetrics:
+def translate_metrics(perf_data: Perfdata, check_command: str) -> TranslatedMetrics:
     """Convert Ascii-based performance data as output from a check plugin
     into floating point numbers, do scaling if necessary.
 
@@ -578,8 +597,8 @@ def _evaluate_literal(
     if isinstance(expression, float):
         return expression, unit_info[""], None
 
-    if expression[0].isdigit() or expression[0] == '-':
-        return float(expression), unit_info[""], None
+    if val := _float_or_int(expression):
+        return val, unit_info[""], None
 
     varname = drop_metric_consolidation_advice(expression)
 
@@ -906,6 +925,14 @@ def rgb_color_to_hex_color(red: int, green: int, blue: int) -> str:
     return "#%02x%02x%02x" % (red, green, blue)
 
 
+def hex_color_to_rgb_color(color: str) -> Tuple[int, int, int]:
+    """Convert '#112233' to (17, 34, 51)"""
+    try:
+        return int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+    except Exception:
+        raise MKGeneralException(_("Invalid color specification '%s'") % color)
+
+
 # These colors are also used in the CSS stylesheets, do not change one without changing the other.
 MONITORING_STATUS_COLORS = {
     "critical/down": rgb_color_to_hex_color(255, 50, 50),
@@ -1004,15 +1031,10 @@ def render_color(color_rgb: Tuple[float, float, float]) -> str:
     )
 
 
-# "#ff0080" -> (1.0, 0.0, 0.5)
 def parse_color(color: str) -> Tuple[float, float, float]:
-    def _hex_to_float(a):
-        return int(color[a:a + 2], 16) / 255.0
-
-    try:
-        return _hex_to_float(1), _hex_to_float(3), _hex_to_float(5)
-    except Exception:
-        raise MKGeneralException(_("Invalid color specification '%s'") % color)
+    """Convert '#ff0080' to (1.5, 0.0, 0.5)"""
+    rgb = hex_color_to_rgb_color(color)
+    return rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0
 
 
 def fade_color(rgb, v):
@@ -1047,10 +1069,13 @@ def _mix_colors(a, b):
     return tuple((ca + cb) / 2.0 for (ca, cb) in zip(a, b))
 
 
-def render_color_icon(color):
-    return html.render_div('',
-                           class_="color",
-                           style="background-color: %s4c; border-color: %s;" % (color, color))
+def render_color_icon(color) -> HTML:
+    return html.render_div(
+        '',
+        class_="color",
+        # NOTE: When we drop support for IE11 we can use #%s4c instead of rgba(...)
+        style="background-color: rgba(%d, %d, %d, 0.3); border-color: %s;" %
+        (*hex_color_to_rgb_color(color), color))
 
 
 @MemoizeCache
@@ -1113,25 +1138,25 @@ def metric_choices(check_command: str, perfvars: Tuple[str, ...]) -> Iterator[Tu
         yield name, mi.get("title", name.title())
 
 
+@autocompleter_registry.register
 class MetricName(DropdownChoiceWithHostAndServiceHints):
     """Factory of a Dropdown menu from all known metric names"""
+    ident = "monitored_metrics"
+
     def __init__(self, **kwargs: Any):
         # Customer's metrics from local checks or other custom plugins will now appear as metric
         # options extending the registered metric names on the system. Thus assuming the user
         # only selects from available options we skip the input validation(invalid_choice=None)
         # Since it is not possible anymore on the backend to collect the host & service hints
         kwargs_with_defaults: Mapping[str, Any] = {
-            "css_spec": "metric-selector",
+            "css_spec": ["ajax-vals", "metric-selector", self.ident],
             "hint_label": _("metric"),
             "choices": [(None, _("Select metric"))],
             "title": _("Metric"),
-            "encode_value": False,
-            "sorted": True,
-            "no_preselect": True,
             **kwargs,
         }
         super().__init__(**kwargs_with_defaults)
-        self._regex = re.compile('^[a-zA-Z][a-zA-Z0-9_]*$')
+        self._regex: re.Pattern = re.compile('^[a-zA-Z][a-zA-Z0-9_]*$')
         self._regex_error = _("Metric names must only consist of letters, digits and "
                               "underscores and they must start with a letter.")
 
@@ -1149,10 +1174,6 @@ class MetricName(DropdownChoiceWithHostAndServiceHints):
                   if metric_id == value), (value, value.title()))
         ]
 
-
-class MonitoredMetrics(TextAsciiAutocomplete):
-    ident = "monitored_metrics"
-
     # This class in to use them Text autocompletion ajax handler. Valuespec is not used on html
     @classmethod
     def autocomplete_choices(cls, value: str, params: Dict) -> Choices:
@@ -1160,7 +1181,7 @@ class MonitoredMetrics(TextAsciiAutocomplete):
         Called by the webservice with the current input field value and the completions_params to get the list of choices"""
         def metrics():
             options = set(find_host_services(params.get("host", ""), params.get("service", "")))
-            for _, check_command, metrics in options:
+            for _unused, check_command, metrics in options:
                 yield from metric_choices(check_command, metrics)
 
         if not params.get("host") and not params.get("service"):

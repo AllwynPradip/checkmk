@@ -10,7 +10,7 @@ from cmk.gui.valuespec import (
     Dictionary,
     MonitoringState,
     Percentage,
-    TextAscii,
+    TextInput,
     Transform,
     Tuple,
 )
@@ -25,8 +25,8 @@ from cmk.gui.plugins.wato import (
 def transform_printer_supply(params):
     if isinstance(params, tuple):
         if len(params) == 2:
-            return {"levels": params}
-        return {"levels": params[:2], "upturn_toner": params[2]}
+            return {"levels": params, "upturn_toner": False, "some_remaining": 1}
+        return {"levels": params[:2], "upturn_toner": params[2], "some_remaining": 1}
     return params
 
 
@@ -80,7 +80,7 @@ rulespec_registry.register(
     CheckParameterRulespecWithItem(
         check_group_name="printer_supply",
         group=RulespecGroupCheckParametersPrinters,
-        item_spec=lambda: TextAscii(title=_("cartridge specification"), allow_empty=True),
+        item_spec=lambda: TextInput(title=_("cartridge specification"), allow_empty=True),
         parameter_valuespec=_parameter_valuespec_printer_supply,
         title=lambda: _("Printer cartridge levels"),
     ))

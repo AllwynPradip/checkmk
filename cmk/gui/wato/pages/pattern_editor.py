@@ -5,7 +5,7 @@
 # conditions defined in the file COPYING, which is part of this source code package.
 """Mode for trying out the logwatch patterns"""
 
-from typing import Optional, Type, Iterable
+from typing import Optional, Type, Iterable, List
 import re
 from six import ensure_str
 
@@ -14,7 +14,7 @@ from cmk.utils.type_defs import CheckPluginNameStr, HostName, ServiceName, Item
 import cmk.gui.watolib as watolib
 from cmk.gui.table import table_element
 import cmk.gui.forms as forms
-from cmk.gui.htmllib import HTML
+from cmk.gui.htmllib import HTML, foldable_container
 from cmk.gui.i18n import _
 from cmk.gui.globals import html, request
 from cmk.gui.exceptions import MKUserError
@@ -39,6 +39,7 @@ from cmk.gui.watolib.search import (
     match_item_generator_registry,
 )
 from cmk.gui.utils.urls import makeuri_contextless
+from cmk.gui.utils.escaping import escape_html_permissive
 
 # Tolerate this for 1.6. Should be cleaned up in future versions,
 # e.g. by trying to move the common code to a common place
@@ -65,10 +66,10 @@ class ModePatternEditor(WatoMode):
         # logwatch_rules ruleset in the breadcrumb. We hand over the ruleset variable name that we
         # are interested in to the mode. It's a bit hacky to do it this way, but it's currently the
         # only way to get these information to the modes breadcrumb method.
-        with html.stashed_vars():
-            html.request.set_var("varname", "logwatch_rules")
-            html.request.del_var("host")
-            html.request.del_var("service")
+        with request.stashed_vars():
+            request.set_var("varname", "logwatch_rules")
+            request.del_var("host")
+            request.del_var("service")
             return super().breadcrumb()
 
     def _from_vars(self):
@@ -76,8 +77,8 @@ class ModePatternEditor(WatoMode):
         self._vs_host().validate_value(self._hostname, "host")
 
         # TODO: validate all fields
-        self._item = html.request.get_unicode_input_mandatory('file', u'')
-        self._match_txt = html.request.get_unicode_input_mandatory('match', u'')
+        self._item = request.get_unicode_input_mandatory('file', u'')
+        self._match_txt = request.get_unicode_input_mandatory('match', u'')
 
         self._host = watolib.Folder.current().host(self._hostname)
 
@@ -166,7 +167,7 @@ class ModePatternEditor(WatoMode):
         html.text_input('match', cssclass='match', size=100)
         forms.end()
         html.button('_try', _('Try out'))
-        html.request.del_var('folder')  # Never hand over the folder here
+        request.del_var('folder')  # Never hand over the folder here
         html.hidden_fields()
         html.end_form()
 
@@ -205,12 +206,13 @@ class ModePatternEditor(WatoMode):
                 # If no host/file given match all rules
                 rule_matches = True
 
-            html.begin_foldable_container("rule",
-                                          "%s" % abs_rulenr,
-                                          True,
-                                          HTML("<b>Rule #%d</b>" % (abs_rulenr + 1)),
-                                          indent=False)
-            with table_element("pattern_editor_rule_%d" % abs_rulenr, sortable=False) as table:
+            with foldable_container(treename="rule",
+                                    id_=str(abs_rulenr),
+                                    isopen=True,
+                                    title=HTML("<b>Rule #%d</b>" % (abs_rulenr + 1)),
+                                    indent=False), table_element("pattern_editor_rule_%d" %
+                                                                 abs_rulenr,
+                                                                 sortable=False) as table:
                 abs_rulenr += 1
 
                 # TODO: What's this?
@@ -233,9 +235,9 @@ class ModePatternEditor(WatoMode):
                             # Prepare highlighted search txt
                             match_start = matched.start()
                             match_end = matched.end()
-                            disp_match_txt = html.render_text(self._match_txt[:match_start]) \
+                            disp_match_txt = escape_html_permissive(self._match_txt[:match_start]) \
                                              + html.render_span(self._match_txt[match_start:match_end], class_="match")\
-                                             + html.render_text(self._match_txt[match_end:])
+                                             + escape_html_permissive(self._match_txt[match_end:])
 
                             if not already_matched:
                                 # First match
@@ -264,12 +266,12 @@ class ModePatternEditor(WatoMode):
                     table.cell(_('Match'))
                     html.icon("rule%s" % match_img, match_title)
 
-                    cls = ''
+                    cls: List[str] = []
                     if match_class == 'match first':
-                        cls = 'state%d' % logwatch.level_state(state)
+                        cls = ['state%d' % logwatch.level_state(state), 'fillbackground']
                     table.cell(_('State'), html.render_span(logwatch.level_name(state)), css=cls)
                     table.cell(_('Pattern'), html.render_tt(pattern))
-                    table.cell(_('Comment'), html.render_text(comment))
+                    table.cell(_('Comment'), comment)
                     table.cell(_('Matched line'), disp_match_txt)
 
                 table.row(fixed=True)
@@ -283,8 +285,6 @@ class ModePatternEditor(WatoMode):
                     ("rule_id", rule.id),
                 ])
                 html.icon_button(edit_url, _("Edit this rule"), "edit")
-
-            html.end_foldable_container()
 
     def _get_service_description(self, hostname: HostName, check_plugin_name: CheckPluginNameStr,
                                  item: Item) -> ServiceName:

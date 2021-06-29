@@ -4,7 +4,7 @@
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-import pytest  # type: ignore[import]
+import pytest
 
 import cmk.gui.hooks as hooks
 
@@ -12,6 +12,20 @@ import cmk.gui.hooks as hooks
 @pytest.fixture(autouse=True)
 def reset_hooks():
     hooks.hooks.clear()
+
+
+def test_scoped_memoize():
+    @hooks.scoped_memoize(clear_events=['request-start'])
+    def blah(a=[]):  # pylint: disable=dangerous-default-value
+        a.append(1)
+        return a
+
+    assert blah() == [1]
+    assert blah() == [1]
+
+    hooks.call('request-start')
+
+    assert blah() == [1, 1]
 
 
 def test_hook_registration():

@@ -17,10 +17,10 @@ import cmk.gui.watolib as watolib
 import cmk.gui.gui_background_job as gui_background_job
 import cmk.gui.background_job as background_job
 
-from cmk.gui.globals import html, request as global_request
+from cmk.gui.globals import html, request, transactions, response
 from cmk.gui.i18n import _
 from cmk.gui.pages import page_registry, Page
-from cmk.gui.escaping import escape_attribute
+from cmk.gui.utils.escaping import escape_attribute
 from cmk.gui.exceptions import MKGeneralException, HTTPRedirect, MKUserError
 from cmk.gui.plugins.views.utils import make_host_breadcrumb
 from cmk.gui.breadcrumb import Breadcrumb, BreadcrumbItem
@@ -82,15 +82,15 @@ class AgentOutputPage(Page, metaclass=abc.ABCMeta):
     def _from_vars(self) -> None:
         config.user.need_permission("wato.download_agent_output")
 
-        host_name = html.request.var("host")
+        host_name = request.var("host")
         if not host_name:
             raise MKGeneralException(_("The host is missing."))
 
-        ty = html.request.var("type")
+        ty = request.var("type")
         if ty not in ["walk", "agent"]:
             raise MKGeneralException(_("Invalid type specified."))
 
-        self._back_url = html.get_url_input("back_url", deflt="") or None
+        self._back_url = request.get_url_input("back_url", deflt="") or None
 
         watolib.init_wato_datastructures(with_wato_lock=True)
 
@@ -104,8 +104,9 @@ class AgentOutputPage(Page, metaclass=abc.ABCMeta):
         self._request = FetchAgentOutputRequest(host=host, agent_type=ty)
 
     @staticmethod
-    def file_name(request: FetchAgentOutputRequest) -> str:
-        return "%s-%s-%s.txt" % (request.host.site_id(), request.host.name(), request.agent_type)
+    def file_name(api_request: FetchAgentOutputRequest) -> str:
+        return "%s-%s-%s.txt" % (api_request.host.site_id(), api_request.host.name(),
+                                 api_request.agent_type)
 
 
 @page_registry.register_page("fetch_agent_output")
@@ -116,7 +117,7 @@ class PageFetchAgentOutput(AgentOutputPage):
 
         self._action()
 
-        if html.request.has_var("_start"):
+        if request.has_var("_start"):
             self._start_fetch()
         self._show_status()
 
@@ -135,7 +136,7 @@ class PageFetchAgentOutput(AgentOutputPage):
         return breadcrumb
 
     def _action(self) -> None:
-        if not html.transaction_valid():
+        if not transactions.transaction_valid():
             return
 
         action_handler = gui_background_job.ActionHandler(self._breadcrumb(self._title()))
@@ -143,7 +144,7 @@ class PageFetchAgentOutput(AgentOutputPage):
         if action_handler.handle_actions() and action_handler.did_delete_job():
             raise HTTPRedirect(
                 makeuri_contextless(
-                    global_request,
+                    request,
                     [
                         ("host", self._request.host.name()),
                         ("type", self._request.agent_type),
@@ -156,7 +157,7 @@ class PageFetchAgentOutput(AgentOutputPage):
 
         html.h3(_("Job status"))
         if job_status["is_active"]:
-            html.immediate_browser_redirect(0.8, makeuri(global_request, []))
+            html.immediate_browser_redirect(0.8, makeuri(request, []))
 
         job = FetchAgentOutputBackgroundJob(self._request)
         gui_background_job.JobRenderer.show_job_details(job.get_job_id(), job_status)
@@ -186,7 +187,7 @@ class ABCAutomationFetchAgentOutput(AutomationCommand, metaclass=abc.ABCMeta):
     def get_request(self) -> FetchAgentOutputRequest:
         config.user.need_permission("wato.download_agent_output")
 
-        ascii_input = html.request.get_ascii_input("request")
+        ascii_input = request.get_ascii_input("request")
         if ascii_input is None:
             raise MKUserError("request", _("The parameter \"%s\" is missing.") % "request")
         return FetchAgentOutputRequest.deserialize(ast.literal_eval(ascii_input))
@@ -198,12 +199,12 @@ class AutomationFetchAgentOutputStart(ABCAutomationFetchAgentOutput):
     def command_name(self) -> str:
         return "fetch-agent-output-start"
 
-    def execute(self, request: FetchAgentOutputRequest) -> None:
-        start_fetch_agent_job(request)
+    def execute(self, api_request: FetchAgentOutputRequest) -> None:
+        start_fetch_agent_job(api_request)
 
 
-def start_fetch_agent_job(request):
-    job = FetchAgentOutputBackgroundJob(request)
+def start_fetch_agent_job(api_request):
+    job = FetchAgentOutputBackgroundJob(api_request)
     try:
         job.start()
     except background_job.BackgroundJobAlreadyRunning:
@@ -216,12 +217,12 @@ class AutomationFetchAgentOutputGetStatus(ABCAutomationFetchAgentOutput):
     def command_name(self):
         return "fetch-agent-output-get-status"
 
-    def execute(self, request: FetchAgentOutputRequest) -> Dict:
-        return get_fetch_agent_job_status(request)
+    def execute(self, api_request: FetchAgentOutputRequest) -> Dict:
+        return get_fetch_agent_job_status(api_request)
 
 
-def get_fetch_agent_job_status(request: FetchAgentOutputRequest) -> Dict:
-    job = FetchAgentOutputBackgroundJob(request)
+def get_fetch_agent_job_status(api_request: FetchAgentOutputRequest) -> Dict:
+    job = FetchAgentOutputBackgroundJob(api_request)
     return job.get_status_snapshot().get_status_as_dict()[job.get_job_id()]
 
 
@@ -234,8 +235,8 @@ class FetchAgentOutputBackgroundJob(watolib.WatoBackgroundJob):
     def gui_title(cls) -> str:
         return _("Fetch agent output")
 
-    def __init__(self, request: FetchAgentOutputRequest) -> None:
-        self._request = request
+    def __init__(self, api_request: FetchAgentOutputRequest) -> None:
+        self._request = api_request
 
         host = self._request.host
         job_id = "%s%s-%s-%s" % (self.job_prefix, host.site_id(), host.name(),
@@ -261,7 +262,7 @@ class FetchAgentOutputBackgroundJob(watolib.WatoBackgroundJob):
         store.save_file(preview_filepath, agent_data)
 
         download_url = makeuri_contextless(
-            global_request,
+            request,
             [("host", self._request.host.name()), ("type", self._request.agent_type)],
             filename="download_agent_output.py",
         )
@@ -277,9 +278,9 @@ class PageDownloadAgentOutput(AgentOutputPage):
         file_name = self.file_name(self._request)
         file_content = self._get_agent_output_file()
 
-        html.set_output_format("text")
-        html.response.headers["Content-Disposition"] = "Attachment; filename=%s" % file_name
-        html.write_binary(file_content)
+        response.set_content_type("text/plain")
+        response.headers["Content-Disposition"] = "Attachment; filename=%s" % file_name
+        response.set_data(file_content)
 
     def _get_agent_output_file(self) -> bytes:
         if config.site_is_local(self._request.host.site_id()):
@@ -296,13 +297,13 @@ class AutomationFetchAgentOutputGetFile(ABCAutomationFetchAgentOutput):
     def command_name(self) -> str:
         return "fetch-agent-output-get-file"
 
-    def execute(self, request: FetchAgentOutputRequest) -> bytes:
-        return get_fetch_agent_output_file(request)
+    def execute(self, api_request: FetchAgentOutputRequest) -> bytes:
+        return get_fetch_agent_output_file(api_request)
 
 
-def get_fetch_agent_output_file(request: FetchAgentOutputRequest) -> bytes:
-    job = FetchAgentOutputBackgroundJob(request)
-    filepath = Path(job.get_work_dir(), AgentOutputPage.file_name(request))
+def get_fetch_agent_output_file(api_request: FetchAgentOutputRequest) -> bytes:
+    job = FetchAgentOutputBackgroundJob(api_request)
+    filepath = Path(job.get_work_dir(), AgentOutputPage.file_name(api_request))
     # The agent output need to be treated as binary data since each agent section can have an
     # individual encoding
     with filepath.open("rb") as f:

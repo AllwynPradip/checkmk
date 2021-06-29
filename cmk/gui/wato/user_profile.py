@@ -25,10 +25,10 @@ from cmk.gui.type_defs import MegaMenu, TopicMenuItem, TopicMenuTopic
 from cmk.gui.config import SiteId, SiteConfiguration
 from cmk.gui.plugins.userdb.htpasswd import hash_password
 from cmk.gui.plugins.userdb.utils import get_user_attributes_by_topic
-from cmk.gui.exceptions import (HTTPRedirect, MKUserError, MKGeneralException, MKAuthException,
-                                FinalizeRequest)
+from cmk.gui.plugins.wato.utils.base_modes import redirect
+from cmk.gui.exceptions import (MKUserError, MKGeneralException, MKAuthException, FinalizeRequest)
 from cmk.gui.i18n import _, _l, _u
-from cmk.gui.globals import html, request
+from cmk.gui.globals import html, request, response, transactions, user_errors, theme
 from cmk.gui.pages import page_registry, AjaxPage, AjaxPageResult, Page
 from cmk.gui.page_menu import (
     PageMenu,
@@ -39,8 +39,9 @@ from cmk.gui.page_menu import (
     make_simple_form_page_menu,
 )
 
-from cmk.gui.utils.urls import makeuri_contextless
+from cmk.gui.utils.urls import makeuri_contextless, requested_file_name
 from cmk.gui.utils.flashed_messages import flash, get_flashed_messages
+from cmk.gui.utils.language_cookie import set_language_cookie
 from cmk.gui.watolib.changes import add_change
 from cmk.gui.watolib.activate_changes import ACTIVATION_TIME_PROFILE_SYNC
 from cmk.gui.wato.pages.users import select_language
@@ -50,7 +51,7 @@ from cmk.gui.watolib.user_profile import push_user_profiles_to_site_transitional
 
 
 def _get_current_theme_titel() -> str:
-    return [titel for theme_id, titel in config.theme_choices() if theme_id == html.get_theme()][0]
+    return [titel for theme_id, titel in config.theme_choices() if theme_id == theme.get()][0]
 
 
 def _get_sidebar_position() -> str:
@@ -157,7 +158,7 @@ class ModeAjaxCycleThemes(AjaxPage):
     """AJAX handler for quick access option 'Interface theme" in user menu"""
     def page(self) -> AjaxPageResult:
         themes = [theme for theme, _title in cmk.gui.config.theme_choices()]
-        current_theme = html.get_theme()
+        current_theme = theme.get()
         try:
             theme_index = themes.index(current_theme)
         except ValueError:
@@ -187,7 +188,7 @@ class ModeAjaxSetStartURL(AjaxPage):
     """AJAX handler to set the start URL of a user to a dashboard"""
     def page(self) -> AjaxPageResult:
         try:
-            name = html.request.get_str_input_mandatory("name")
+            name = request.get_str_input_mandatory("name")
             url = makeuri_contextless(request, [("name", name)], "dashboard.py")
             cmk.gui.utils.validate_start_url(url, "")
             _set_user_attribute("start_url", repr(url))
@@ -299,7 +300,7 @@ class ABCUserProfilePage(Page):
                                           breadcrumb,
                                           form_name="profile",
                                           button_name="_save")
-        menu.dropdowns.insert(1, page_menu_dropdown_user_related(html.myfile))
+        menu.dropdowns.insert(1, page_menu_dropdown_user_related(requested_file_name(request)))
         return menu
 
     def page(self) -> None:
@@ -309,17 +310,16 @@ class ABCUserProfilePage(Page):
         breadcrumb = make_simple_page_breadcrumb(mega_menu_registry.menu_user(), title)
         html.header(title, breadcrumb, self._page_menu(breadcrumb))
 
-        if html.request.has_var('_save') and html.check_transaction():
+        if request.has_var('_save') and transactions.check_transaction():
             try:
                 self._action()
             except MKUserError as e:
-                html.add_user_error(e.varname, e)
+                user_errors.add(e)
 
         for message in get_flashed_messages():
             html.show_message(message)
 
-        if html.has_user_errors():
-            html.show_user_errors()
+        html.show_user_errors()
 
         self._show_form()
 
@@ -344,7 +344,7 @@ class UserProfileReplicate(Page):
                                           breadcrumb,
                                           form_name="profile",
                                           button_name="_save")
-        menu.dropdowns.insert(1, page_menu_dropdown_user_related(html.myfile))
+        menu.dropdowns.insert(1, page_menu_dropdown_user_related(requested_file_name(request)))
         return menu
 
     def page(self) -> None:
@@ -359,7 +359,8 @@ class UserProfileReplicate(Page):
 
         # Now, if in distributed environment where users can login to remote sites, set the trigger for
         # pushing the new user profile to the remote sites asynchronously
-        user_profile_async_replication_page(back_url=html.get_url_input("back", "user_profile.py"))
+        user_profile_async_replication_page(
+            back_url=request.get_url_input("back", "user_profile.py"))
 
 
 @page_registry.register_page("user_change_pw")
@@ -376,9 +377,9 @@ class UserChangePasswordPage(ABCUserProfilePage):
         users = userdb.load_users(lock=True)
         user = users[config.user.id]
 
-        cur_password = html.request.get_str_input_mandatory('cur_password')
-        password = html.request.get_str_input_mandatory('password')
-        password2 = html.request.get_str_input_mandatory('password2', '')
+        cur_password = request.get_str_input_mandatory('cur_password')
+        password = request.get_str_input_mandatory('password')
+        password2 = request.get_str_input_mandatory('password2', '')
 
         # Force change pw mode
         if not cur_password:
@@ -414,25 +415,27 @@ class UserChangePasswordPage(ABCUserProfilePage):
 
         userdb.save_users(users)
 
+        flash(_("Successfully changed password."))
+
         # Set the new cookie to prevent logout for the current user
         login.update_auth_cookie(config.user.id)
 
         # In distributed setups with remote sites where the user can login, start the
         # user profile replication now which will redirect the user to the destination
         # page after completion. Otherwise directly open up the destination page.
-        origtarget = html.request.get_str_input_mandatory('_origtarget', 'user_change_pw.py')
+        origtarget = request.get_str_input_mandatory('_origtarget', 'user_change_pw.py')
         if config.user.authorized_login_sites():
-            raise HTTPRedirect(
+            raise redirect(
                 makeuri_contextless(request, [("back", origtarget)],
                                     filename="user_profile_replicate.py"))
-        raise HTTPRedirect(origtarget)
+        raise redirect(origtarget)
 
     def _show_form(self) -> None:
         assert config.user.id is not None
 
         users = userdb.load_users()
 
-        change_reason = html.request.get_ascii_input('reason')
+        change_reason = request.get_ascii_input('reason')
 
         if change_reason == 'expired':
             html.p(_('Your password is too old, you need to choose a new password.'))
@@ -487,12 +490,12 @@ class UserProfile(ABCUserProfilePage):
         users = userdb.load_users(lock=True)
         user = users[config.user.id]
 
-        language = html.request.get_ascii_input_mandatory('language', "")
+        language = request.get_ascii_input_mandatory('language', "")
         # Set the users language if requested to set it explicitly
         if language != "_default_":
             user['language'] = language
             config.user.language = language
-            html.set_language_cookie(language)
+            set_language_cookie(request, response, language)
 
         else:
             if 'language' in user:
@@ -593,7 +596,7 @@ def _show_custom_user_attr(user, custom_attr):
                 vs.render_input("ua_" + name, value)
                 html.help(_u(vs.help()))
             else:
-                html.write(vs.value_to_text(value))
+                html.write_text(vs.value_to_text(value))
 
 
 @page_registry.register_page("wato_ajax_profile_repl")

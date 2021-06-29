@@ -6,7 +6,7 @@
 
 # pylint: disable=redefined-outer-name
 
-import pytest  # type: ignore[import]
+import pytest
 
 from agent_aws_fake_clients import (
     FakeCloudwatchClient,
@@ -42,7 +42,7 @@ class FakeEC2Client:
             'NextToken': 'string',
         }
 
-    def describe_snapshots(self):
+    def describe_snapshots(self, OwnerIds=None):
         return {
             'Snapshots': EC2DescribeSnapshotsIB.create_instances(amount=3),
             'NextToken': 'string',

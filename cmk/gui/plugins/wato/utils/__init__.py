@@ -12,7 +12,9 @@ import abc
 import json
 import re
 import subprocess
-from typing import Callable, List, Mapping, Type, Optional as _Optional, Tuple as _Tuple
+from contextlib import nullcontext
+from typing import (Callable, List, Mapping, Type, Optional as _Optional, Tuple as _Tuple, Dict,
+                    ContextManager)
 
 from six import ensure_str
 
@@ -28,8 +30,8 @@ import cmk.gui.hooks as hooks
 import cmk.gui.weblib as weblib
 from cmk.gui.pages import page_registry
 from cmk.gui.i18n import _u, _
-from cmk.gui.globals import html, g
-from cmk.gui.utils.html import HTML
+from cmk.gui.globals import html, g, transactions, request
+from cmk.gui.htmllib import foldable_container
 from cmk.gui.type_defs import Choices
 from cmk.gui.exceptions import MKUserError, MKGeneralException
 from cmk.gui.utils.urls import make_confirm_link  # noqa: F401 # pylint: disable=unused-import
@@ -38,9 +40,9 @@ from cmk.gui.valuespec import (  # noqa: F401 # pylint: disable=unused-import
     ABCPageListOfMultipleGetChoice, Alternative, CascadingDropdown, Checkbox, Dictionary,
     DocumentationURL, DropdownChoice, DualListChoice, ElementSelection, FixedValue, Float, Integer,
     Labels, ListChoice, ListOf, ListOfMultiple, ListOfStrings, MonitoredHostname,
-    OptionalDropdownChoice, Password, Percentage, RegExp, RegExpUnicode, RuleComment, TextAscii,
-    TextAsciiAutocomplete, TextUnicode, Transform, Tuple, Url, ValueSpec, ValueSpecHelp,
-    rule_option_elements, SingleLabel,
+    OptionalDropdownChoice, Password, Percentage, RegExp, RuleComment, TextInput,
+    AjaxDropdownChoice, Transform, Tuple, Url, ValueSpec, ValueSpecHelp, rule_option_elements,
+    SingleLabel, autocompleter_registry,
 )
 from cmk.gui.plugins.wato.utils.base_modes import (  # noqa: F401 # pylint: disable=unused-import
     ActionResult, WatoMode, mode_registry, mode_url, redirect,
@@ -123,7 +125,7 @@ def PluginCommandLine():
             raise MKUserError(
                 varprefix, _("You are not allowed to use passwords from the password store here."))
 
-    return TextAscii(
+    return TextInput(
         title=_("Command line"),
         help=
         _("Please enter the complete shell command including path name and arguments to execute. "
@@ -263,7 +265,7 @@ def _snmpv3_no_auth_no_priv_credentials_element() -> ValueSpec:
                     title=_("Security Level"),
                     totext=_("No authentication, no privacy"),
                 ),
-                TextAscii(title=_("Security name"), attrencode=True, allow_empty=False),
+                TextInput(title=_("Security name"), allow_empty=False),
             ],
         ),
         forth=lambda x: x if (x and len(x) == 2) else ("noAuthNoPriv", ""),
@@ -334,10 +336,7 @@ def _snmpv3_auth_protocol_elements():
             ],
             title=_("Authentication protocol"),
         ),
-        TextAscii(
-            title=_("Security name"),
-            attrencode=True,
-        ),
+        TextInput(title=_("Security name"),),
         Password(
             title=_("Authentication password"),
             minlen=8,
@@ -349,7 +348,7 @@ def IPMIParameters() -> Dictionary:
     return Dictionary(
         title=_("IPMI credentials"),
         elements=[
-            ("username", TextAscii(
+            ("username", TextInput(
                 title=_("Username"),
                 allow_empty=False,
             )),
@@ -415,7 +414,7 @@ def _translation_elements(what):
                  Tuple(
                      orientation="horizontal",
                      elements=[
-                         RegExpUnicode(
+                         RegExp(
                              title=_("Regular expression"),
                              help=_("Must contain at least one subgroup <tt>(...)</tt>"),
                              mingroups=0,
@@ -425,7 +424,7 @@ def _translation_elements(what):
                              mode=RegExp.prefix,
                              case_sensitive=False,
                          ),
-                         TextUnicode(
+                         TextInput(
                              title=_("Replacement"),
                              help=_(
                                  "Use <tt>\\1</tt>, <tt>\\2</tt> etc. to replace matched subgroups"
@@ -453,17 +452,15 @@ def _translation_elements(what):
              Tuple(
                  orientation="horizontal",
                  elements=[
-                     TextUnicode(
+                     TextInput(
                          title=_("Original %s") % singular,
                          size=30,
                          allow_empty=False,
-                         attrencode=True,
                      ),
-                     TextUnicode(
+                     TextInput(
                          title=_("Translated %s") % singular,
                          size=30,
                          allow_empty=False,
-                         attrencode=True,
                      ),
                  ],
              ),
@@ -1097,28 +1094,27 @@ class _CheckTypeMgmtSelection(DualListChoice):
                 for (cn, c) in checks.items()]
 
 
-class ConfigHostname(TextAsciiAutocomplete):
+@autocompleter_registry.register
+class ConfigHostname(AjaxDropdownChoice):
     """Hostname input with dropdown completion
 
     Renders an input field for entering a host name while providing an auto completion dropdown field.
     Fetching the choices from the current WATO config"""
     ident = "config_hostname"
 
-    def __init__(self, **kwargs):
-        super(ConfigHostname, self).__init__(completion_ident=self.ident,
-                                             completion_params={},
-                                             **kwargs)
-
     @classmethod
-    def autocomplete_choices(cls, value, params):
+    def autocomplete_choices(cls, value: str, params: Dict) -> Choices:
         """Return the matching list of dropdown choices
         Called by the webservice with the current input field value and the completions_params to get the list of choices"""
-        all_hosts = watolib.Host.all()
+        all_hosts: Dict[str, watolib.CREHost] = watolib.Host.all()
         match_pattern = re.compile(value, re.IGNORECASE)
-        match_list = []
+        match_list: Choices = []
         for host_name, host_object in all_hosts.items():
             if match_pattern.search(host_name) is not None and host_object.may("read"):
-                match_list.append(tuple((host_name, host_name)))
+                match_list.append((host_name, host_name))
+
+        if not any(x[0] == value for x in match_list):
+            match_list.insert(0, (value, value))  # User is allowed to enter anything they want
 
         return match_list
 
@@ -1248,9 +1244,9 @@ class ABCEventsMode(WatoMode, metaclass=abc.ABCMeta):
                          _("The service group alias must match one of the following regular expressions."
                            " For host events this condition never matches as soon as at least one group is selected."
                           ),
-                         valuespec=RegExpUnicode(
+                         valuespec=RegExp(
                              size=32,
-                             mode=RegExpUnicode.infix,
+                             mode=RegExp.infix,
                          ),
                          orientation="horizontal",
                      )
@@ -1266,9 +1262,9 @@ class ABCEventsMode(WatoMode, metaclass=abc.ABCMeta):
                          help=_(
                              "The service group alias must not match one of the following regular expressions. "
                              "For host events this condition is simply ignored."),
-                         valuespec=RegExpUnicode(
+                         valuespec=RegExp(
                              size=32,
-                             mode=RegExpUnicode.infix,
+                             mode=RegExp.infix,
                          ),
                          orientation="horizontal",
                      )
@@ -1280,9 +1276,9 @@ class ABCEventsMode(WatoMode, metaclass=abc.ABCMeta):
                  _("Specify a list of regular expressions that must match the <b>beginning</b> of the "
                    "service name in order for the rule to match. Note: Host notifications never match this "
                    "rule if this option is being used."),
-                 valuespec=RegExpUnicode(
+                 valuespec=RegExp(
                      size=32,
-                     mode=RegExpUnicode.prefix,
+                     mode=RegExp.prefix,
                  ),
                  orientation="horizontal",
                  allow_empty=False,
@@ -1293,9 +1289,9 @@ class ABCEventsMode(WatoMode, metaclass=abc.ABCMeta):
             ("match_exclude_services",
              ListOfStrings(
                  title=_("Exclude services"),
-                 valuespec=RegExpUnicode(
+                 valuespec=RegExp(
                      size=32,
-                     mode=RegExpUnicode.prefix,
+                     mode=RegExp.prefix,
                  ),
                  orientation="horizontal",
              )),
@@ -1314,7 +1310,7 @@ class ABCEventsMode(WatoMode, metaclass=abc.ABCMeta):
                         "This text is a regular expression that is being searched in the output "
                         "of the check plugins that produced the alert. It is not a prefix but an infix match."
                     ),
-                    mode=RegExpUnicode.prefix,
+                    mode=RegExp.prefix,
                 ),
             ),
             ("match_contacts",
@@ -1371,16 +1367,16 @@ class ABCEventsMode(WatoMode, metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     def _generic_rule_list_actions(self, rules, what, what_title, save_rules) -> None:
-        if html.request.has_var("_delete"):
-            nr = html.request.get_integer_input_mandatory("_delete")
+        if request.has_var("_delete"):
+            nr = request.get_integer_input_mandatory("_delete")
             self._add_change(what + "-delete-rule", _("Deleted %s %d") % (what_title, nr))
             del rules[nr]
             save_rules(rules)
 
-        elif html.request.has_var("_move"):
-            if html.check_transaction():
-                from_pos = html.request.get_integer_input_mandatory("_move")
-                to_pos = html.request.get_integer_input_mandatory("_index")
+        elif request.has_var("_move"):
+            if transactions.check_transaction():
+                from_pos = request.get_integer_input_mandatory("_move")
+                to_pos = request.get_integer_input_mandatory("_index")
                 rule = rules[from_pos]
                 del rules[from_pos]  # make to_pos now match!
                 rules[to_pos:to_pos] = [rule]
@@ -1444,7 +1440,7 @@ def configure_attributes(new,
 
         forms.header(
             topic_title,
-            isopen=topic_id in ["basic", "address", "data_sources"],
+            isopen=topic_id in ["basic", "address", "monitoring_agents"],
             table_id=topic_id,
             show_more_toggle=any(attribute.is_show_more() for attribute in topic_attributes),
             show_more_mode=show_more_mode,
@@ -1991,9 +1987,9 @@ class HostTagCondition(ValueSpec):
             if tag_group.is_checkbox_tag_group:
                 tagvalue = tag_group.default_value
             else:
-                tagvalue = html.request.var(varprefix + "tagvalue_" + tag_group.id)
+                tagvalue = request.var(varprefix + "tagvalue_" + tag_group.id)
 
-            mode = html.request.var(varprefix + "tag_" + tag_group.id)
+            mode = request.var(varprefix + "tag_" + tag_group.id)
             if mode == "is":
                 tag_list.append(tagvalue)
             elif mode == "isnot":
@@ -2001,7 +1997,7 @@ class HostTagCondition(ValueSpec):
 
         # Auxiliary tags
         for aux_tag in config.tags.aux_tag_list.get_tags():
-            mode = html.request.var(varprefix + "auxtag_" + aux_tag.id)
+            mode = request.var(varprefix + "auxtag_" + aux_tag.id)
             if mode == "is":
                 tag_list.append(aux_tag.id)
             elif mode == "isnot":
@@ -2012,7 +2008,7 @@ class HostTagCondition(ValueSpec):
     def canonical_value(self):
         return []
 
-    def value_to_text(self, value):
+    def value_to_text(self, value) -> str:
         return "|".join(value)
 
     def validate_datatype(self, value, varprefix):
@@ -2033,7 +2029,8 @@ class HostTagCondition(ValueSpec):
             varprefix += "_"
 
         if not config.tags.get_tag_ids():
-            html.write(_("You have not configured any <a href=\"wato.py?mode=tags\">tags</a>."))
+            html.write_text(
+                _("You have not configured any <a href=\"wato.py?mode=tags\">tags</a>."))
             return
 
         tag_groups_by_topic = dict(config.tags.get_tag_groups_by_topic())
@@ -2043,47 +2040,45 @@ class HostTagCondition(ValueSpec):
         make_foldable = len(all_topics) > 1
 
         for topic_id, topic_title in all_topics:
-            if make_foldable:
-                html.begin_foldable_container("topic", varprefix + topic_title, True,
-                                              HTML("<b>%s</b>" % (_u(topic_title))))
-            html.open_table(class_=["hosttags"])
+            container: ContextManager[bool] = foldable_container(
+                treename="topic",
+                id_=varprefix + topic_title,
+                isopen=True,
+                title=_u(topic_title),
+            ) if make_foldable else nullcontext(False)
+            with container:
+                html.open_table(class_=["hosttags"])
 
-            for tag_group in tag_groups_by_topic.get(topic_id, []):
-                html.open_tr()
-                html.open_td(class_="title")
-                html.write("%s: &nbsp;" % _u(tag_group.title))
-                html.close_td()
+                for tag_group in tag_groups_by_topic.get(topic_id, []):
+                    html.open_tr()
+                    html.td("%s: &nbsp;" % _u(tag_group.title), class_="title")
 
-                choices = tag_group.get_tag_choices()
-                default_tag, deflt = self._current_tag_setting(choices, tag_specs)
-                self._tag_condition_dropdown(varprefix, "tag", deflt, tag_group.id)
-                if tag_group.is_checkbox_tag_group:
+                    choices = tag_group.get_tag_choices()
+                    default_tag, deflt = self._current_tag_setting(choices, tag_specs)
+                    self._tag_condition_dropdown(varprefix, "tag", deflt, tag_group.id)
+                    if tag_group.is_checkbox_tag_group:
+                        html.write_text(" " + _("set"))
+                    else:
+                        html.dropdown(varprefix + "tagvalue_" + tag_group.id,
+                                      [(t[0], _u(t[1])) for t in choices if t[0] is not None],
+                                      deflt=default_tag)
+
+                    html.close_div()
+                    html.close_td()
+                    html.close_tr()
+
+                for aux_tag in aux_tags_by_topic.get(topic_id, []):
+                    html.open_tr()
+                    html.td("%s: &nbsp;" % _u(aux_tag.title), class_="title")
+                    default_tag, deflt = self._current_tag_setting(
+                        [(aux_tag.id, _u(aux_tag.title))], tag_specs)
+                    self._tag_condition_dropdown(varprefix, "auxtag", deflt, aux_tag.id)
                     html.write_text(" " + _("set"))
-                else:
-                    html.dropdown(varprefix + "tagvalue_" + tag_group.id,
-                                  [(t[0], _u(t[1])) for t in choices if t[0] is not None],
-                                  deflt=default_tag)
+                    html.close_div()
+                    html.close_td()
+                    html.close_tr()
 
-                html.close_div()
-                html.close_td()
-                html.close_tr()
-
-            for aux_tag in aux_tags_by_topic.get(topic_id, []):
-                html.open_tr()
-                html.open_td(class_="title")
-                html.write("%s: &nbsp;" % _u(aux_tag.title))
-                html.close_td()
-                default_tag, deflt = self._current_tag_setting([(aux_tag.id, _u(aux_tag.title))],
-                                                               tag_specs)
-                self._tag_condition_dropdown(varprefix, "auxtag", deflt, aux_tag.id)
-                html.write_text(" " + _("set"))
-                html.close_div()
-                html.close_td()
-                html.close_tr()
-
-            html.close_table()
-            if make_foldable:
-                html.end_foldable_container()
+                html.close_table()
 
     def _current_tag_setting(self, choices, tag_specs):
         """Determine current (default) setting of tag by looking into tag_specs (e.g. [ "snmp", "!tcp", "test" ] )"""
@@ -2122,7 +2117,7 @@ class HostTagCondition(ValueSpec):
 
         html.open_td(class_="tag_sel")
         if html.form_submitted():
-            div_is_open = html.request.var(dropdown_id, "ignore") != "ignore"
+            div_is_open = request.var(dropdown_id, "ignore") != "ignore"
         else:
             div_is_open = deflt != "ignore"
         html.open_div(id_="%stag_sel_%s" % (varprefix, id_),
@@ -2187,7 +2182,7 @@ class LabelCondition(Transform):
 
 @page_registry.register_page("ajax_dict_host_tag_condition_get_choice")
 class PageAjaxDictHostTagConditionGetChoice(ABCPageListOfMultipleGetChoice):
-    def _get_choices(self, request):
+    def _get_choices(self, api_request):
         condition = DictHostTagCondition("Dummy title", "Dummy help")
         return condition._get_tag_group_choices()
 
@@ -2284,7 +2279,7 @@ def _single_folder_rule_match_condition():
 
 
 def get_search_expression():
-    search = html.request.get_unicode_input("search")
+    search = request.get_unicode_input("search")
     if search is not None:
         search = search.strip().lower()
     return search
@@ -2296,15 +2291,34 @@ def get_hostnames_from_checkboxes(filterfunc: _Optional[Callable] = None,
     This is needed for bulk operations."""
     selected = config.user.get_rowselection(weblib.selection_id(),
                                             'wato-folder-/' + watolib.Folder.current().path())
-    search_text = html.request.var("search")
+    search_text = request.var("search")
 
-    selected_host_names = []
+    selected_host_names: List[str] = []
     for host_name, host in sorted(watolib.Folder.current().hosts().items()):
-        if ((not search_text or (search_text.lower() in host_name.lower())) and
+        if (not search_text or _search_text_matches(host, search_text) and
             ('_c_' + host_name) in selected):
             if filterfunc is None or filterfunc(host):
                 selected_host_names.append(host_name)
     return selected_host_names
+
+
+def _search_text_matches(
+    host: watolib.CREHost,
+    search_text: str,
+) -> bool:
+
+    match_regex = re.compile(search_text, re.IGNORECASE)
+    for pattern in [
+            host.name(),
+            host.effective_attributes().get("ipaddress"),
+            host.site_id(),
+            config.site(host.site_id())["alias"],
+            str(host.tag_groups()),
+            str(host.labels()),
+    ]:
+        if match_regex.search(pattern):
+            return True
+    return False
 
 
 def get_hosts_from_checkboxes(filterfunc=None):

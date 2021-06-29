@@ -632,8 +632,8 @@ TEST(AgentConfig, LogFile) {
 
 TEST(AgentConfig, YamlRead) {
     namespace fs = std::filesystem;
-    auto file = tst::MakePathToConfigTestFiles(tst::G_SolutionPath) /
-                cma::cfg::files::kDefaultDevMinimum;
+    auto file =
+        tst::MakePathToConfigTestFiles() / cma::cfg::files::kDefaultDevMinimum;
     auto ret = fs::exists(file);
     ASSERT_TRUE(ret);
 
@@ -725,12 +725,11 @@ TEST(AgentConfig, WorkConfig) {
     using namespace std;
     using namespace cma::cfg;
 
-    tst::TempCfgFs test_fs;
-    ASSERT_TRUE(test_fs.loadConfig(tst::GetFabricYml()));
-    auto cfg = cma::cfg::GetLoadedConfig();
+    auto temp_fs{tst::TempCfgFs::Create()};
+    ASSERT_TRUE(temp_fs->loadConfig(tst::GetFabricYml()));
+    const auto cfg = cma::cfg::GetLoadedConfig();
     EXPECT_TRUE(cfg.size() >= 1);  // minimum has ONE section
 
-    cfg = cma::cfg::GetLoadedConfig();
     auto sz = cfg.size();
     EXPECT_TRUE(cfg.IsMap());  // minimum has ONE section
     using namespace cma::cfg;
@@ -852,24 +851,32 @@ TEST(AgentConfig, WorkConfig) {
 
     // modules
     {
-        auto modules_table = GetLoadedConfig()[groups::kModules];
+        auto modules_table = cfg[groups::kModules];
         SCOPED_TRACE("");
-        tst::CheckYaml(modules_table,
-                       {
-                           // name, type
-                           {vars::kEnabled, YAML::NodeType::Scalar},
-                           {vars::kModulesPython, YAML::NodeType::Scalar},
-                           {vars::kModulesTable, YAML::NodeType::Sequence}
-                           //
-                       });
+        tst::CheckYaml(
+            modules_table,
+            {
+                // name, type
+                {vars::kEnabled, YAML::NodeType::Scalar},
+                {vars::kModulesPython, YAML::NodeType::Scalar},
+                {vars::kModulesQuickReinstall, YAML::NodeType::Scalar},
+                {vars::kModulesTable, YAML::NodeType::Sequence}
+                //
+            });
     }
 
+    // modules values
+    {
+        EXPECT_TRUE(
+            cfg[groups::kModules][vars::kModulesQuickReinstall].as<bool>());
+    }
+
+    // modules table
     {
         auto table =
             GetArray<YAML::Node>(groups::kModules, vars::kModulesTable);
         EXPECT_EQ(table.size(), 1);
-        auto modules_table =
-            GetLoadedConfig()[groups::kModules][vars::kModulesTable];
+        auto modules_table = cfg[groups::kModules][vars::kModulesTable];
         auto pos = 0;
         for (auto entry : modules_table) {
             EXPECT_EQ(entry[vars::kModulesName].as<std::string>(),
@@ -942,8 +949,8 @@ TEST(AgentConfig, UTF16LE) {
 
     details::KillDefaultConfig();
 
-    auto file_utf16 = tst::MakePathToConfigTestFiles(tst::G_SolutionPath) /
-                      files::kDefaultDevConfigUTF16;
+    auto file_utf16 =
+        tst::MakePathToConfigTestFiles() / files::kDefaultDevConfigUTF16;
     bool success = loader(file_utf16.wstring());
     EXPECT_TRUE(success);
 
@@ -997,7 +1004,7 @@ TEST(AgentConfig, FailScenario_Long) {
         EXPECT_TRUE(port == -1);
     }
 
-    auto test_config_path = tst::MakePathToConfigTestFiles(tst::G_SolutionPath);
+    auto test_config_path = tst::MakePathToConfigTestFiles();
 
     auto file_1 = (test_config_path / files::kDefaultMainConfig).wstring();
     auto file_2 = (test_config_path / files::kDefaultDevMinimum).wstring();

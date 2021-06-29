@@ -4,14 +4,11 @@
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-import pytest  # type: ignore[import]
+import pytest
 
-# No stub file
-from testlib.base import Scenario  # type: ignore[import]
+from testlib.base import Scenario
 
 from cmk.utils.type_defs import result, SectionName
-
-from cmk.core_helpers.type_defs import Mode
 
 from cmk.base import config
 from cmk.base.sources import make_sources
@@ -19,11 +16,6 @@ from cmk.base.sources.piggyback import PiggybackSource
 from cmk.base.sources.programs import DSProgramSource, SpecialAgentSource
 from cmk.base.sources.snmp import SNMPSource
 from cmk.base.sources.tcp import TCPSource
-
-
-@pytest.fixture(name="mode", params=Mode)
-def mode_fixture(request):
-    return request.param
 
 
 def make_scenario(hostname, tags):
@@ -93,7 +85,6 @@ def make_scenario(hostname, tags):
 def test_host_config_creates_passing_source_sources(
     monkeypatch,
     hostname,
-    mode,
     tags,
     sources,
 ):
@@ -103,11 +94,7 @@ def test_host_config_creates_passing_source_sources(
     host_config = config.HostConfig.make_host_config(hostname)
     ipaddress = "127.0.0.1"
 
-    assert [type(c) for c in make_sources(
-        host_config,
-        ipaddress,
-        mode=mode,
-    )] == sources
+    assert [type(c) for c in make_sources(host_config, ipaddress)] == sources
 
 
 @pytest.mark.parametrize("source, kwargs", [
@@ -131,7 +118,6 @@ def test_data_source_preselected(monkeypatch, source, kwargs):
     source_inst = source(
         "hostname",
         "127.0.0.1",
-        mode=None,
         **kwargs,
     )
 

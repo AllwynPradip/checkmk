@@ -4,14 +4,11 @@
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from cmk.utils.type_defs import CheckPluginName
-
 from cmk.base.plugins.agent_based.utils import memory
 from cmk.base.plugins.agent_based.mem_used import check_mem_used, discover_mem_used
 from cmk.base.plugins.agent_based.agent_based_api.v1 import Result, Metric, Service, State
-from cmk.base.api.agent_based import value_store
 
-import pytest  # type: ignore[import]
+import pytest
 
 state = State  # TODO: cleanup
 
@@ -25,7 +22,7 @@ def test_check_discovery_total_zero():
     Some containers do not provide memory info.
     Make sure they are discovered, and a proper error message is displayed
     """
-    section = {"MemTotal": 0}
+    section: memory.SectionMemUsed = {"MemTotal": 0}
     assert list(discover_mem_used(section)) == [Service()]
     result, = check_mem_used({}, section)
     assert isinstance(result, Result)
@@ -515,8 +512,7 @@ def test_check_memory_fails(params, meminfo, fail_with_exception):
 def test_check_memory(params, meminfo, expected):
     copy_info = meminfo.copy()
 
-    with value_store.context(CheckPluginName("mem_used_unittest"), None):
-        result = list(check_mem_used(params, meminfo))
+    result = list(check_mem_used(params, meminfo))
 
     assert result == expected
     assert copy_info == meminfo

@@ -15,9 +15,10 @@ import cmk.gui.sites as sites
 import cmk.gui.hooks as hooks
 import cmk.gui.config as config
 import cmk.gui.userdb as userdb
+from cmk.gui.utils.urls import urlencode_vars
 from cmk.gui.i18n import _
 from cmk.gui.exceptions import MKGeneralException, RequestTimeout
-from cmk.gui.globals import html
+from cmk.gui.globals import request
 from cmk.gui.watolib.changes import add_change
 from cmk.gui.watolib.automation_commands import (
     AutomationCommand,
@@ -170,7 +171,7 @@ def push_user_profiles_to_site_transitional_wrapper(site, user_profiles):
 
 
 def _legacy_push_user_profile_to_site(site, user_id, profile):
-    url = site["multisiteurl"] + "automation.py?" + html.urlencode_vars([
+    url = site["multisiteurl"] + "automation.py?" + urlencode_vars([
         ("command", "push-profile"),
         ("secret", site["secret"]),
         ("siteid", site['id']),
@@ -218,11 +219,11 @@ class PushUserProfilesToSite(AutomationCommand):
         return "push-profiles"
 
     def get_request(self):
-        return PushUserProfilesRequest(
-            ast.literal_eval(html.request.get_ascii_input_mandatory("profiles")))
+        return PushUserProfilesRequest(ast.literal_eval(
+            request.get_str_input_mandatory("profiles")))
 
-    def execute(self, request):
-        user_profiles = request.user_profiles
+    def execute(self, api_request):
+        user_profiles = api_request.user_profiles
 
         if not user_profiles:
             raise MKGeneralException(_('Invalid call: No profiles set.'))

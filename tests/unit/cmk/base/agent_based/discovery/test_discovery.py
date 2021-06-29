@@ -4,15 +4,18 @@
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# pylint: disable=redefined-outer-name,protected-access
-from typing import Dict, Sequence, Set, NamedTuple, Tuple
+# pylint: disable=redefined-outer-name
 
-import pytest  # type: ignore[import]
+from typing import Dict, NamedTuple, Sequence, Set, Tuple
 
-# No stub files
-from testlib.base import Scenario  # type: ignore[import]
-from testlib.debug_utils import cmk_debug_enabled  # type: ignore[import]
+import pytest
+from _pytest.monkeypatch import MonkeyPatch
 
+from testlib.base import Scenario
+from testlib.debug_utils import cmk_debug_enabled
+
+from cmk.utils.exceptions import OnError
+from cmk.utils.labels import DiscoveredHostLabelsStore
 from cmk.utils.type_defs import (
     CheckPluginName,
     DiscoveryResult,
@@ -21,24 +24,23 @@ from cmk.utils.type_defs import (
     SectionName,
     SourceType,
 )
-from cmk.utils.labels import DiscoveredHostLabelsStore
 
-from cmk.core_helpers.type_defs import NO_SELECTION
-
+import cmk.base.agent_based.discovery as discovery
+import cmk.base.api.agent_based.register as agent_based_register
+import cmk.base.autochecks as autochecks
+import cmk.base.config as config
 import cmk.base.ip_lookup as ip_lookup
+from cmk.base.agent_based.data_provider import (
+    ParsedSectionsBroker,
+    ParsedSectionsResolver,
+    SectionsParser,
+)
+from cmk.base.agent_based.discovery import _discovered_services
+from cmk.base.check_utils import Service
+from cmk.base.discovered_labels import DiscoveredServiceLabels, HostLabel, ServiceLabel
 from cmk.base.sources.agent import AgentHostSections
 from cmk.base.sources.snmp import SNMPHostSections
-from cmk.base.agent_based.data_provider import ParsedSectionsBroker
-from cmk.base.discovered_labels import (
-    ServiceLabel,
-    DiscoveredServiceLabels,
-    HostLabel,
-)
-
-import cmk.base.api.agent_based.register as agent_based_register
-import cmk.base.config as config
-import cmk.base.agent_based.discovery as discovery
-import cmk.base.autochecks as autochecks
+from cmk.core_helpers.type_defs import NO_SELECTION
 
 
 def test_discovered_service_init():
@@ -81,21 +83,6 @@ def test_discovered_service_eq():
     assert ser1 not in {ser3}
     assert ser1 not in {ser4}
     assert ser1 in {ser5}
-
-
-def test__get_rediscovery_mode():
-    allowed_modes = [
-        ("fixall", 2),
-        ("new", 0),
-        ("refresh", 3),
-        ("remove", 1),
-    ]
-
-    assert sorted(allowed_modes) == sorted(
-        (member.name, member.value) for member in discovery.RediscoveryMode)
-    assert discovery._get_rediscovery_mode({}) == ""
-    assert discovery._get_rediscovery_mode({"inventory_rediscovery": {}}) == ""
-    assert discovery._get_rediscovery_mode({"inventory_rediscovery": {"mode": "UNKNOWN"}}) == ""
 
 
 @pytest.fixture
@@ -191,103 +178,104 @@ def grouped_services() -> discovery.ServicesByTransition:
 
 
 def test__group_by_transition(service_table, grouped_services):
-    assert discovery._group_by_transition(service_table.values()) == grouped_services
+    assert discovery._group_by_transition(service_table) == grouped_services
 
 
 @pytest.mark.parametrize(
     "mode, parameters_rediscovery, result_new_item_names, result_counts",
     [
         # No params
-        ("new", {}, ["New Item 1", "New Item 2", "Vanished Item 1", "Vanished Item 2"], (2, 2, 0)),
-        ("fixall", {}, ["New Item 1", "New Item 2"], (2, 0, 2)),
-        ("refresh", {}, ["New Item 1", "New Item 2", "Vanished Item 1", "Vanished Item 2"],
-         (2, 2, 0)),
-        ("remove", {}, [], (0, 0, 2)),
+        (discovery.DiscoveryMode.NEW, {},
+         ["New Item 1", "New Item 2", "Vanished Item 1", "Vanished Item 2"], (2, 2, 0)),
+        (discovery.DiscoveryMode.FIXALL, {}, ["New Item 1", "New Item 2"], (2, 0, 2)),
+        (discovery.DiscoveryMode.REFRESH, {},
+         ["New Item 1", "New Item 2", "Vanished Item 1", "Vanished Item 2"], (2, 2, 0)),
+        (discovery.DiscoveryMode.REMOVE, {}, [], (0, 0, 2)),
         # New services
         # Whitelist
-        ("new", {
+        (discovery.DiscoveryMode.NEW, {
             "service_whitelist": ["^Test Description New Item 1"]
         }, ["New Item 1", "Vanished Item 1", "Vanished Item 2"], (1, 2, 0)),
-        ("fixall", {
+        (discovery.DiscoveryMode.FIXALL, {
             "service_whitelist": ["^Test Description New Item 1"]
         }, ["New Item 1", "Vanished Item 1", "Vanished Item 2"], (1, 2, 0)),
-        ("refresh", {
+        (discovery.DiscoveryMode.REFRESH, {
             "service_whitelist": ["^Test Description New Item 1"]
         }, ["New Item 1", "Vanished Item 1", "Vanished Item 2"], (1, 2, 0)),
-        ("remove", {
+        (discovery.DiscoveryMode.REMOVE, {
             "service_whitelist": ["^Test Description New Item 1"]
         }, ["Vanished Item 1", "Vanished Item 2"], (0, 2, 0)),
         # Blacklist
-        ("new", {
+        (discovery.DiscoveryMode.NEW, {
             "service_blacklist": ["^Test Description New Item 1"]
         }, ["New Item 2", "Vanished Item 1", "Vanished Item 2"], (1, 2, 0)),
-        ("fixall", {
+        (discovery.DiscoveryMode.FIXALL, {
             "service_blacklist": ["^Test Description New Item 1"]
         }, ["New Item 2"], (1, 0, 2)),
-        ("refresh", {
+        (discovery.DiscoveryMode.REFRESH, {
             "service_blacklist": ["^Test Description New Item 1"]
         }, ["New Item 2", "Vanished Item 1", "Vanished Item 2"], (1, 2, 0)),
-        ("remove", {
+        (discovery.DiscoveryMode.REMOVE, {
             "service_blacklist": ["^Test Description New Item 1"]
         }, [], (0, 0, 2)),
         # White-/blacklist
-        ("new", {
+        (discovery.DiscoveryMode.NEW, {
             "service_whitelist": ["^Test Description New Item 1"],
             "service_blacklist": ["^Test Description New Item 2"],
         }, ["New Item 1", "Vanished Item 1", "Vanished Item 2"], (1, 2, 0)),
-        ("fixall", {
+        (discovery.DiscoveryMode.FIXALL, {
             "service_whitelist": ["^Test Description New Item 1"],
             "service_blacklist": ["^Test Description New Item 2"],
         }, ["New Item 1", "Vanished Item 1", "Vanished Item 2"], (1, 2, 0)),
-        ("refresh", {
+        (discovery.DiscoveryMode.REFRESH, {
             "service_whitelist": ["^Test Description New Item 1"],
             "service_blacklist": ["^Test Description New Item 2"],
         }, ["New Item 1", "Vanished Item 1", "Vanished Item 2"], (1, 2, 0)),
-        ("remove", {
+        (discovery.DiscoveryMode.REMOVE, {
             "service_whitelist": ["^Test Description New Item 1"],
             "service_blacklist": ["^Test Description New Item 2"],
         }, ["Vanished Item 1", "Vanished Item 2"], (0, 2, 0)),
         # Vanished services
         # Whitelist
-        ("new", {
+        (discovery.DiscoveryMode.NEW, {
             "service_whitelist": ["^Test Description Vanished Item 1"]
         }, ["Vanished Item 1", "Vanished Item 2"], (0, 2, 0)),
-        ("fixall", {
+        (discovery.DiscoveryMode.FIXALL, {
             "service_whitelist": ["^Test Description Vanished Item 1"]
         }, ["Vanished Item 2"], (0, 1, 1)),
-        ("refresh", {
+        (discovery.DiscoveryMode.REFRESH, {
             "service_whitelist": ["^Test Description Vanished Item 1"]
         }, ["Vanished Item 1", "Vanished Item 2"], (0, 2, 0)),
-        ("remove", {
+        (discovery.DiscoveryMode.REMOVE, {
             "service_whitelist": ["^Test Description Vanished Item 1"]
         }, ["Vanished Item 2"], (0, 1, 1)),
         # Blacklist
-        ("new", {
+        (discovery.DiscoveryMode.NEW, {
             "service_blacklist": ["^Test Description Vanished Item 1"]
         }, ["New Item 1", "New Item 2", "Vanished Item 1", "Vanished Item 2"], (2, 2, 0)),
-        ("fixall", {
+        (discovery.DiscoveryMode.FIXALL, {
             "service_blacklist": ["^Test Description Vanished Item 1"]
         }, ["New Item 1", "New Item 2", "Vanished Item 1"], (2, 1, 1)),
-        ("refresh", {
+        (discovery.DiscoveryMode.REFRESH, {
             "service_blacklist": ["^Test Description Vanished Item 1"]
         }, ["New Item 1", "New Item 2", "Vanished Item 1", "Vanished Item 2"], (2, 2, 0)),
-        ("remove", {
+        (discovery.DiscoveryMode.REMOVE, {
             "service_blacklist": ["^Test Description Vanished Item 1"]
         }, ["Vanished Item 1"], (0, 1, 1)),
         # White-/blacklist
-        ("new", {
+        (discovery.DiscoveryMode.NEW, {
             "service_whitelist": ["^Test Description Vanished Item 1"],
             "service_blacklist": ["^Test Description Vanished Item 2"],
         }, ["Vanished Item 1", "Vanished Item 2"], (0, 2, 0)),
-        ("fixall", {
+        (discovery.DiscoveryMode.FIXALL, {
             "service_whitelist": ["^Test Description Vanished Item 1"],
             "service_blacklist": ["^Test Description Vanished Item 2"],
         }, ["Vanished Item 2"], (0, 1, 1)),
-        ("refresh", {
+        (discovery.DiscoveryMode.REFRESH, {
             "service_whitelist": ["^Test Description Vanished Item 1"],
             "service_blacklist": ["^Test Description Vanished Item 2"],
         }, ["Vanished Item 1", "Vanished Item 2"], (0, 2, 0)),
-        ("remove", {
+        (discovery.DiscoveryMode.REMOVE, {
             "service_whitelist": ["^Test Description Vanished Item 1"],
             "service_blacklist": ["^Test Description Vanished Item 2"],
         }, ["Vanished Item 2"], (0, 1, 1)),
@@ -329,78 +317,78 @@ def test__get_post_discovery_services(monkeypatch, grouped_services, mode, param
         # Whitelist
         ({
             "inventory_rediscovery": {
-                "mode": 0,
+                "mode": discovery.DiscoveryMode.NEW,
                 "service_whitelist": ["^Test Description New Item 1"]
             },
         }, True),
         ({
             "inventory_rediscovery": {
-                "mode": 1,
+                "mode": discovery.DiscoveryMode.REMOVE,
                 "service_whitelist": ["^Test Description New Item 1"]
             },
         }, False),
         ({
             "inventory_rediscovery": {
-                "mode": 2,
+                "mode": discovery.DiscoveryMode.FIXALL,
                 "service_whitelist": ["^Test Description New Item 1"]
             },
         }, True),
         ({
             "inventory_rediscovery": {
-                "mode": 3,
+                "mode": discovery.DiscoveryMode.REFRESH,
                 "service_whitelist": ["^Test Description New Item 1"]
             },
         }, True),
         # Blacklist
         ({
             "inventory_rediscovery": {
-                "mode": 0,
+                "mode": discovery.DiscoveryMode.NEW,
                 "service_blacklist": ["^Test Description New Item 1"]
             },
         }, True),
         ({
             "inventory_rediscovery": {
-                "mode": 1,
+                "mode": discovery.DiscoveryMode.REMOVE,
                 "service_blacklist": ["^Test Description New Item 1"]
             },
         }, True),
         ({
             "inventory_rediscovery": {
-                "mode": 2,
+                "mode": discovery.DiscoveryMode.FIXALL,
                 "service_blacklist": ["^Test Description New Item 1"]
             },
         }, True),
         ({
             "inventory_rediscovery": {
-                "mode": 3,
+                "mode": discovery.DiscoveryMode.REFRESH,
                 "service_blacklist": ["^Test Description New Item 1"]
             },
         }, True),
         # White-/blacklist
         ({
             "inventory_rediscovery": {
-                "mode": 0,
+                "mode": discovery.DiscoveryMode.NEW,
                 "service_whitelist": ["^Test Description New Item 1"],
                 "service_blacklist": ["^Test Description New Item 2"],
             },
         }, True),
         ({
             "inventory_rediscovery": {
-                "mode": 1,
+                "mode": discovery.DiscoveryMode.REMOVE,
                 "service_whitelist": ["^Test Description New Item 1"],
                 "service_blacklist": ["^Test Description New Item 2"],
             },
         }, False),
         ({
             "inventory_rediscovery": {
-                "mode": 2,
+                "mode": discovery.DiscoveryMode.FIXALL,
                 "service_whitelist": ["^Test Description New Item 1"],
                 "service_blacklist": ["^Test Description New Item 2"],
             },
         }, True),
         ({
             "inventory_rediscovery": {
-                "mode": 3,
+                "mode": discovery.DiscoveryMode.REFRESH,
                 "service_whitelist": ["^Test Description New Item 1"],
                 "service_blacklist": ["^Test Description New Item 2"],
             },
@@ -409,91 +397,104 @@ def test__get_post_discovery_services(monkeypatch, grouped_services, mode, param
         # Whitelist
         ({
             "inventory_rediscovery": {
-                "mode": 0,
+                "mode": discovery.DiscoveryMode.NEW,
                 "service_whitelist": ["^Test Description Vanished Item 1"]
             },
         }, False),
         ({
             "inventory_rediscovery": {
-                "mode": 1,
+                "mode": discovery.DiscoveryMode.REMOVE,
                 "service_whitelist": ["^Test Description Vanished Item 1"]
             },
         }, True),
         ({
             "inventory_rediscovery": {
-                "mode": 2,
+                "mode": discovery.DiscoveryMode.FIXALL,
                 "service_whitelist": ["^Test Description Vanished Item 1"]
             },
         }, True),
         ({
             "inventory_rediscovery": {
-                "mode": 3,
+                "mode": discovery.DiscoveryMode.REFRESH,
                 "service_whitelist": ["^Test Description Vanished Item 1"]
             },
         }, True),
         # Blacklist
         ({
             "inventory_rediscovery": {
-                "mode": 0,
+                "mode": discovery.DiscoveryMode.NEW,
                 "service_blacklist": ["^Test Description Vanished Item 1"]
             },
         }, True),
         ({
             "inventory_rediscovery": {
-                "mode": 1,
+                "mode": discovery.DiscoveryMode.REMOVE,
                 "service_blacklist": ["^Test Description Vanished Item 1"]
             },
         }, True),
         ({
             "inventory_rediscovery": {
-                "mode": 2,
+                "mode": discovery.DiscoveryMode.FIXALL,
                 "service_blacklist": ["^Test Description Vanished Item 1"]
             },
         }, True),
         ({
             "inventory_rediscovery": {
-                "mode": 3,
+                "mode": discovery.DiscoveryMode.REFRESH,
                 "service_blacklist": ["^Test Description Vanished Item 1"]
             },
         }, True),
         # White-/blacklist
         ({
             "inventory_rediscovery": {
-                "mode": 0,
+                "mode": discovery.DiscoveryMode.NEW,
                 "service_whitelist": ["^Test Description Vanished Item 1"],
                 "service_blacklist": ["^Test Description Vanished Item 2"],
             },
         }, False),
         ({
             "inventory_rediscovery": {
-                "mode": 1,
+                "mode": discovery.DiscoveryMode.REMOVE,
                 "service_whitelist": ["^Test Description Vanished Item 1"],
                 "service_blacklist": ["^Test Description Vanished Item 2"],
             },
         }, True),
         ({
             "inventory_rediscovery": {
-                "mode": 2,
+                "mode": discovery.DiscoveryMode.FIXALL,
                 "service_whitelist": ["^Test Description Vanished Item 1"],
                 "service_blacklist": ["^Test Description Vanished Item 2"],
             },
         }, True),
         ({
             "inventory_rediscovery": {
-                "mode": 3,
+                "mode": discovery.DiscoveryMode.REFRESH,
                 "service_whitelist": ["^Test Description Vanished Item 1"],
                 "service_blacklist": ["^Test Description Vanished Item 2"],
             },
         }, True),
     ])
-def test__check_service_table(monkeypatch, grouped_services, parameters, result_need_rediscovery):
+def test__check_service_table(
+    monkeypatch,
+    grouped_services,
+    parameters,
+    result_need_rediscovery,
+):
     def _get_service_description(_hostname, _check_plugin_name, item):
         return "Test Description %s" % item
 
     monkeypatch.setattr(config, "service_description", _get_service_description)
 
-    status, infotexts, long_infotexts, perfdata, need_rediscovery = discovery._check_service_lists(
-        "hostname", grouped_services, parameters)
+    rediscovery_parameters = parameters.get("inventory_rediscovery", {})
+    discovery_mode = rediscovery_parameters.pop('mode', "")
+    (status, infotexts, long_infotexts,
+     perfdata), need_rediscovery = discovery._check_service_lists(
+         host_name="hostname",
+         services_by_transition=grouped_services,
+         params=parameters,
+         service_filters=discovery._ServiceFilters.from_settings(rediscovery_parameters),
+         discovery_mode=discovery_mode,
+     )
 
     assert status == 1
     assert sorted(infotexts) == sorted([
@@ -514,19 +515,38 @@ def test__check_service_table(monkeypatch, grouped_services, parameters, result_
 def test__find_candidates():
     broker = ParsedSectionsBroker({
         # we just care about the keys here, content set to arbitrary values that can be parsed.
-        # section names have been are chosen arbitrarily.
-        HostKey("test_node", "1.2.3.4", SourceType.HOST): AgentHostSections({
-            SectionName("kernel"): [],  # host only
-            SectionName("uptime"): [['123']],  # host & mgmt
-        }),
-        HostKey("test_node", "1.2.3.4", SourceType.MANAGEMENT): SNMPHostSections({
-            # host & mgmt:
-            SectionName("uptime"): [['123']],  # type: ignore[dict-item]
-            # mgmt only:
-            SectionName("liebert_fans"): [[['Fan', '67', 'umin']]],  # type: ignore[dict-item]
-            # is already mgmt_ prefixed:
-            SectionName("mgmt_snmp_info"): [[['a', 'b', 'c', 'd']]],  # type: ignore[dict-item]
-        }),
+        # section names are chosen arbitrarily.
+        HostKey("test_node", "1.2.3.4", SourceType.HOST): (
+            ParsedSectionsResolver(section_plugins=[
+                agent_based_register.get_section_plugin(SectionName("kernel")),
+                agent_based_register.get_section_plugin(SectionName("uptime")),
+            ],),
+            SectionsParser(
+                host_sections=AgentHostSections({
+                    SectionName("kernel"): [],  # host only
+                    SectionName("uptime"): [['123']],  # host & mgmt
+                }),),
+        ),
+        HostKey("test_node", "1.2.3.4", SourceType.MANAGEMENT): (
+            ParsedSectionsResolver(section_plugins=[
+                agent_based_register.get_section_plugin(SectionName("uptime")),
+                agent_based_register.get_section_plugin(SectionName("liebert_fans")),
+                agent_based_register.get_section_plugin(SectionName("mgmt_snmp_info")),
+            ],),
+            SectionsParser(
+                host_sections=SNMPHostSections({
+                    # host & mgmt:
+                    SectionName("uptime"): [['123']],  # type: ignore[dict-item]
+                    # mgmt only:
+                    SectionName("liebert_fans"): [  # type: ignore[dict-item]
+                        [['Fan', '67', 'umin']]
+                    ],
+                    # is already mgmt_ prefixed:
+                    SectionName("mgmt_snmp_info"): [  # type: ignore[dict-item]
+                        [['a', 'b', 'c', 'd']]
+                    ],
+                }),),
+        ),
     })
 
     preliminary_candidates = list(agent_based_register.iter_all_check_plugins())
@@ -647,13 +667,13 @@ _expected_host_labels = {
 
 
 @pytest.mark.usefixtures("load_all_agent_based_plugins")
-def test_do_discovery(monkeypatch):
+def test_commandline_discovery(monkeypatch):
     ts = Scenario().add_host("test-host", ipaddress="127.0.0.1")
     ts.fake_standard_linux_agent_output("test-host")
     ts.apply(monkeypatch)
 
     with cmk_debug_enabled():
-        discovery.do_discovery(
+        discovery.commandline_discovery(
             arg_hostnames={"test-host"},
             selected_sections=NO_SELECTION,
             run_plugin_names=EVERYTHING,
@@ -710,8 +730,16 @@ def _realhost_scenario(monkeypatch):
     })
 
     broker = ParsedSectionsBroker({
-        HostKey(hostname=hostname, ipaddress=ipaddress, source_type=SourceType.HOST):
-            AgentHostSections(
+        HostKey(
+            hostname=hostname,
+            ipaddress=ipaddress,
+            source_type=SourceType.HOST,
+        ): (
+            ParsedSectionsResolver(section_plugins=[
+                agent_based_register.get_section_plugin(SectionName("labels")),
+                agent_based_register.get_section_plugin(SectionName("df")),
+            ],),
+            SectionsParser(host_sections=AgentHostSections(
                 sections={
                     SectionName("labels"): [[
                         '{"cmk/check_mk_server":"yes"}',
@@ -736,7 +764,8 @@ def _realhost_scenario(monkeypatch):
                             '/opt/omd/sites/test-heute/tmp',
                         ],
                     ],
-                })
+                })),
+        ),
     })
 
     return RealHostScenario(hostname, ipaddress, broker)
@@ -799,12 +828,20 @@ def _cluster_scenario(monkeypatch):
     })
 
     broker = ParsedSectionsBroker({
-        HostKey(hostname=node1_hostname, ipaddress=ipaddress, source_type=SourceType.HOST):
-            AgentHostSections(
+        HostKey(
+            hostname=node1_hostname,
+            ipaddress=ipaddress,
+            source_type=SourceType.HOST,
+        ): (
+            ParsedSectionsResolver(section_plugins=[
+                agent_based_register.get_section_plugin(SectionName("labels")),
+                agent_based_register.get_section_plugin(SectionName("df")),
+            ],),
+            SectionsParser(host_sections=AgentHostSections(
                 sections={
                     SectionName("labels"): [[
                         '{"cmk/check_mk_server":"yes"}',
-                    ],],
+                    ]],
                     SectionName("df"): [
                         [
                             '/dev/sda1',
@@ -825,9 +862,18 @@ def _cluster_scenario(monkeypatch):
                             '/opt/omd/sites/test-heute/tmp',
                         ],
                     ],
-                }),
-        HostKey(hostname=node2_hostname, ipaddress=ipaddress, source_type=SourceType.HOST):
-            AgentHostSections(
+                })),
+        ),
+        HostKey(
+            hostname=node2_hostname,
+            ipaddress=ipaddress,
+            source_type=SourceType.HOST,
+        ): (
+            ParsedSectionsResolver(section_plugins=[
+                agent_based_register.get_section_plugin(SectionName("labels")),
+                agent_based_register.get_section_plugin(SectionName("df")),
+            ],),
+            SectionsParser(host_sections=AgentHostSections(
                 sections={
                     SectionName("labels"): [[
                         '{"node2_live_label":"true"}',
@@ -852,7 +898,8 @@ def _cluster_scenario(monkeypatch):
                             '/opt/omd/sites/test-heute2/tmp',
                         ],
                     ],
-                }),
+                })),
+        ),
     })
 
     return ClusterScenario(
@@ -880,23 +927,23 @@ ExpectedDiscoveryResultCluster = NamedTuple("ExpectedDiscoveryResultCluster", [
     ("expected_stored_labels_node2", Dict),
 ])
 
-DiscoveryTestCase = NamedTuple("DiscoveryTestCase", [
-    ("parameters", discovery.DiscoveryParameters),
-    ("expected_services", Set[Tuple[CheckPluginName, str]]),
-    ("on_realhost", ExpectedDiscoveryResultRealHost),
-    ("on_cluster", ExpectedDiscoveryResultCluster),
-])
+
+class DiscoveryTestCase(NamedTuple):
+    load_labels: bool
+    save_labels: bool
+    only_host_labels: bool
+    expected_services: Set[Tuple[CheckPluginName, str]]
+    on_realhost: ExpectedDiscoveryResultRealHost
+    on_cluster: ExpectedDiscoveryResultCluster
+
 
 _discovery_test_cases = [
     # do discovery: only_new == True
     # discover on host: mode != "remove"
     DiscoveryTestCase(
-        parameters=discovery.DiscoveryParameters(
-            on_error="raise",
-            load_labels=True,
-            save_labels=True,
-            only_host_labels=False,
-        ),
+        load_labels=True,
+        save_labels=True,
+        only_host_labels=False,
         expected_services={
             (CheckPluginName('df'), '/boot/test-efi'),
             (CheckPluginName('df'), '/opt/omd/sites/test-heute/tmp'),
@@ -978,12 +1025,9 @@ _discovery_test_cases = [
     ),
     # check discovery
     DiscoveryTestCase(
-        parameters=discovery.DiscoveryParameters(
-            on_error="raise",
-            load_labels=True,
-            save_labels=False,
-            only_host_labels=False,
-        ),
+        load_labels=True,
+        save_labels=False,
+        only_host_labels=False,
         expected_services={
             (CheckPluginName('df'), '/boot/test-efi'),
         },
@@ -1039,12 +1083,9 @@ _discovery_test_cases = [
     ),
     # do discovery: only_new == False
     DiscoveryTestCase(
-        parameters=discovery.DiscoveryParameters(
-            on_error="raise",
-            load_labels=False,
-            save_labels=True,
-            only_host_labels=False,
-        ),
+        load_labels=False,
+        save_labels=True,
+        only_host_labels=False,
         expected_services={
             (CheckPluginName('df'), '/boot/test-efi'),
             (CheckPluginName('df'), '/opt/omd/sites/test-heute/tmp'),
@@ -1097,12 +1138,9 @@ _discovery_test_cases = [
     # do discovery: only_new == False
     # preview
     DiscoveryTestCase(
-        parameters=discovery.DiscoveryParameters(
-            on_error="raise",
-            load_labels=False,
-            save_labels=False,
-            only_host_labels=False,
-        ),
+        load_labels=False,
+        save_labels=False,
+        only_host_labels=False,
         expected_services={
             (CheckPluginName('df'), '/boot/test-efi'),
         },
@@ -1152,12 +1190,9 @@ _discovery_test_cases = [
     # discover on host: mode == "only-host-labels"
     # Only discover host labels
     DiscoveryTestCase(
-        parameters=discovery.DiscoveryParameters(
-            on_error="raise",
-            load_labels=False,
-            save_labels=False,
-            only_host_labels=True,
-        ),
+        load_labels=False,
+        save_labels=False,
+        only_host_labels=True,
         expected_services=set(),
         on_realhost=ExpectedDiscoveryResultRealHost(
             expected_vanished_host_labels=[],
@@ -1208,27 +1243,31 @@ _discovery_test_cases = [
 @pytest.mark.usefixtures("load_all_agent_based_plugins")
 @pytest.mark.parametrize("discovery_test_case", _discovery_test_cases)
 def test__discover_host_labels_and_services_on_realhost(realhost_scenario, discovery_test_case):
+    if discovery_test_case.only_host_labels:
+        # check for consistency of the test case
+        assert not discovery_test_case.expected_services
+        return
+
     scenario = realhost_scenario
 
-    discovery_parameters = discovery_test_case.parameters
-
     # we're depending on the changed host labels:
-    _ = discovery.analyse_host_labels(
+    _ = discovery.analyse_node_labels(
         host_name=scenario.hostname,
         ipaddress=scenario.ipaddress,
         parsed_sections_broker=scenario.parsed_sections_broker,
-        discovery_parameters=discovery_parameters,
+        load_labels=discovery_test_case.load_labels,
+        save_labels=discovery_test_case.save_labels,
+        on_error=OnError.RAISE,
     )
 
     with cmk_debug_enabled():
-        discovered_services = ([] if discovery_parameters.only_host_labels else
-                               discovery._discovered_services._discover_services(
-                                   host_name=scenario.hostname,
-                                   ipaddress=scenario.ipaddress,
-                                   parsed_sections_broker=scenario.parsed_sections_broker,
-                                   discovery_parameters=discovery_parameters,
-                                   run_plugin_names=EVERYTHING,
-                               ))
+        discovered_services = discovery._discovered_services._discover_services(
+            host_name=scenario.hostname,
+            ipaddress=scenario.ipaddress,
+            parsed_sections_broker=scenario.parsed_sections_broker,
+            on_error=OnError.RAISE,
+            run_plugin_names=EVERYTHING,
+        )
 
     services = {(s.check_plugin_name, s.item) for s in discovered_services}
 
@@ -1240,14 +1279,14 @@ def test__discover_host_labels_and_services_on_realhost(realhost_scenario, disco
 def test__perform_host_label_discovery_on_realhost(realhost_scenario, discovery_test_case):
     scenario = realhost_scenario
 
-    discovery_parameters = discovery_test_case.parameters
-
     with cmk_debug_enabled():
-        host_label_result = discovery.analyse_host_labels(
+        host_label_result = discovery.analyse_node_labels(
             host_name=scenario.hostname,
             ipaddress=scenario.ipaddress,
             parsed_sections_broker=scenario.parsed_sections_broker,
-            discovery_parameters=discovery_parameters,
+            load_labels=discovery_test_case.load_labels,
+            save_labels=discovery_test_case.save_labels,
+            on_error=OnError.RAISE,
         )
 
     assert host_label_result.vanished == discovery_test_case.on_realhost.expected_vanished_host_labels
@@ -1260,17 +1299,22 @@ def test__perform_host_label_discovery_on_realhost(realhost_scenario, discovery_
 
 @pytest.mark.usefixtures("load_all_agent_based_plugins")
 @pytest.mark.parametrize("discovery_test_case", _discovery_test_cases)
-def test__discover_host_labels_and_services_on_cluster(cluster_scenario, discovery_test_case):
+def test__discover_services_on_cluster(cluster_scenario, discovery_test_case):
+    if discovery_test_case.only_host_labels:
+        # check for consistency of the test case
+        assert not discovery_test_case.expected_services
+        return
+
     scenario = cluster_scenario
 
-    discovery_parameters = discovery_test_case.parameters
-
     # we need the sideeffects of this call. TODO: guess what.
-    _ = discovery._host_labels.analyse_cluster_host_labels(
+    _ = discovery._host_labels.analyse_cluster_labels(
         host_config=scenario.host_config,
         ipaddress=scenario.ipaddress,
         parsed_sections_broker=scenario.parsed_sections_broker,
-        discovery_parameters=discovery_parameters,
+        load_labels=discovery_test_case.load_labels,
+        save_labels=discovery_test_case.save_labels,
+        on_error=OnError.RAISE,
     )
 
     with cmk_debug_enabled():
@@ -1278,7 +1322,7 @@ def test__discover_host_labels_and_services_on_cluster(cluster_scenario, discove
             scenario.host_config,
             scenario.ipaddress,
             scenario.parsed_sections_broker,
-            discovery_parameters,
+            OnError.RAISE,
         )
 
     services = set(discovered_services)
@@ -1291,14 +1335,14 @@ def test__discover_host_labels_and_services_on_cluster(cluster_scenario, discove
 def test__perform_host_label_discovery_on_cluster(cluster_scenario, discovery_test_case):
     scenario = cluster_scenario
 
-    discovery_parameters = discovery_test_case.parameters
-
     with cmk_debug_enabled():
-        host_label_result = discovery._host_labels.analyse_cluster_host_labels(
+        host_label_result = discovery._host_labels.analyse_cluster_labels(
             host_config=scenario.host_config,
             ipaddress=scenario.ipaddress,
             parsed_sections_broker=scenario.parsed_sections_broker,
-            discovery_parameters=discovery_parameters,
+            load_labels=discovery_test_case.load_labels,
+            save_labels=discovery_test_case.save_labels,
+            on_error=OnError.RAISE,
         )
 
     assert (
@@ -1314,3 +1358,49 @@ def test__perform_host_label_discovery_on_cluster(cluster_scenario, discovery_te
 
     assert (DiscoveredHostLabelsStore(scenario.node2_hostname).load() ==
             discovery_test_case.on_cluster.expected_stored_labels_node2)
+
+
+def test_get_node_services(monkeypatch: MonkeyPatch) -> None:
+
+    services = {
+        discovery_status: Service(
+            CheckPluginName(f"plugin_{discovery_status}"),
+            None,
+            "description",
+            {},
+        ) for discovery_status in (
+            "old",
+            "vanished",
+            "new",
+        )
+    }
+
+    monkeypatch.setattr(
+        _discovered_services,
+        "_load_existing_services",
+        lambda *args, **kwargs: [
+            services["old"],
+            services["vanished"],
+        ],
+    )
+
+    monkeypatch.setattr(
+        _discovered_services,
+        "_discover_services",
+        lambda *args, **kwargs: [
+            services["old"],
+            services["new"],
+        ],
+    )
+
+    assert discovery._get_node_services(
+        "horst",
+        None,
+        ParsedSectionsBroker({}),
+        OnError.RAISE,
+        lambda hn, _svcdescr: hn,
+    ) == {(service.check_plugin_name, None): (
+        discovery_status,
+        service,
+        ["horst"],
+    ) for discovery_status, service in services.items()}

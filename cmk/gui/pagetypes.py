@@ -19,6 +19,7 @@
 
 import os
 import json
+import copy
 from typing import Dict, Any, List, Tuple, Optional as _Optional, Iterator
 
 from six import ensure_str
@@ -38,7 +39,7 @@ from cmk.gui.valuespec import (
     ID,
     Dictionary,
     Checkbox,
-    TextUnicode,
+    TextInput,
     TextAreaUnicode,
     CascadingDropdown,
     DualListChoice,
@@ -51,7 +52,7 @@ from cmk.gui.valuespec import (
 )
 from cmk.gui.valuespec import CascadingDropdownChoice, DictionaryEntry
 from cmk.gui.i18n import _l, _u, _
-from cmk.gui.globals import html, request
+from cmk.gui.globals import html, request, transactions, user_errors
 from cmk.gui.type_defs import HTTPVariables, Icon
 from cmk.gui.page_menu import (
     PageMenu,
@@ -90,9 +91,10 @@ from cmk.gui.type_defs import (
 from cmk.gui.main_menu import mega_menu_registry
 
 from cmk.gui.utils import unique_default_name_suggestion
-from cmk.gui.utils.urls import makeuri, makeuri_contextless, make_confirm_link
+from cmk.gui.utils.urls import (makeuri, makeuri_contextless, make_confirm_link, urlencode,
+                                makeactionuri)
 
-SubPagesSpec = _Optional[List[Tuple[str, str, str]]]
+SubPagesSpec = List[Tuple[str, str, str]]
 
 #   .--Base----------------------------------------------------------------.
 #   |                        ____                                          |
@@ -153,12 +155,11 @@ class Base:
                   ) % cls.phrase("title"),
                  allow_empty=False,
              )),
-            (1.2, 'title',
-             TextUnicode(
-                 title=_('Title') + '<sup>*</sup>',
-                 size=50,
-                 allow_empty=False,
-             )),
+            (1.2, 'title', TextInput(
+                title=_('Title') + '<sup>*</sup>',
+                size=50,
+                allow_empty=False,
+            )),
             (1.3, 'description',
              TextAreaUnicode(
                  title=_('Description') + '<sup>*</sup>',
@@ -427,7 +428,7 @@ class PageRenderer(Base):
 
     @classmethod
     def requested_page(cls):
-        name = html.request.var(cls.ident_attr())
+        name = request.var(cls.ident_attr())
         cls.load()
         page = cls.find_page(name)
         if not page:
@@ -645,13 +646,17 @@ class Overridable(Base):
         return config.user.may('general.edit_foreign_%s' % self.type_name())
 
     def edit_url(self):
-        owner = ("&owner=%s" % self.owner()) if not self.is_mine() else ""
-        return "edit_%s.py?load_name=%s%s" % (self.type_name(), self.name(), owner)
+        http_vars: HTTPVariables = [("load_name", self.name())]
+        if not self.is_mine():
+            http_vars.append(("owner", self.owner()))
+
+        return makeuri_contextless(request, http_vars, filename="edit_%s.py" % self.type_name())
 
     def clone_url(self):
-        backurl = html.urlencode(makeuri(request, []))
-        return "edit_%s.py?load_user=%s&load_name=%s&mode=clone&back=%s" \
-                    % (self.type_name(), self.owner(), self.name(), backurl)
+        backurl = urlencode(makeuri(request, []))
+        return makeuri_contextless(request, [("owner", self.owner()), ("load_name", self.name()),
+                                             ("mode", "clone"), ("back", backurl)],
+                                   filename="edit_%s.py" % self.type_name())
 
     def delete_url(self):
         add_vars: HTTPVariables = [('_delete', self.name())]
@@ -664,7 +669,8 @@ class Overridable(Base):
             owned_by = ""
         message = _("Please confirm the deletion of \"%s\"%s.") % (self.title(), owned_by)
 
-        return make_confirm_link(url=html.makeactionuri(add_vars), message=message)
+        return make_confirm_link(url=makeactionuri(request, transactions, add_vars),
+                                 message=message)
 
     @classmethod
     def create_url(cls):
@@ -756,7 +762,7 @@ class Overridable(Base):
                 section=PermissionSectionGeneral,
                 name="edit_foreign_" + cls.type_name(),
                 title=_l("Edit foreign %s") % cls.phrase("title_plural"),
-                description=_("Allows to edit %s created by other users.") %
+                description=_("Allows to view and edit %s created by other users.") %
                 cls.phrase("title_plural"),
                 defaults=["admin"],
             ))
@@ -1027,9 +1033,9 @@ class Overridable(Base):
             html.show_message(message)
 
         # Deletion
-        delname = html.request.var("_delete")
-        if delname and html.check_transaction():
-            owner = UserId(html.request.get_unicode_input_mandatory('_owner', config.user.id))
+        delname = request.var("_delete")
+        if delname and transactions.check_transaction():
+            owner = UserId(request.get_unicode_input_mandatory('_owner', config.user.id))
             pagetype_title = cls.phrase("title")
 
             try:
@@ -1053,7 +1059,7 @@ class Overridable(Base):
             flash(_('Your %s has been deleted.') % pagetype_title)
             html.reload_whole_page(cls.list_url())
 
-        elif html.request.var("_bulk_delete") and html.check_transaction():
+        elif request.var("_bulk_delete") and transactions.check_transaction():
             cls._bulk_delete_after_confirm()
 
         my_instances, foreign_instances, builtin_instances = cls.get_instances()
@@ -1161,7 +1167,7 @@ class Overridable(Base):
     @classmethod
     def _bulk_delete_after_confirm(cls):
         to_delete: List[Tuple[UserId, str]] = []
-        for varname, _value in html.request.itervars(prefix="_c_"):
+        for varname, _value in request.itervars(prefix="_c_"):
             if html.get_checkbox(varname):
                 raw_user, name = varname[3:].split("+")
                 to_delete.append((UserId(raw_user), name))
@@ -1186,7 +1192,7 @@ class Overridable(Base):
     # Page for editing an existing page, or creating a new one
     @classmethod
     def page_edit(cls):
-        back_url = html.get_url_input("back", cls.list_url())
+        back_url = request.get_url_input("back", cls.list_url())
 
         cls.load()
         cls.need_overriding_permission("edit")
@@ -1195,48 +1201,31 @@ class Overridable(Base):
         # "create" -> create completely new page
         # "clone"  -> like new, but prefill form with values from existing page
         # "edit"   -> edit existing page
-        mode = html.request.get_ascii_input_mandatory('mode', 'edit')
+        mode = request.get_ascii_input_mandatory('mode', 'edit')
+        owner_id = UserId(request.get_unicode_input_mandatory("owner", config.user.id))
+        title = cls.phrase(mode)
         if mode == "create":
-            page_name = None
-            title = cls.phrase("create")
+            page_name = ""
             page_dict = {
                 "name": cls.default_name(),
                 "topic": cls.default_topic(),
             }
         else:
-            # Load existing page. visual from disk - and create a copy if 'load_user' is set
-            page_name = html.request.var("load_name")
+            page_name = request.get_str_input_mandatory("load_name")
+            page = cls.find_foreign_page(owner_id, page_name)
+            page_dict = page.internal_representation()
+            if page is None:
+                raise MKUserError(None, _("The requested %s does not exist") % cls.phrase("title"))
             if mode == "edit":
-                title = cls.phrase("edit")
-
-                owner_user_id = UserId(
-                    html.request.get_unicode_input_mandatory("owner", config.user.id))
-                if owner_user_id == config.user.id:
-                    page = cls.find_my_page(page_name)
-                else:
-                    page = cls.find_foreign_page(owner_user_id, page_name)
-
-                if page is None:
-                    raise MKUserError(None,
-                                      _("The requested %s does not exist") % cls.phrase("title"))
-
                 if not page.may_edit():
                     raise MKAuthException(
                         _("You do not have the permissions to edit this %s") % cls.phrase("title"))
-
-                # TODO FIXME: Looks like a hack
-                cls.remove_instance((owner_user_id, page_name))  # will be added later again
             else:  # clone
-                title = cls.phrase("clone")
-                load_user = html.request.get_unicode_input(
-                    "load_user")  # FIXME: Change varname to "owner"
-
-                try:
-                    page = cls.instance((load_user, page_name))
-                except KeyError:
-                    raise MKUserError(None,
-                                      _("The requested %s does not exist") % cls.phrase("title"))
-            page_dict = page.internal_representation()
+                page_dict = copy.deepcopy(page_dict)
+                page_dict["name"] += "_clone"
+                assert config.user.id is not None
+                page_dict["owner"] = str(config.user.id)
+                owner_id = config.user.id
 
         breadcrumb = cls.breadcrumb(title, mode)
         page_menu = make_edit_form_page_menu(
@@ -1246,23 +1235,18 @@ class Overridable(Base):
             type_title=cls.phrase("title"),
             type_title_plural=cls.phrase("title_plural"),
             ident_attr_name="name",
-            sub_pages=None,
+            sub_pages=[],
             form_name="edit",
             visualname=page_name,
         )
+
         html.header(title, breadcrumb, page_menu)
 
         parameters, keys_by_topic = cls._collect_parameters(mode)
 
         def _validate_clone(page_dict, varprefix):
-            owner_user_id = UserId(html.request.get_unicode_input_mandatory(
-                "owner", config.user.id))
             page_name = page_dict["name"]
-            if owner_user_id == config.user.id:
-                page = cls.find_my_page(page_name)
-            else:
-                page = cls.find_foreign_page(owner_user_id, page_name)
-            if page:
+            if cls.find_foreign_page(owner_id, page_name) and mode == "clone":
                 raise MKUserError(
                     varprefix + "_p_name",
                     _("You already have an element with the ID <b>%s</b>") % page_dict["name"])
@@ -1277,12 +1261,12 @@ class Overridable(Base):
         )
 
         varprefix = ""
-        if html.request.get_ascii_input("filled_in") == "edit" and html.check_transaction():
+        if request.get_ascii_input("filled_in") == "edit" and transactions.check_transaction():
             try:
                 new_page_dict = vs.from_html_vars(varprefix)
                 vs.validate_value(new_page_dict, varprefix)
             except MKUserError as e:
-                html.add_user_error(e.varname, e.message)
+                user_errors.add(e)
 
             # Take over keys from previous value that are specific to the page type
             # and not edited here.
@@ -1290,14 +1274,13 @@ class Overridable(Base):
                 page_dict.update(new_page_dict)
             else:
                 page_dict = new_page_dict
+                page_dict['owner'] = str(config.user.id)  # because is not in vs elements
 
-            owner = UserId(html.request.get_unicode_input_mandatory("owner", config.user.id))
-            page_dict["owner"] = owner
             new_page = cls(page_dict)
 
-            if not html.has_user_errors():
+            if not user_errors:
                 cls.add_page(new_page)
-                cls.save_user_instances(owner)
+                cls.save_user_instances(owner_id)
                 if mode == "create":
                     redirect_url = new_page.after_create_url() or back_url
                 else:
@@ -1324,7 +1307,7 @@ class Overridable(Base):
         html.help(vs.help())
         vs.render_input(varprefix, page_dict)
         # Should be ignored by hidden_fields, but I do not dare to change it there
-        html.request.del_var("filled_in")
+        request.del_var("filled_in")
         html.hidden_fields()
         html.end_form()
         html.footer()
@@ -1415,7 +1398,7 @@ def PublishTo(title: _Optional[str] = None,
 
 def make_edit_form_page_menu(breadcrumb: Breadcrumb, dropdown_name: str, mode: str, type_title: str,
                              type_title_plural, ident_attr_name: str, sub_pages: SubPagesSpec,
-                             form_name: str, visualname: _Optional[str]) -> PageMenu:
+                             form_name: str, visualname: str) -> PageMenu:
     return PageMenu(
         dropdowns=[
             PageMenuDropdown(
@@ -1503,9 +1486,6 @@ def _page_menu_entries_save(breadcrumb: Breadcrumb, sub_pages: SubPagesSpec, dro
         is_suggested=True,
     )
 
-    if not sub_pages:
-        return
-
     for nr, (title, _pagename, _icon) in enumerate(sub_pages):
         yield PageMenuEntry(
             title=title,
@@ -1515,18 +1495,13 @@ def _page_menu_entries_save(breadcrumb: Breadcrumb, sub_pages: SubPagesSpec, dro
 
 
 def _page_menu_entries_sub_pages(mode: str, sub_pages: SubPagesSpec, ident_attr_name: str,
-                                 visualname: _Optional[str]) -> Iterator[PageMenuEntry]:
+                                 visualname: str) -> Iterator[PageMenuEntry]:
     """Extra links to sub modules
 
     These are used for things to edit about this visual that are more complex to be done in one
     value spec."""
-    if not sub_pages:
-        return
-
     if mode != "edit":
         return
-
-    assert visualname is not None
 
     for title, pagename, icon in sub_pages:
         yield PageMenuEntry(
@@ -1638,10 +1613,10 @@ class OverridableContainer(Overridable, Container):
     # class by the URL variable page_type.
     @classmethod
     def ajax_add_element(cls):
-        page_type_name = html.request.get_ascii_input_mandatory("page_type")
-        page_name = html.request.get_ascii_input_mandatory("page_name")
-        element_type = html.request.get_ascii_input_mandatory("element_type")
-        create_info = json.loads(html.request.get_ascii_input_mandatory("create_info"))
+        page_type_name = request.get_ascii_input_mandatory("page_type")
+        page_name = request.get_ascii_input_mandatory("page_name")
+        element_type = request.get_ascii_input_mandatory("element_type")
+        create_info = json.loads(request.get_ascii_input_mandatory("create_info"))
 
         page_ty = page_types[page_type_name]
         target_page, need_sidebar_reload = page_ty.add_element_via_popup(
@@ -1650,7 +1625,7 @@ class OverridableContainer(Overridable, Container):
         if target_page:
             if not isinstance(target_page, str):
                 target_page = target_page.page_url()
-            html.write(target_page)
+            html.write_text(target_page)
         html.write_text("\n%s" % ("true" if need_sidebar_reload else "false"))
 
     # Default implementation for generic containers - used e.g. by GraphCollection

@@ -18,9 +18,10 @@ from cmk.gui.exceptions import (
     MKUnauthenticatedException,
     HTTPRedirect,
 )
-from cmk.gui.globals import html, request, g
+from cmk.gui.globals import request, response, g, theme
 from cmk.gui.i18n import _
-from cmk.gui.utils.urls import makeuri, makeuri_contextless
+from cmk.gui.utils.urls import makeuri, makeuri_contextless, urlencode, requested_file_name
+from cmk.gui.utils.language_cookie import set_language_cookie
 from cmk.gui.http import Response
 
 # TODO
@@ -53,12 +54,11 @@ def ensure_authentication(func: pages.PageHandlerFunc) -> Callable[[], Response]
             # Update the UI theme with the attribute configured by the user.
             # Returns None on first load
             assert config.user.id is not None
-            theme = cmk.gui.userdb.load_custom_attr(config.user.id, 'ui_theme', lambda x: x)
-            html.set_theme(theme)
+            theme.set(cmk.gui.userdb.load_custom_attr(config.user.id, 'ui_theme', lambda x: x))
 
             func()
 
-            return html.response
+            return response
 
     return _call_auth
 
@@ -66,13 +66,13 @@ def ensure_authentication(func: pages.PageHandlerFunc) -> Callable[[], Response]
 def plain_error() -> bool:
     """Webservice functions may decide to get a normal result code
     but a text with an error message in case of an error"""
-    return html.request.has_var("_plain_error") or html.myfile == "webapi"
+    return request.has_var("_plain_error") or requested_file_name(request) == "webapi"
 
 
 def fail_silently() -> bool:
     """Ajax-Functions want no HTML output in case of an error but
     just a plain server result code of 500"""
-    return html.request.has_var("_ajaxid")
+    return request.has_var("_ajaxid")
 
 
 def _ensure_general_access() -> None:
@@ -110,14 +110,15 @@ def _handle_not_authenticated() -> Response:
     # Redirect to the login-dialog with the current url as original target
     # Never render the login form directly when accessing urls like "index.py"
     # or "dashboard.py". This results in strange problems.
-    if html.myfile != 'login':
+    requested_file = requested_file_name(request)
+    if requested_file != 'login':
         post_login_url = makeuri(request, [])
-        if html.myfile != "index":
+        if requested_file != "index":
             # Ensure that users start with a navigation after they have logged in
             post_login_url = makeuri_contextless(request, [("start_url", post_login_url)],
                                                  filename="index.py")
         raise HTTPRedirect('%scheck_mk/login.py?_origtarget=%s' %
-                           (config.url_prefix(), html.urlencode(post_login_url)))
+                           (config.url_prefix(), urlencode(post_login_url)))
 
     # This either displays the login page or validates the information submitted
     # to the login form. After successful login a http redirect to the originally
@@ -126,7 +127,7 @@ def _handle_not_authenticated() -> Response:
     login_page.set_no_html_output(plain_error())
     login_page.handle_page()
 
-    return html.response
+    return response
 
 
 def load_all_plugins() -> None:
@@ -134,15 +135,15 @@ def load_all_plugins() -> None:
     # improves the performance for these requests.
     # TODO: CLEANUP: Move this to the pagehandlers if this concept works out.
     # werkzeug.wrappers.Request.script_root would be helpful here, but we don't have that yet.
-    only_modules = ["metrics"] if html.myfile == "ajax_graph" else None
+    only_modules = ["metrics"] if requested_file_name(request) == "ajax_graph" else None
     modules.load_all_plugins(only_modules=only_modules)
 
 
 def _localize_request() -> None:
     previous_language = cmk.gui.i18n.get_current_language()
-    user_language = html.request.get_ascii_input("lang", config.user.language)
+    user_language = request.get_ascii_input("lang", config.user.language)
 
-    html.set_language_cookie(user_language)
+    set_language_cookie(request, response, user_language)
     cmk.gui.i18n.localize(user_language)
 
     # All plugins might have to be reloaded due to a language change. Only trigger
@@ -159,4 +160,4 @@ def handle_unhandled_exception() -> Response:
         show_crash_link=getattr(g, "may_see_crash_reports", False),
     )
     # This needs to be cleaned up.
-    return html.response
+    return response

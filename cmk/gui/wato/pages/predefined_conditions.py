@@ -30,7 +30,7 @@ from cmk.gui.watolib.groups import load_contact_group_information
 from cmk.gui.watolib.predefined_conditions import PredefinedConditionStore
 from cmk.gui.plugins.wato import (
     WatoMode,
-    ConfigDomainGUI,
+    ConfigDomainCore,
     SimpleModeType,
     SimpleListMode,
     SimpleEditMode,
@@ -70,7 +70,7 @@ class PredefinedConditionModeType(SimpleModeType):
         return False
 
     def affected_config_domains(self):
-        return [ConfigDomainGUI]
+        return [ConfigDomainCore]
 
 
 @mode_registry.register
@@ -132,16 +132,17 @@ class ModePredefinedConditions(SimpleListMode):
         )
 
     def _show_entry_cells(self, table, ident, entry):
-        table.cell(_("Title"), html.render_text(entry["title"]))
+        table.cell(_("Title"), entry["title"])
 
         table.cell(_("Conditions"))
         html.open_ul(class_="conditions")
         html.open_li()
-        html.write("%s: %s" %
-                   (_("Folder"), Folder.folder(entry["conditions"]["host_folder"]).alias_path()))
+        html.write_text(
+            "%s: %s" %
+            (_("Folder"), Folder.folder(entry["conditions"]["host_folder"]).alias_path()))
         html.close_li()
         html.close_ul()
-        html.write(vs_conditions().value_to_text(entry["conditions"]))
+        html.write_text(vs_conditions().value_to_text(entry["conditions"]))
 
         table.cell(_("Editable by"))
         if entry["owned_by"] is None:

@@ -8,20 +8,13 @@ from pathlib import Path
 from typing import Final, Optional
 
 import cmk.utils.misc
-from cmk.utils.type_defs import (
-    AgentRawData,
-    AgentRawDataSection,
-    HostAddress,
-    HostName,
-    SourceType,
-)
+from cmk.utils.type_defs import AgentRawData, HostAddress, HostName, SourceType
 
+import cmk.base.config as config
 from cmk.core_helpers.agent import AgentHostSections, AgentParser
 from cmk.core_helpers.cache import SectionStore
 from cmk.core_helpers.controller import FetcherType
-from cmk.core_helpers.type_defs import Mode
-
-import cmk.base.config as config
+from cmk.core_helpers.type_defs import AgentRawDataSection
 
 from ._abstract import Source
 
@@ -43,7 +36,6 @@ class AgentSource(Source[AgentRawData, AgentHostSections]):
         hostname: HostName,
         ipaddress: Optional[HostAddress],
         *,
-        mode: Mode,
         source_type: SourceType,
         fetcher_type: FetcherType,
         description: str,
@@ -53,7 +45,6 @@ class AgentSource(Source[AgentRawData, AgentHostSections]):
         super().__init__(
             hostname,
             ipaddress,
-            mode=mode,
             source_type=source_type,
             fetcher_type=fetcher_type,
             description=description,

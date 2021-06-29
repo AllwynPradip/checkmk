@@ -23,7 +23,7 @@ from cmk.gui.utils import unique_default_name_suggestion
 from cmk.gui.watolib.notifications import load_notification_rules
 from cmk.gui.exceptions import MKUserError
 from cmk.gui.i18n import _
-from cmk.gui.globals import html
+from cmk.gui.globals import html, transactions, request
 from cmk.gui.valuespec import (
     ValueSpec,
     FixedValue,
@@ -31,8 +31,7 @@ from cmk.gui.valuespec import (
     Optional,
     Integer,
     FileUpload,
-    TextAscii,
-    TextUnicode,
+    TextInput,
     ListOf,
     Tuple,
     ListChoice,
@@ -122,11 +121,11 @@ class ModeTimeperiods(WatoMode):
         )
 
     def action(self) -> ActionResult:
-        delname = html.request.var("_delete")
+        delname = request.var("_delete")
         if not delname:
             return redirect(mode_url("timeperiods"))
 
-        if not html.check_transaction():
+        if not transactions.check_transaction():
             return redirect(mode_url("timeperiods"))
 
         if delname in watolib.timeperiods.builtin_timeperiods():
@@ -309,8 +308,8 @@ class ModeTimeperiods(WatoMode):
                 else:
                     self._action_buttons(name)
 
-                table.text_cell(_("Name"), name)
-                table.text_cell(_("Alias"), timeperiod_spec_alias(timeperiod))
+                table.cell(_("Name"), name)
+                table.cell(_("Alias"), timeperiod_spec_alias(timeperiod))
 
     def _action_buttons(self, name):
         edit_url = watolib.folder_preserving_link([
@@ -412,7 +411,7 @@ class ModeTimeperiodImportICal(WatoMode):
             raise MKUserError(varprefix, _('The file does not seem to be a valid iCalendar file.'))
 
     def action(self) -> ActionResult:
-        if not html.check_transaction():
+        if not transactions.check_transaction():
             return None
 
         vs_ical = self._vs_ical()
@@ -624,7 +623,7 @@ class ModeEditTimeperiod(WatoMode):
 
     def _from_vars(self):
         self._timeperiods = watolib.timeperiods.load_timeperiods()
-        self._name = html.request.var("edit")  # missing -> new group
+        self._name = request.var("edit")  # missing -> new group
         # TODO: Nuke the field below? It effectively hides facts about _name for mypy.
         self._new = self._name is None
 
@@ -632,8 +631,8 @@ class ModeEditTimeperiod(WatoMode):
             raise MKUserError("edit", _("Builtin timeperiods can not be modified"))
 
         if self._new:
-            clone_name = html.request.var("clone")
-            if html.request.var("mode") == "import_ical":
+            clone_name = request.var("clone")
+            if request.var("mode") == "import_ical":
                 self._timeperiod = {}
             elif clone_name:
                 self._name = clone_name
@@ -666,7 +665,7 @@ class ModeEditTimeperiod(WatoMode):
         if self._new:
             # Cannot use ID() here because old versions of the GUI allowed time periods to start
             # with numbers and so on. The ID() valuespec does not allow it.
-            name_element: ValueSpec = TextAscii(
+            name_element: ValueSpec = TextInput(
                 title=_("Internal ID"),
                 regex=r"^[-a-z0-9A-Z_]*$",
                 regex_error=_("Invalid timeperiod name. Only the characters a-z, A-Z, 0-9, "
@@ -683,7 +682,7 @@ class ModeEditTimeperiod(WatoMode):
             elements=[
                 ("name", name_element),
                 ("alias",
-                 TextUnicode(
+                 TextInput(
                      title=_("Alias"),
                      help=_("An alias or description of the timeperiod"),
                      allow_empty=False,
@@ -737,7 +736,7 @@ class ModeEditTimeperiod(WatoMode):
                 orientation="horizontal",
                 show_titles=False,
                 elements=[
-                    TextAscii(
+                    TextInput(
                         regex="^[-a-z0-9A-Z /]*$",
                         regex_error=_("This is not a valid Nagios timeperiod day specification."),
                         allow_empty=False,
@@ -808,7 +807,7 @@ class ModeEditTimeperiod(WatoMode):
         return False
 
     def action(self) -> ActionResult:
-        if not html.check_transaction():
+        if not transactions.check_transaction():
             return None
 
         vs = self._valuespec()  # returns a Dictionary object

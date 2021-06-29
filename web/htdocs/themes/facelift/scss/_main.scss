@@ -488,7 +488,7 @@ div.really {
 
 div.success {
   color: $primary-font-color;
-  background-color: $base-color;
+  background-color: $headline-color;
 }
 
 div.message {
@@ -923,8 +923,9 @@ div#hover_menu {
   }
 
   .graph_container {
+    display: block;
+    float: left;
     margin: 0 2px 2px 0;
-
     color: $graph-hover-popup-font-color;
     background-color: $graph-hover-popup-bg-color;
     border: $graph-hover-popup-border;
@@ -1259,47 +1260,6 @@ table.modifydowntimes > tbody > tr {
   }
 }
 
-div.vs_autocomplete {
-  height: 22px;
-
-  .error {
-    padding: 0.5em 2em;
-    margin: 0;
-  }
-}
-
-div.metricchoice div.vs_autocomplete .select2-dropdown--below {
-  top: -11px;
-}
-
-span.vs_autocomplete {
-  .select2-dropdown {
-    position: inherit;
-    border: none;
-  }
-
-  .select2-dropdown--below {
-    top: -7px;
-    border-radius: $theme-border-radius;
-  }
-
-  .select2-search--dropdown {
-    padding: 0;
-    margin: 0;
-  }
-
-  .select2-search__field {
-    height: 22px;
-    padding-left: 6px;
-    border-radius: 4px;
-  }
-
-  .select2-results__options {
-    border: 1px solid $button-bg-color-default;
-    border-radius: 4px;
-  }
-}
-
 div.vs_age.inline {
   display: inline-block;
 }
@@ -1499,7 +1459,7 @@ body.main.visible div.foldable .title {
 .hot body.main .popup_menu span,
 body.main .popup_menu .hot span {
   color: $hot-font-color;
-  background-color: $hot-bg-color;
+  background-color: $hot-bg-color !important;
   border-color: $color-nuance-16;
 }
 
@@ -1550,9 +1510,13 @@ tr.hidden {
     width: $simplebar-scrollbar-width;
   }
 
-  &.simplebar-horizontal div.simplebar-scrollbar {
-    top: 3px;
-    height: $simplebar-scrollbar-width;
+  &.simplebar-horizontal {
+    height: $spacing-double;
+
+    div.simplebar-scrollbar {
+      top: 3px;
+      height: $simplebar-scrollbar-width;
+    }
   }
 }
 
@@ -1564,4 +1528,9 @@ div#row_info {
   padding-bottom: $spacing-half;
   font-weight: $font-weight-default;
   text-align: right;
+}
+
+/* Inside a foldable, we need a different color here in order to see a difference w.r.t. the title*/
+div.foldable div.success {
+  background-color: $base-color;
 }

@@ -5,8 +5,8 @@
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import json
-import pytest  # type: ignore[import]
-from testlib import SpecialAgent  # type: ignore[import]
+import pytest
+from testlib import SpecialAgent
 
 from cmk.base.sources.programs import SpecialAgentConfiguration
 

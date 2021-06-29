@@ -8,7 +8,7 @@
 import os
 import sys
 import traceback
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Mapping, Optional, Union
 from pathlib import Path
 
 import cmk.utils.debug
@@ -20,6 +20,7 @@ from cmk.utils.type_defs import (
     CheckPluginName,
     CheckPluginNameStr,
     HostName,
+    SectionName,
     ServiceName,
 )
 
@@ -47,12 +48,34 @@ class CMKBaseCrashReport(crash_reporting.ABCCrashReport):
         })
 
 
+def create_section_crash_dump(
+    *,
+    operation: str,
+    section_name: SectionName,
+    section_content: object,
+) -> str:
+    """Create a crash dump from an exception raised in a parse or host label function"""
+
+    text = f"{operation.title()} of section {section_name} failed"
+    try:
+        crash = SectionCrashReport.from_exception_and_context(
+            section_name=section_name,
+            section_content=section_content,
+        )
+        CrashReportStore().save(crash)
+        return f"{text} - please submit a crash report! (Crash-ID: {crash.ident_to_text()})"
+    except Exception:
+        if cmk.utils.debug.enabled():
+            raise
+        return f"{text} - failed to create a crash report: {traceback.format_exc()}"
+
+
 def create_check_crash_dump(
     *,
     host_name: HostName,
     service_name: ServiceName,
     plugin_name: Union[CheckPluginNameStr, CheckPluginName],
-    plugin_kwargs: Dict[str, Any],
+    plugin_kwargs: Mapping[str, Any],
     is_manual: bool,
 ) -> str:
     """Create a crash dump from an exception occured during check execution
@@ -81,6 +104,25 @@ def create_check_crash_dump(
 
 
 @crash_reporting.crash_report_registry.register
+class SectionCrashReport(crash_reporting.ABCCrashReport):
+    @classmethod
+    def type(cls) -> str:
+        return "section"
+
+    @classmethod
+    def from_exception_and_context(
+        cls,
+        *,
+        section_name: SectionName,
+        section_content: object,
+    ) -> crash_reporting.ABCCrashReport:
+        return cls.from_exception(details={
+            "section_name": str(section_name),
+            "section_content": section_content,
+        },)
+
+
+@crash_reporting.crash_report_registry.register
 class CheckCrashReport(crash_reporting.ABCCrashReport):
     @classmethod
     def type(cls) -> str:
@@ -91,7 +133,7 @@ class CheckCrashReport(crash_reporting.ABCCrashReport):
         cls,
         hostname: HostName,
         check_plugin_name: str,
-        check_plugin_kwargs: Dict[str, Any],
+        check_plugin_kwargs: Mapping[str, Any],
         is_manual_check: bool,
         description: ServiceName,
         text: str,

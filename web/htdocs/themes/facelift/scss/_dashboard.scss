@@ -192,6 +192,11 @@ div.dashlet > div.title span {
   padding-left: 0; /* left align with titles of contained views */
 }
 
+/* Inside a dashlet, we need a different color here in order to see a difference w.r.t. the title*/
+div.dashlet div.success {
+  background-color: $base-color;
+}
+
 /* Overview dashlet is not selectable TODO: Check if this style can be dropped */
 table.dashlet_overview h2 {
   margin: 8px 0;
@@ -234,14 +239,6 @@ body.main.dashlet {
 
     tr.data {
       transition: 0.15s ease-in-out;
-    }
-  }
-
-  /* Adapted styling of views in dashlets */
-  tr.data {
-    > td {
-      padding-top: 2px;
-      padding-bottom: 2px;
     }
   }
 
@@ -684,7 +681,7 @@ div#dashboard.grid {
 
 .dashlet.pnpgraph .dashlet_inner {
   color: $primary-font-color;
-  text-align: center;
+  text-align: left;
   background-color: $dashlet-inner-bg-color;
 }
 
@@ -712,7 +709,7 @@ svg {
     }
   }
   .status_background {
-    opacity: 0.3;
+    opacity: 0.6;
     fill: $dashlet-inner-bg-color;
   }
 
@@ -774,6 +771,13 @@ div.dashlet.nodata {
   > div.dashlet_inner div.msg {
     padding: 10px;
   }
+}
+
+@mixin default-hexagon {
+  fill: $hexagon-default-color;
+  fill-opacity: $hexagon-default-fill-opacity;
+  stroke: $hexagon-default-stroke-color;
+  stroke-opacity: $hexagon-default-stroke-opacity;
 }
 
 div.site_overview,
@@ -861,10 +865,7 @@ div.servicestats {
     }
 
     &.ok {
-      fill: $hexagon-ok-color;
-      fill-opacity: $hexagon-ok-fill-opacity;
-      stroke: $hexagon-ok-stroke-color;
-      stroke-opacity: $hexagon-ok-stroke-opacity;
+      @include default-hexagon;
     }
   }
 
@@ -901,15 +902,17 @@ div.hoststats,
 div.servicestats {
   height: 100%;
 
-  g.hexagons {
-    transform: translate(60px, 95px);
-  }
+  path.hexagon {
+    &.ok {
+      fill: $success;
+      fill-opacity: 0.06;
+      stroke: $success;
+      stroke-opacity: 0.9;
+    }
 
-  path.hexagon.ok {
-    fill: $success;
-    fill-opacity: 0.06;
-    stroke: $success;
-    stroke-opacity: 0.9;
+    &.empty {
+      @include default-hexagon;
+    }
   }
 
   div.stats_table {

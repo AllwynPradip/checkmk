@@ -14,12 +14,17 @@ b) A edit mode which can be used to create and edit an object.
 
 import abc
 import copy
-from typing import Optional, List, Type
+from typing import (
+    List,
+    Optional,
+    Type,
+    Union,
+)
 
 from cmk.gui.table import table_element, Table
 import cmk.gui.watolib as watolib
 import cmk.gui.forms as forms
-from cmk.gui.globals import html, request
+from cmk.gui.globals import html, request, transactions
 from cmk.gui.i18n import _
 from cmk.gui.exceptions import MKUserError
 from cmk.gui.plugins.wato.utils.base_modes import (WatoMode, ActionResult, redirect, mode_url)
@@ -28,11 +33,12 @@ from cmk.gui.valuespec import (
     Checkbox,
     Dictionary,
     DocumentationURL,
+    DualListChoice,
     FixedValue,
     ID,
     RuleComment,
     SetupSiteChoice,
-    TextUnicode,
+    TextInput,
 )
 from cmk.gui.breadcrumb import Breadcrumb
 from cmk.gui.config import SiteId
@@ -68,7 +74,7 @@ class SimpleModeType(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError()
 
-    def site_valuespec(self) -> SetupSiteChoice:
+    def site_valuespec(self) -> Union[DualListChoice, SetupSiteChoice]:
         return SetupSiteChoice()
 
     @abc.abstractmethod
@@ -105,6 +111,8 @@ class SimpleModeType(metaclass=abc.ABCMeta):
         the objects of this site are site specific it can be used to decide which sites
         are affected by a change to this object."""
         if self.is_site_specific():
+            if isinstance(entry["site"], list):
+                return entry["site"]
             return [entry["site"]]
         return None
 
@@ -199,22 +207,22 @@ class SimpleListMode(_SimpleWatoModeBase):
         return _("Add %s") % self._mode_type.name_singular()
 
     def action(self) -> ActionResult:
-        if not html.transaction_valid():
+        if not transactions.transaction_valid():
             return None
 
-        action_var = html.request.get_str_input("_action")
+        action_var = request.get_str_input("_action")
         if action_var is None:
             return None
 
         if action_var != "delete":
             return self._handle_custom_action(action_var)
 
-        if not html.check_transaction():
+        if not transactions.check_transaction():
             return redirect(mode_url(self._mode_type.list_mode_name()))
 
         entries = self._store.load_for_modification()
 
-        ident = html.request.get_ascii_input("_delete")
+        ident = request.get_ascii_input("_delete")
         if ident not in entries:
             raise MKUserError("_delete",
                               _("This %s does not exist.") % self._mode_type.name_singular())
@@ -297,7 +305,7 @@ class SimpleEditMode(_SimpleWatoModeBase, metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     def _from_vars(self):
-        ident = html.request.get_ascii_input("ident")
+        ident = request.get_ascii_input("ident")
         if ident is not None:
             try:
                 entry = self._store.filter_editable_entries(self._store.load_for_reading())[ident]
@@ -310,7 +318,7 @@ class SimpleEditMode(_SimpleWatoModeBase, metaclass=abc.ABCMeta):
             self._entry = entry
             return
 
-        clone = html.request.get_ascii_input("clone")
+        clone = request.get_ascii_input("clone")
         if clone is not None:
             try:
                 entry = self._store.filter_editable_entries(self._store.load_for_reading())[clone]
@@ -401,7 +409,7 @@ class SimpleEditMode(_SimpleWatoModeBase, metaclass=abc.ABCMeta):
 
         elements = ident_attr + [
             ("title",
-             TextUnicode(
+             TextInput(
                  title=_("Title"),
                  help=_("The title of the %s. It will be used as display name.") %
                  (self._mode_type.name_singular()),
@@ -424,7 +432,7 @@ class SimpleEditMode(_SimpleWatoModeBase, metaclass=abc.ABCMeta):
         return []
 
     def action(self) -> ActionResult:
-        if not html.transaction_valid():
+        if not transactions.transaction_valid():
             return redirect(mode_url(self._mode_type.list_mode_name()))
 
         vs = self.valuespec()

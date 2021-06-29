@@ -6,11 +6,11 @@
 import json
 
 
-def test_openapi_cluster_host(wsgi_app, with_automation_user, suppress_automation_calls):
+def test_openapi_cluster_host(wsgi_app, with_automation_user, suppress_automation_calls, with_host):
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
 
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     wsgi_app.call_method(
         'post',
@@ -43,7 +43,25 @@ def test_openapi_cluster_host(wsgi_app, with_automation_user, suppress_automatio
     wsgi_app.call_method(
         'put',
         base + "/objects/host_config/bazfoo/properties/nodes",
-        params='{"nodes": []}',
+        params='{"nodes": ["not_existing"]}',
+        status=400,
+        headers={'If-Match': resp.headers['ETag']},
+        content_type='application/json',
+    )
+
+    wsgi_app.call_method(
+        'put',
+        base + "/objects/host_config/bazfoo/properties/nodes",
+        params='{"nodes": ["example.com", "bazfoo"]}',
+        status=400,
+        headers={'If-Match': resp.headers['ETag']},
+        content_type='application/json',
+    )
+
+    wsgi_app.call_method(
+        'put',
+        base + "/objects/host_config/bazfoo/properties/nodes",
+        params='{"nodes": ["example.com"]}',
         status=200,
         headers={'If-Match': resp.headers['ETag']},
         content_type='application/json',
@@ -54,14 +72,14 @@ def test_openapi_cluster_host(wsgi_app, with_automation_user, suppress_automatio
         base + "/objects/host_config/bazfoo",
         status=200,
     )
-    assert resp.json['extensions']['cluster_nodes'] == []
+    assert resp.json['extensions']['cluster_nodes'] == ['example.com']
 
 
 def test_openapi_hosts(wsgi_app, with_automation_user, suppress_automation_calls):
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
 
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     resp = wsgi_app.call_method(
         'post',
@@ -74,14 +92,12 @@ def test_openapi_hosts(wsgi_app, with_automation_user, suppress_automation_calls
     resp = wsgi_app.follow_link(
         resp,
         'self',
-        base=base,
         status=200,
     )
 
     resp = wsgi_app.follow_link(
         resp,
         '.../update',
-        base=base,
         status=200,
         params='{"attributes": {"ipaddress": "127.0.0.1"}}',
         headers={'If-Match': resp.headers['ETag']},
@@ -92,7 +108,6 @@ def test_openapi_hosts(wsgi_app, with_automation_user, suppress_automation_calls
     resp = wsgi_app.follow_link(
         resp,
         '.../update',
-        base=base,
         status=200,
         params='{"update_attributes": {"alias": "bar"}}',
         headers={'If-Match': resp.headers['ETag']},
@@ -103,7 +118,6 @@ def test_openapi_hosts(wsgi_app, with_automation_user, suppress_automation_calls
     resp = wsgi_app.follow_link(
         resp,
         '.../update',
-        base=base,
         status=200,
         params='{"remove_attributes": ["alias"]}',
         headers={'If-Match': resp.headers['ETag']},
@@ -115,7 +129,6 @@ def test_openapi_hosts(wsgi_app, with_automation_user, suppress_automation_calls
     wsgi_app.follow_link(
         resp,
         '.../update',
-        base=base,
         status=400,
         params='{"attributes": {"foobaz": "bar"}}',
         headers={'If-Match': resp.headers['ETag']},
@@ -125,18 +138,20 @@ def test_openapi_hosts(wsgi_app, with_automation_user, suppress_automation_calls
     wsgi_app.follow_link(
         resp,
         '.../delete',
-        base=base,
         status=204,
-        headers={'If-Match': resp.headers['ETag']},
         content_type='application/json',
     )
 
 
-def test_openapi_bulk_hosts(wsgi_app, with_automation_user, suppress_automation_calls):
+def test_openapi_bulk_hosts(
+    wsgi_app,
+    with_automation_user,
+    suppress_automation_calls,
+):
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
 
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     resp = wsgi_app.call_method(
         'post',
@@ -154,7 +169,8 @@ def test_openapi_bulk_hosts(wsgi_app, with_automation_user, suppress_automation_
                     "host_name": "sample",
                     "folder": "/",
                     "attributes": {
-                        "ipaddress": "127.0.0.2"
+                        "ipaddress": "127.0.0.2",
+                        "site": "NO_SITE",
                     }
                 },
             ]
@@ -171,7 +187,8 @@ def test_openapi_bulk_hosts(wsgi_app, with_automation_user, suppress_automation_
             "entries": [{
                 "host_name": "foobar",
                 "attributes": {
-                    "ipaddress": "192.168.1.1"
+                    "ipaddress": "192.168.1.1",
+                    "tag_address_family": "ip-v4-only",
                 },
             }],
         }),
@@ -201,11 +218,31 @@ def test_openapi_bulk_hosts(wsgi_app, with_automation_user, suppress_automation_
         content_type='application/json',
     )
 
-    _resp = wsgi_app.call_method('delete',
+    _resp = wsgi_app.call_method('post',
                                  base + "/domain-types/host_config/actions/bulk-delete/invoke",
                                  params=json.dumps({"entries": ["foobar", "sample"]}),
                                  status=204,
                                  content_type='application/json')
+
+
+def test_openapi_bulk_simple(wsgi_app, with_automation_user, suppress_automation_calls):
+    username, secret = with_automation_user
+    wsgi_app.set_authorization(('Bearer', username + " " + secret))
+
+    base = '/NO_SITE/check_mk/api/1.0'
+
+    wsgi_app.call_method(
+        'post',
+        base + "/domain-types/host_config/actions/bulk-create/invoke",
+        params=json.dumps(
+            {'entries': [{
+                'host_name': 'example.com',
+                'folder': '/',
+                'attributes': {}
+            }]}),
+        status=200,
+        content_type='application/json',
+    )
 
 
 def test_openapi_host_rename(
@@ -218,7 +255,7 @@ def test_openapi_host_rename(
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
 
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     wsgi_app.call_method(
         'post',
@@ -260,7 +297,7 @@ def test_openapi_host_rename_error_on_not_existing_host(
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
 
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     wsgi_app.call_method(
         'post',
@@ -296,7 +333,7 @@ def test_openapi_host_rename_on_invalid_hostname(
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
 
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     wsgi_app.call_method(
         'post',
@@ -330,7 +367,7 @@ def test_openapi_host_rename_with_pending_activate_changes(
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
 
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     wsgi_app.call_method(
         'post',
@@ -364,7 +401,7 @@ def test_openapi_host_move(
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
 
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     wsgi_app.call_method(
         'post',
@@ -400,7 +437,7 @@ def test_openapi_host_move_to_non_valid_folder(
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
 
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     wsgi_app.call_method(
         'post',
@@ -436,7 +473,7 @@ def test_openapi_host_move_of_non_existing_host(
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
 
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     _resp = wsgi_app.call_method(
         'post',
@@ -444,4 +481,40 @@ def test_openapi_host_move_of_non_existing_host(
         params='{"target_folder": "/"}',
         content_type='application/json',
         status=404,
+    )
+
+
+def test_openapi_host_update_invalid(
+    wsgi_app,
+    with_automation_user,
+    suppress_automation_calls,
+):
+    username, secret = with_automation_user
+    wsgi_app.set_authorization(('Bearer', username + " " + secret))
+
+    base = '/NO_SITE/check_mk/api/1.0'
+
+    resp = wsgi_app.call_method(
+        'post',
+        base + "/domain-types/host_config/collections/all",
+        params='{"host_name": "example.com", "folder": "/"}',
+        status=200,
+        content_type='application/json',
+    )
+
+    wsgi_app.follow_link(
+        resp,
+        '.../update',
+        status=400,
+        params=json.dumps({
+            'attributes': {
+                'ipaddress': '192.168.0.123'
+            },
+            'update_attributes': {
+                'ipaddress': '192.168.0.123'
+            },
+            'remove_attributes': ['tag_foobar']
+        }),
+        headers={'If-Match': resp.headers['ETag']},
+        content_type='application/json',
     )

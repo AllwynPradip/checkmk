@@ -12,7 +12,7 @@ from typing import NamedTuple, List, Optional, Union
 import cmk.gui.config as config
 import cmk.gui.notify as notify
 from cmk.gui.exceptions import MKAuthException
-from cmk.gui.globals import html
+from cmk.gui.globals import html, request, response, output_funnel
 from cmk.gui.htmllib import HTML
 from cmk.gui.i18n import _, ungettext
 from cmk.gui.main_menu import (
@@ -95,7 +95,7 @@ class MainMenuRenderer:
         return items
 
     def _get_mega_menu_content(self, menu_item: MainMenuItem) -> str:
-        with html.plugged():
+        with output_funnel.plugged():
             menu = mega_menu_registry[menu_item.name]
             html.open_div(id_="popup_menu_%s" % menu_item.name,
                           class_=[
@@ -105,19 +105,19 @@ class MainMenuRenderer:
                           ])
             MegaMenuRenderer().show(menu)
             html.close_div()
-            return html.drain()
+            return output_funnel.drain()
 
 
 @register("sidebar_message_read")
 def ajax_message_read():
-    html.set_output_format("json")
+    response.set_content_type("application/json")
     try:
-        notify.delete_gui_message(html.request.var('id'))
-        html.write("OK")
+        notify.delete_gui_message(request.var('id'))
+        html.write_text("OK")
     except Exception:
         if config.debug:
             raise
-        html.write("ERROR")
+        html.write_text("ERROR")
 
 
 @page_registry.register_page("ajax_sidebar_get_messages")
@@ -189,7 +189,6 @@ class MegaMenuRenderer:
             if not topic.items:
                 continue
             self._show_topic(topic, menu.name)
-        html.div(None, class_=["topic", "sentinel"])
         html.close_div()
         html.close_div()
         html.javascript(hide_entries_js)
@@ -243,7 +242,7 @@ class MegaMenuRenderer:
             onclick="cmk.popup_menu.close_popup()",
         )
         if config.user.get_attribute("icons_per_item"):
-            html.icon(item.icon or "trans")
+            html.icon(item.icon or "dash")
         self._show_item_title(item)
         html.close_a()
         html.close_li()

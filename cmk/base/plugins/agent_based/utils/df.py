@@ -16,6 +16,8 @@ from typing import (
     Sequence,
     Tuple,
     Union,
+    NamedTuple,
+    List,
 )
 import fnmatch
 from ..agent_based_api.v1.type_defs import CheckResult
@@ -27,6 +29,16 @@ from ..agent_based_api.v1 import (
     State,
 )
 from .size_trend import size_trend
+
+DfBlock = NamedTuple("DfBlock", [
+    ("device", str),
+    ("fs_type", Optional[str]),
+    ("size_mb", float),
+    ("avail_mb", float),
+    ("reserved_mb", float),
+    ("mountpoint", str),
+    ("uuid", Optional[str]),
+])
 
 FSBlock = Tuple[str, float, float, float]
 FSBlocks = Sequence[FSBlock]
@@ -51,7 +63,7 @@ def savefloat(raw: Any) -> float:
         return 0.
 
 
-def ungrouped_mountpoints_and_groups(
+def _ungrouped_mountpoints_and_groups(
     mount_points: Dict[str, Dict],
     group_patterns: Mapping[str, Tuple[Sequence[str], Sequence[str]]],
 ) -> Tuple[Set[str], Dict[str, Set[str]]]:
@@ -143,10 +155,8 @@ def get_filesystem_levels(size_gb: float, params: Mapping[str, Any]) -> Dict[str
 
         # Make sure, levels do never get too low due to magic factor
         lowest_warning_level, lowest_critical_level = levels["levels_low"]
-        if warn_scaled < lowest_warning_level:
-            warn_scaled = lowest_warning_level
-        if crit_scaled < lowest_critical_level:
-            crit_scaled = lowest_critical_level
+        warn_scaled = max(warn_scaled, lowest_warning_level)
+        crit_scaled = max(crit_scaled, lowest_critical_level)
 
     else:
         if not isinstance(warn, float):
@@ -301,6 +311,25 @@ def _check_inodes(
         yield Result(state=inode_result.state, summary=inodes_info)
     else:
         yield Result(state=inode_result.state, notice=inodes_info)
+
+
+def df_discovery(params, mplist):
+    group_patterns: Dict[str, Tuple[List[str], List[str]]] = {}
+    for groups in params:
+        for group in groups:
+            grouping_entry = group_patterns.setdefault(group['group_name'], ([], []))
+            grouping_entry[0].extend(group['patterns_include'])
+            grouping_entry[1].extend(group['patterns_exclude'])
+
+    ungrouped_mountpoints, groups = _ungrouped_mountpoints_and_groups(mplist, group_patterns)
+
+    ungrouped: List[Tuple[str, Dict[str,
+                                    Tuple[List[str],
+                                          List[str]]]]] = [(mp, {}) for mp in ungrouped_mountpoints]
+    grouped: List[Tuple[str, Dict[str, Tuple[List[str], List[str]]]]] = [(group, {
+        "patterns": group_patterns[group]
+    }) for group in groups]
+    return ungrouped + grouped
 
 
 def df_check_filesystem_single(

@@ -4,9 +4,9 @@
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-import pytest  # type: ignore[import]
+import pytest
 
-from cmk.gui.plugins.wato.datasource_programs import _special_agents_kubernetes_transform
+from cmk.gui.plugins.wato.datasource_programs import _special_agents_kubernetes_transform, _special_agents_innovaphone_transform
 
 
 @pytest.mark.parametrize('parameters, expected_result', [
@@ -73,3 +73,15 @@ from cmk.gui.plugins.wato.datasource_programs import _special_agents_kubernetes_
 ])
 def test__special_agents_kubernetes_transform(parameters, expected_result):
     assert _special_agents_kubernetes_transform(parameters) == expected_result
+
+
+@pytest.mark.parametrize('parameters, expected_result', [
+    (('USER123', 'PasswordABC'), {
+        'auth_basic': {
+            'password': ('password', 'PasswordABC'),
+            'username': 'USER123'
+        },
+    }),
+])
+def test__special_agents_innovaphone_transform(parameters, expected_result):
+    assert _special_agents_innovaphone_transform(parameters) == expected_result

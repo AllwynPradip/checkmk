@@ -11,9 +11,9 @@ YAPF := $(PIPENV) run yapf
 THREE_TO_TWO := $(PIPENV) run 3to2
 BANDIT := $(PIPENV) run bandit
 FIND_INVALID_TEST_FILES := $(SCRIPTS)/find-invalid-autogen-files
-MYPY := $(SCRIPTS)/run-mypy
 ADDITIONAL_MYPY_ARGS :=
-GCC_TOOLCHAIN := /opt/gcc-10.1.0
+# TODO: Remove version duplication, see buildscripts/infrastructure/build-nodes/scripts/install-gnu-toolchain.sh
+GCC_TOOLCHAIN := /opt/gcc-11.1.0
 
 # Since the unit tests (that are written for Python 3) are executed with Python
 # 2.6 and 2.7, we need to convert them, just like it is done for the agent
@@ -26,7 +26,9 @@ SHELL_FILES := \
 	agents/check_mk_agent.linux \
 	agents/check_mk_caching_agent.linux
 
-PYTHON_VERSIONS := 2.6 2.7 3.3 3.4 3.5 3.6 3.7 3.8
+# Due to https://github.com/pypa/pypi-support/issues/978, we need to disable Plugin tests for py2.6
+# until we have a feasible solution or we drop the support for 2.6 completly.
+PYTHON_VERSIONS := 2.7 3.3 3.4 3.5 3.6 3.7 3.8
 
  # Optionally forward the job result to a result file when executed via CI
 REDIRECT =
@@ -38,7 +40,7 @@ REDIRECT = \#
 CPPCHECK = cppcheck
 endif
 
-.PHONY: clean format-shell help prepare-node-modules \
+.PHONY: clean format-shell help prepare-node-modules bandit.ini \
 	$(foreach VERS,$(PYTHON_VERSIONS),test-agent-plugin-unit-py$(VERS)-docker) \
 	test-bandit test-composition test-composition-docker test-composition-docker-debug \
 	test-docker test-format-python test-format-python-docker test-format-shell \
@@ -182,7 +184,7 @@ test-format-shell:
 	docker run --rm -v "$(realpath ..):/sh" -w /sh peterdavehello/shfmt shfmt -d -i 4 -ci $(SHELL_FILES)
 
 test-format-js:
-	cd ..; scripts/run-prettier --check --no-color --loglevel warn "web/htdocs/js/**/*.js"
+	cd ..; scripts/run-prettier --check --no-color --loglevel warn "{enterprise/web,web}/htdocs/js/**/*.js"
 
 test-format-js-docker:
 	../scripts/run-in-docker.sh make --quiet test-format-js
@@ -206,11 +208,15 @@ test-integration-docker:
 	$(PIPENV) run scripts/run-dockerized.py "test-integration"
 
 test-mypy:
-	$(FIND_PYTHON_FILES) | \
+	PYTHON_FILES=$$($(FIND_PYTHON_FILES) | \
 	`: filter out plugins, they are not real modules` \
 	grep -v $$(realpath '../checks') | \
 	grep -v $$(realpath '../inventory') | \
-	xargs $(MYPY) $(ADDITIONAL_MYPY_ARGS)
+	`: files are only needed for pylint to understand the module hierarchy` \
+	grep -v $$(realpath '../enterprise/cmk/__init__.py') | \
+	grep -v $$(realpath '../enterprise/cmk/base/__init__.py') \
+	) ; \
+	cd .. ; scripts/run-mypy $(MYPY_ADDOPTS) $(ADDITIONAL_MYPY_ARGS) $$PYTHON_FILES
 
 test-mypy-raw:
 	$(MAKE) test-mypy ADDITIONAL_MYPY_ARGS="--config-file=$(realpath ../mypy-raw.ini)"

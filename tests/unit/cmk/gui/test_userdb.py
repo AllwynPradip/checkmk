@@ -6,6 +6,7 @@
 
 import time
 import pytest
+import os
 from pathlib import Path
 from dataclasses import asdict
 
@@ -362,10 +363,14 @@ def test_cleanup_old_sessions_too_many():
             started_at=int(time.time()) - (86400 * 10),
             last_activity=int(time.time()) - (86400 * 5) + num,
             flashes=[],
-        ) for num in range(20)
+        ) for num in range(21)
     }
 
-    assert "keep_20" not in list(userdb._cleanup_old_sessions(sessions).keys())
+    assert sorted([
+        'keep_1', 'keep_2', 'keep_3', 'keep_4', 'keep_5', 'keep_6', 'keep_7', 'keep_8', 'keep_9',
+        'keep_10', 'keep_11', 'keep_12', 'keep_13', 'keep_14', 'keep_15', 'keep_16', 'keep_17',
+        'keep_18', 'keep_19', 'keep_20'
+    ]) == sorted(userdb._cleanup_old_sessions(sessions).keys())
 
 
 def test_create_session_id_is_correct_type():
@@ -422,7 +427,7 @@ def test_user_attribute_sync_plugins(monkeypatch):
         'show_in_table': False,
         'title': u'VIP',
         'topic': 'ident',
-        'type': 'TextAscii',
+        'type': 'TextInput',
         'user_editable': True
     }])
 
@@ -597,3 +602,44 @@ def test_load_custom_attr_convert(user_id):
         f.write("xyz\n")
     assert userdb.load_custom_attr(user_id, "a", conv_func=lambda x: "a"
                                    if x == "xyz" else "b") == "a"
+
+
+def test_cleanup_user_profiles_keep_recently_updated(user_id):
+    (profile := Path(config.config_dir, "profile")).mkdir()
+    (profile / "bla.mk").touch()
+    userdb.UserProfileCleanupBackgroundJob()._do_cleanup()
+    assert profile.exists()
+
+
+def test_cleanup_user_profiles_remove_empty(user_id):
+    (profile := Path(config.config_dir, "profile")).mkdir()
+    userdb.UserProfileCleanupBackgroundJob()._do_cleanup()
+    assert not profile.exists()
+
+
+def test_cleanup_user_profiles_remove_abandoned(user_id):
+    (profile := Path(config.config_dir, "profile")).mkdir()
+    (bla := profile / "bla.mk").touch()
+    with on_time('2018-04-15 16:50', 'CET'):
+        os.utime(bla, (time.time(), time.time()))
+    userdb.UserProfileCleanupBackgroundJob()._do_cleanup()
+    assert not profile.exists()
+
+
+def test_cleanup_user_profiles_keep_active_profile(user_id):
+    assert Path(config.config_dir, user_id).exists()
+    userdb.UserProfileCleanupBackgroundJob()._do_cleanup()
+    assert Path(config.config_dir, user_id).exists()
+
+
+def test_cleanup_user_profiles_keep_active_profile_old(user_id):
+    profile_dir = Path(config.config_dir, user_id)
+
+    assert profile_dir.exists()
+
+    with on_time('2018-04-15 16:50', 'CET'):
+        for file_path in profile_dir.glob("*.mk"):
+            os.utime(file_path, (time.time(), time.time()))
+
+    userdb.UserProfileCleanupBackgroundJob()._do_cleanup()
+    assert Path(config.config_dir, user_id).exists()

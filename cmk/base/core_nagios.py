@@ -34,10 +34,10 @@ from cmk.utils.type_defs import (
     Item,
     ServicegroupName,
     ServiceName,
-    ConfigSerial,
 )
 
-from cmk.core_helpers.type_defs import Mode
+import cmk.core_helpers.paths
+from cmk.core_helpers.paths import ConfigSerial
 
 import cmk.base.api.agent_based.register as agent_based_register
 import cmk.base.utils
@@ -399,7 +399,7 @@ def _create_nagios_servicedefs(cfg: NagiosConfig, config_cache: ConfigCache, hos
             has_perfdata = act_info.get('has_perfdata', False)
 
             # Make hostname available as global variable in argument functions
-            with plugin_contexts.current_host(hostname, write_state=False):
+            with plugin_contexts.current_host(hostname):
 
                 description = config.active_check_service_description(hostname, acttype, params)
 
@@ -943,7 +943,7 @@ class HostCheckStore:
     """Caring about persistence of the precompiled host check files"""
     @staticmethod
     def host_check_file_path(serial: ConfigSerial, hostname: HostName) -> Path:
-        return cmk.utils.paths.make_helper_config_path(serial) / "host_checks" / hostname
+        return cmk.core_helpers.paths.make_helper_config_path(serial) / "host_checks" / hostname
 
     @staticmethod
     def host_check_source_file_path(serial: ConfigSerial, hostname: HostName) -> Path:
@@ -1012,6 +1012,27 @@ def _dump_precompiled_hostcheck(config_cache: ConfigCache,
     (needed_legacy_check_plugin_names, needed_agent_based_check_plugin_names,
      needed_agent_based_inventory_plugin_names) = _get_needed_plugin_names(host_config)
 
+    if host_config.is_cluster:
+        if host_config.nodes is None:
+            raise TypeError()
+
+        for node_config in (config_cache.get_host_config(node) for node in host_config.nodes):
+            (
+                node_needed_legacy_check_plugin_names,
+                node_needed_agent_based_check_plugin_names,
+                node_needed_agent_based_inventory_plugin_names,
+            ) = _get_needed_plugin_names(node_config)
+            needed_legacy_check_plugin_names.update(node_needed_legacy_check_plugin_names)
+            needed_agent_based_check_plugin_names.update(node_needed_agent_based_check_plugin_names)
+            needed_agent_based_inventory_plugin_names.update(
+                node_needed_agent_based_inventory_plugin_names)
+
+    needed_legacy_check_plugin_names.update(
+        _get_required_legacy_check_sections(
+            needed_agent_based_check_plugin_names,
+            needed_agent_based_inventory_plugin_names,
+        ))
+
     if not any((
             needed_legacy_check_plugin_names,
             needed_agent_based_check_plugin_names,
@@ -1056,14 +1077,14 @@ if os.path.islink(%(dst)r):
     output.write("import cmk.utils.log\n")
     output.write("import cmk.utils.debug\n")
     output.write("from cmk.utils.exceptions import MKTerminate\n")
-    output.write("from cmk.utils.type_defs import LATEST_SERIAL\n")
+    output.write("from cmk.core_helpers.paths import LATEST_SERIAL\n")
     output.write("\n")
     output.write("import cmk.base.utils\n")
     output.write("import cmk.base.config as config\n")
     output.write("from cmk.utils.log import console\n")
-    output.write("import cmk.base.checking as checking\n")
+    output.write("import cmk.base.agent_based.checking as checking\n")
     output.write("import cmk.base.check_api as check_api\n")
-    output.write("import cmk.base.ip_lookup as ip_lookup\n")
+    output.write("import cmk.base.ip_lookup as ip_lookup\n")  # is this still needed?
     output.write("\n")
     for module in _get_needed_agent_based_modules(
             needed_agent_based_check_plugin_names,
@@ -1146,7 +1167,7 @@ if '-d' in sys.argv:
 
     # perform actual check with a general exception handler
     output.write("try:\n")
-    output.write("    sys.exit(checking.do_check(%r, None))\n" % hostname)
+    output.write("    sys.exit(checking.active_check_checking(%r, None))\n" % hostname)
     output.write("except MKTerminate:\n")
     output.write("    out.output('<Interrupted>\\n', stream=sys.stderr)\n")
     output.write("    sys.exit(1)\n")
@@ -1226,7 +1247,6 @@ def _plugins_for_special_agents(host_config: HostConfig) -> Iterable[CheckPlugin
     yield from (s.special_agent_plugin_file_name for s in sources.make_sources(
         host_config,
         ipaddress,
-        mode=Mode.NONE,
     ) if isinstance(s, sources.programs.SpecialAgentSource))
 
 
@@ -1302,3 +1322,20 @@ def _get_needed_agent_based_modules(
     ).values() if section.module is not None))
 
     return sorted(modules)
+
+
+def _get_required_legacy_check_sections(
+    check_plugin_names: Set[CheckPluginName],
+    inventory_plugin_names: Set[InventoryPluginName],
+) -> Set[str]:
+    """
+    new style plugin may have a dependency to a legacy check
+    """
+    required_legacy_check_sections = set()
+    for section in agent_based_register.get_relevant_raw_sections(
+            check_plugin_names=check_plugin_names,
+            inventory_plugin_names=inventory_plugin_names,
+    ).values():
+        if section.module is None:
+            required_legacy_check_sections.add(str(section.name))
+    return required_legacy_check_sections

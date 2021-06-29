@@ -18,6 +18,7 @@ import sys
 import requests
 
 from cmk.utils.exceptions import MKException
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -107,7 +108,7 @@ class AuthError(MKException):
 
 def main(argv=None):
     args = parse_arguments(argv or sys.argv[1:])
-    connection = ZertoConnection(args.host, args.username, args.password)
+    connection = ZertoConnection(args.hostaddress, args.username, args.password)
     session_id = connection.get_session_id(args.authentication)
     request = ZertoRequest(connection.base_url, session_id)
     vm_data = request.get_vms_data()

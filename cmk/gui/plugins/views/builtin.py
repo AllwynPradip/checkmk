@@ -3749,7 +3749,7 @@ multisite_builtin_views.update({
         'column_headers': 'pergroup',
         'datasource': 'log',
         'description': _('Notification events of hosts.'),
-        'group_painters': [('log_date', None, '')],
+        'group_painters': [('log_date', None)],
         'hard_filters': ['log_class'],
         'hard_filtervars': [
             ('logclass0', ''),
@@ -3780,7 +3780,7 @@ multisite_builtin_views.update({
                 None,
             ),
             ('log_time', None, ''),
-            ('log_contact_name', 'contactnotifications', ''),
+            ('log_contact_name', None, ''),
             ('log_command', '', ''),
             ('log_state', None, ''),
             ('log_plugin_output', None, ''),
@@ -3807,7 +3807,7 @@ multisite_builtin_views.update({
         'datasource': 'log',
         'description': _(
             'All notification events concerning the state of a certain host (including services)'),
-        'group_painters': [('log_date', None, '')],
+        'group_painters': [('log_date', None)],
         'hard_filters': ['log_class'],
         'hard_filtervars': [
             ('logclass0', ''),
@@ -3836,7 +3836,7 @@ multisite_builtin_views.update({
         'painters': [
             ('log_icon', None),
             ('log_time', None, ''),
-            ('log_contact_name', 'contactnotifications', ''),
+            ('log_contact_name', None, ''),
             ('log_command', '', ''),
             ('log_type', None, ''),
             ('host', 'hostsvcnotifications', ''),
@@ -3865,7 +3865,7 @@ multisite_builtin_views.update({
         'column_headers': 'pergroup',
         'datasource': 'log',
         'description': _('All notification events of hosts or services.'),
-        'group_painters': [('log_date', None, '')],
+        'group_painters': [('log_date', None)],
         'hard_filters': ['log_class'],
         'hard_filtervars': [
             ('logclass0', ''),
@@ -3895,7 +3895,7 @@ multisite_builtin_views.update({
         'painters': [
             ('log_icon', None),
             ('log_time', None, ''),
-            ('log_contact_name', 'contactnotifications', ''),
+            ('log_contact_name', None, ''),
             ('log_command', '', ''),
             ('log_type', None, ''),
             ('host', 'hostsvcnotifications', ''),
@@ -3927,7 +3927,7 @@ multisite_builtin_views.update({
         'column_headers': 'pergroup',
         'datasource': 'log',
         'description': _('Failed notification events of hosts and services.'),
-        'group_painters': [('log_date', None, '')],
+        'group_painters': [('log_date', None)],
         'hard_filters': ['log_class', 'log_type', 'log_state'],
         'hard_filtervars': [
             ('logclass0', ''),
@@ -3968,7 +3968,7 @@ multisite_builtin_views.update({
         'painters': [
             ('log_icon', None),
             ('log_time', None, ''),
-            ('log_contact_name', 'contactnotifications', ''),
+            ('log_contact_name', None, ''),
             ('log_command', '', ''),
             ('log_type', None, ''),
             ('host', 'hostsvcnotifications', ''),
@@ -4001,7 +4001,7 @@ multisite_builtin_views.update({
         'column_headers': 'pergroup',
         'datasource': 'log',
         'description': _('All notification events concerning the state of a certain service.'),
-        'group_painters': [('log_date', None, '')],
+        'group_painters': [('log_date', None)],
         'hard_filters': ['log_class'],
         'hard_filtervars': [
             ('logclass0', ''),
@@ -4028,7 +4028,7 @@ multisite_builtin_views.update({
         'painters': [
             ('log_icon', None),
             ('log_time', None, ''),
-            ('log_contact_name', 'contactnotifications', ''),
+            ('log_contact_name', None, ''),
             ('log_command', '', ''),
             ('host', None, ''),
             ('log_state', None, ''),
@@ -4052,7 +4052,7 @@ multisite_builtin_views.update({
         'column_headers': 'pergroup',
         'datasource': 'log',
         'description': _('All notification events sent to'),
-        'group_painters': [('log_date', None, '')],
+        'group_painters': [('log_date', None)],
         'hard_filters': ['log_class'],
         'hard_filtervars': [
             ('logclass0', ''),
@@ -4117,7 +4117,7 @@ multisite_builtin_views.update({
         'column_headers': 'pergroup',
         'datasource': 'log',
         'description': _('All alert handler executions.'),
-        'group_painters': [('log_date', None, '')],
+        'group_painters': [('log_date', None)],
         'hard_filters': ['log_class'],
         'hard_filtervars': [
             ('logclass0', ''),

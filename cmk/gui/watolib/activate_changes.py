@@ -26,9 +26,10 @@ import multiprocessing
 import traceback
 import subprocess
 import hashlib
+from itertools import filterfalse
 from logging import Logger
 from pathlib import Path
-from typing import Dict, Set, List, Optional, Tuple, Union, NamedTuple, Any
+from typing import Dict, Set, List, Optional, Tuple, Union, NamedTuple, Any, Callable
 
 import psutil  # type: ignore[import]
 import werkzeug.urls
@@ -59,7 +60,7 @@ from cmk.gui.sites import (
 )
 import cmk.gui.config as config
 import cmk.gui.log as log
-import cmk.gui.escaping as escaping
+import cmk.gui.utils.escaping as escaping
 from cmk.gui.i18n import _
 from cmk.gui.globals import g, request as _request
 from cmk.gui.log import logger
@@ -91,6 +92,7 @@ from cmk.gui.watolib.changes import (
 from cmk.gui.plugins.watolib import ABCConfigDomain
 
 # TODO: Make private
+Phase = str  # TODO: Make dedicated type
 PHASE_INITIALIZED = "initialized"  # Process has been initialized (not in thread yet)
 PHASE_QUEUED = "queued"  # Process queued by site scheduler
 PHASE_STARTED = "started"  # Process just started, nothing happened yet
@@ -101,6 +103,7 @@ PHASE_DONE = "done"  # Done (with good or bad result)
 
 # PHASE_DONE can have these different states:
 
+State = str  # TODO: Make dedicated type
 STATE_SUCCESS = "success"  # Everything is ok
 STATE_ERROR = "error"  # Something went really wrong
 STATE_WARNING = "warning"  # e.g. in case of core config warnings
@@ -135,7 +138,8 @@ ReplicationPathPre16 = Union[Tuple[str, str, str, List[str]], Tuple[str, str, st
 ReplicationPathCompat = Union[ReplicationPathPre16, ReplicationPath]
 ConfigWarnings = Dict[ConfigDomainName, List[str]]
 ActivationId = str
-ActivationState = Dict[str, Dict[str, Any]]
+SiteActivationState = Dict[str, Any]
+ActivationState = Dict[str, SiteActivationState]
 
 
 def get_trial_expired_message() -> str:
@@ -297,16 +301,6 @@ def _load_replication_status(lock=False):
     return {site_id: _load_site_replication_status(site_id, lock=lock) for site_id in config.sites}
 
 
-def remove_site_config_directory(site_id: SiteId) -> None:
-    work_dir = cmk.utils.paths.site_config_dir / site_id
-
-    try:
-        shutil.rmtree(str(work_dir))
-    except OSError as e:
-        if e.errno != errno.ENOENT:  # No such file or directory
-            raise
-
-
 class ActivateChanges:
     def __init__(self):
         self._repstatus = {}
@@ -418,12 +412,10 @@ class ActivateChanges:
     def _is_activate_needed(self, site_id):
         return any(c["need_restart"] for c in self._changes_of_site(site_id))
 
-    # This function returns the last known persisted activation state
-    def _last_activation_state(self, site_id):
-        manager = ActivateChangesManager()
-        site_state_path = os.path.join(manager.activation_persisted_dir,
-                                       manager.site_filename(site_id))
-        return store.load_object_from_file(site_state_path, {})
+    def _last_activation_state(self, site_id: SiteId):
+        """This function returns the last known persisted activation state"""
+        return store.load_object_from_file(
+            ActivateChangesManager.persisted_site_state_path(site_id), {})
 
     def _get_last_change_id(self) -> str:
         return self._changes[-1][1]["id"]
@@ -561,11 +553,13 @@ class ActivateChangesManager(ActivateChanges):
         self._activate_foreign = activate_foreign
 
         self._sites = self._get_sites(sites)
-        self._site_snapshot_settings = self._get_site_snapshot_settings(self._sites)
+        self._activation_id = self._new_activation_id()
+
+        self._site_snapshot_settings = self._get_site_snapshot_settings(
+            self._activation_id, self._sites)
         self._activate_until = (self._get_last_change_id()
                                 if activate_until is None else activate_until)
         self._comment = comment
-        self._activation_id = self._new_activation_id()
         self._time_started = time.time()
         self._prevent_activate = prevent_activate
 
@@ -758,20 +752,20 @@ class ActivateChangesManager(ActivateChanges):
 
         logger.debug("Finished all snapshots")
 
-    def _get_site_snapshot_settings(self, sites: List[SiteId]) -> Dict[SiteId, SnapshotSettings]:
+    def _get_site_snapshot_settings(self, activation_id: ActivationId,
+                                    sites: List[SiteId]) -> Dict[SiteId, SnapshotSettings]:
         snapshot_settings = {}
 
         for site_id in sites:
             self._check_snapshot_creation_permissions(site_id)
 
             site_config = config.sites[site_id]
-            work_dir = cmk.utils.paths.site_config_dir / site_id
+            work_dir = cmk.utils.paths.site_config_dir / activation_id / site_id
 
             site_status = self._get_site_status(site_id, site_config)[0]
             is_pre_17_site = cmk.gui.watolib.utils.is_pre_17_remote_site(site_status)
 
-            snapshot_components = _get_replication_components(str(work_dir), site_config,
-                                                              is_pre_17_site)
+            snapshot_components = _get_replication_components(site_config, is_pre_17_site)
 
             # Generate a quick reference_by_name for each component
             component_names = {c[1] for c in snapshot_components}
@@ -830,16 +824,23 @@ class ActivateChangesManager(ActivateChanges):
         }
 
     def get_site_state(self, site_id):
-        return store.load_object_from_file(self.site_state_path(site_id), {})
-
-    def site_state_path(self, site_id):
         if self._activation_id is None:
             raise Exception("activation ID is not set")
-        return os.path.join(self.activation_tmp_base_dir, self._activation_id,
-                            self.site_filename(site_id))
+        return store.load_object_from_file(
+            ActivateChangesManager.site_state_path(self._activation_id, site_id), {})
 
-    @classmethod
-    def site_filename(cls, site_id):
+    @staticmethod
+    def persisted_site_state_path(site_id: SiteId) -> str:
+        return os.path.join(ActivateChangesManager.activation_persisted_dir,
+                            ActivateChangesManager.site_filename(site_id))
+
+    @staticmethod
+    def site_state_path(activation_id: ActivationId, site_id: SiteId) -> str:
+        return os.path.join(ActivateChangesManager.activation_tmp_base_dir, activation_id,
+                            ActivateChangesManager.site_filename(site_id))
+
+    @staticmethod
+    def site_filename(site_id):
         return "site_%s.mk" % site_id
 
 
@@ -1130,22 +1131,28 @@ class ActivationCleanupBackgroundJob(WatoBackgroundJob):
                 if not delete:
                     continue
 
-                activation_dir = os.path.join(ActivateChangesManager.activation_tmp_base_dir,
-                                              activation_id)
-                try:
-                    shutil.rmtree(activation_dir)
-                except Exception:
-                    self._logger.error("  Failed to delete the activation directory '%s'" %
-                                       activation_dir,
-                                       exc_info=True)
+                for base_dir in (str(cmk.utils.paths.site_config_dir),
+                                 ActivateChangesManager.activation_tmp_base_dir):
+                    activation_dir = os.path.join(base_dir, activation_id)
+                    try:
+                        shutil.rmtree(activation_dir)
+                    except FileNotFoundError:
+                        pass
+                    except Exception:
+                        self._logger.error("  Failed to delete the activation directory '%s'" %
+                                           activation_dir,
+                                           exc_info=True)
 
     def _existing_activation_ids(self):
-        try:
-            files = os.listdir(ActivateChangesManager.activation_tmp_base_dir)
-        except OSError as e:
-            if e.errno != errno.ENOENT:
-                raise
-            files = []
+        files = set()
+
+        for base_dir in (str(cmk.utils.paths.site_config_dir),
+                         ActivateChangesManager.activation_tmp_base_dir):
+            try:
+                files.update(os.listdir(base_dir))
+            except OSError as e:
+                if e.errno != errno.ENOENT:
+                    raise
 
         ids = []
         for activation_id in files:
@@ -1249,11 +1256,17 @@ class ActivateChangesSchedulerBackgroundJob(WatoBackgroundJob):
             return 1
 
     def _get_queued_jobs(self) -> 'List[ActivateChangesSite]':
-        queued_jobs = []
+        queued_jobs: List[ActivateChangesSite] = []
+
+        file_filter_func = None
+        if cmk_version.is_managed_edition():
+            import cmk.gui.cme.managed_snapshots as managed_snapshots  # pylint: disable=no-name-in-module
+            file_filter_func = managed_snapshots.customer_user_files_filter()
+
         for site_id, snapshot_settings in sorted(self._site_snapshot_settings.items(),
                                                  key=lambda e: e[0]):
             site_job = ActivateChangesSite(site_id, snapshot_settings, self._activation_id,
-                                           self._prevent_activate)
+                                           self._prevent_activate, file_filter_func)
             site_job.load()
             if site_job.lock_activation():
                 queued_jobs.append(site_job)
@@ -1266,21 +1279,23 @@ class ActivateChangesSite(multiprocessing.Process, ActivateChanges):
                  site_id: SiteId,
                  snapshot_settings: SnapshotSettings,
                  activation_id: str,
-                 prevent_activate: bool = False) -> None:
+                 prevent_activate: bool = False,
+                 file_filter_func: Optional[Callable[[str], bool]] = None) -> None:
         super(ActivateChangesSite, self).__init__()
         self._site_id = site_id
         self._site_changes: List = []
         self._activation_id = activation_id
         self._snapshot_settings = snapshot_settings
+        self._file_filter_func = file_filter_func
         self.daemon = True
         self._prevent_activate = prevent_activate
 
         self._time_started: Optional[float] = None
         self._time_updated: Optional[float] = None
         self._time_ended: Optional[float] = None
-        self._phase = None
-        self._state = None
-        self._status_text = None
+        self._phase: Optional[Phase] = None
+        self._state: Optional[State] = None
+        self._status_text: Optional[str] = None
         self._status_details: Optional[str] = None
         self._pid: Optional[int] = None
         self._expected_duration = 10.0
@@ -1382,11 +1397,8 @@ class ActivateChangesSite(multiprocessing.Process, ActivateChanges):
             self._unlock_activation()
 
             # Create a copy of last result in the persisted dir
-            manager = ActivateChangesManager()
-            manager.load()
-            manager.load_activation(self._activation_id)
-            source_path = manager.site_state_path(self._site_id)
-            shutil.copy(source_path, manager.activation_persisted_dir)
+            shutil.copy(ActivateChangesManager.site_state_path(self._activation_id, self._site_id),
+                        ActivateChangesManager.persisted_site_state_path(self._site_id))
 
     def _activate_until_change_id(self):
         manager = ActivateChangesManager()
@@ -1513,15 +1525,15 @@ class ActivateChangesSite(multiprocessing.Process, ActivateChanges):
         self._logger.debug("Received %d file infos from remote", len(remote_file_infos))
 
         # In case we experience performance issues here, we could postpone the hashing of the
-        # central files to only be done ad-hoc in _get_file_names_to_sync when the other attributes
+        # central files to only be done ad-hoc in get_file_names_to_sync when the other attributes
         # are not enough to detect a differing file.
         site_config_dir = Path(self._snapshot_settings.work_dir)
         central_file_infos = _get_config_sync_file_infos(replication_paths, site_config_dir)
         self._logger.debug("Got %d file infos from %s", len(remote_file_infos), site_config_dir)
 
         self._set_sync_state(_("Computing differences"))
-        to_sync_new, to_sync_changed, to_delete = _get_file_names_to_sync(
-            self._logger, central_file_infos, remote_file_infos)
+        to_sync_new, to_sync_changed, to_delete = get_file_names_to_sync(
+            self._logger, central_file_infos, remote_file_infos, self._file_filter_func)
 
         self._logger.debug("New files to be synchronized: %r", to_sync_new)
         self._logger.debug("Changed files to be synchronized: %r", to_sync_changed)
@@ -1685,7 +1697,11 @@ class ActivateChangesSite(multiprocessing.Process, ActivateChanges):
         finally:
             site_changes.write(changes)
 
-    def _set_result(self, phase, status_text, status_details=None, state=STATE_SUCCESS):
+    def _set_result(self,
+                    phase: Phase,
+                    status_text: str,
+                    status_details: Optional[str] = None,
+                    state: State = STATE_SUCCESS):
         """Stores the current state for displaying in the GUI
 
         Args:
@@ -1707,9 +1723,21 @@ class ActivateChangesSite(multiprocessing.Process, ActivateChanges):
             self._time_ended = self._time_updated
             self._state = state
 
-        self._save_state()
+        self._save_state(
+            self._activation_id, self._site_id, {
+                "_site_id": self._site_id,
+                "_phase": self._phase,
+                "_state": self._state,
+                "_status_text": self._status_text,
+                "_status_details": self._status_details,
+                "_time_started": self._time_started,
+                "_time_updated": self._time_updated,
+                "_time_ended": self._time_ended,
+                "_expected_duration": self._expected_duration,
+                "_pid": self._pid,
+            })
 
-    def _set_status_details(self, phase, status_details):
+    def _set_status_details(self, phase: Phase, status_details: Optional[str]) -> None:
         # As long as the site is in queue, there is no time started
         if phase == PHASE_QUEUED:
             self._status_details = _("Queued for update")
@@ -1733,24 +1761,10 @@ class ActivateChangesSite(multiprocessing.Process, ActivateChanges):
         if status_details:
             self._status_details += "<br>%s" % status_details
 
-    def _save_state(self):
-        state_path = os.path.join(ActivateChangesManager.activation_tmp_base_dir,
-                                  self._activation_id,
-                                  ActivateChangesManager.site_filename(self._site_id))
-
-        return store.save_object_to_file(
-            state_path, {
-                "_site_id": self._site_id,
-                "_phase": self._phase,
-                "_state": self._state,
-                "_status_text": self._status_text,
-                "_status_details": self._status_details,
-                "_time_started": self._time_started,
-                "_time_updated": self._time_updated,
-                "_time_ended": self._time_ended,
-                "_expected_duration": self._expected_duration,
-                "_pid": self._pid,
-            })
+    def _save_state(self, activation_id: ActivationId, site_id: SiteId,
+                    state: SiteActivationState) -> None:
+        state_path = ActivateChangesManager.site_state_path(activation_id, site_id)
+        store.save_object_to_file(state_path, state)
 
     def _load_expected_duration(self):
         times = self.get_activation_times(self._site_id)
@@ -1819,7 +1833,23 @@ def apply_pre_17_sync_snapshot(site_id: SiteId, tar_content: bytes, base_dir: Pa
     create_distributed_wato_files(Path(cmk.utils.paths.omd_root), site_id, is_remote=True)
 
     _execute_post_config_sync_actions(site_id)
+    _execute_cmk_update_config()
+
     return True
+
+
+def _execute_cmk_update_config():
+    p = subprocess.Popen(
+        "cmk-update-config",
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        close_fds=True,
+        encoding="utf-8",
+    )
+    stdout, _stderr = p.communicate()
+    if p.returncode != 0:
+        raise MKGeneralException(_("Unable to convert configuration into 2.0 format\n%s") % stdout)
 
 
 def _execute_post_config_sync_actions(site_id):
@@ -1924,7 +1954,7 @@ def get_site_globals(site_id: SiteId, site_config: SiteConfiguration) -> Dict:
     return site_globals
 
 
-def _get_replication_components(work_dir: str, site_config: SiteConfiguration,
+def _get_replication_components(site_config: SiteConfiguration,
                                 is_pre_17_site: bool) -> List[ReplicationPath]:
     """Gives a list of ReplicationPath instances.
 
@@ -1935,9 +1965,6 @@ def _get_replication_components(work_dir: str, site_config: SiteConfiguration,
         "Replication path" or "replication component" or "snapshot component" are the same concept.
 
     Args:
-        work_dir:
-            Something no longer used apparently.
-
         site_config:
             The site configuration. Specifically the following keys on it are used:
 
@@ -2012,9 +2039,11 @@ def _add_pre_17_sitespecific_excludes(paths: List[ReplicationPath]) -> List[Repl
     return new_paths
 
 
-def _get_file_names_to_sync(
-        site_logger: Logger, central_file_infos: 'Dict[str, ConfigSyncFileInfo]',
-        remote_file_infos: 'Dict[str, ConfigSyncFileInfo]'
+def get_file_names_to_sync(
+    site_logger: Logger,
+    central_file_infos: 'Dict[str, ConfigSyncFileInfo]',
+    remote_file_infos: 'Dict[str, ConfigSyncFileInfo]',
+    file_filter_func: Optional[Callable[[str], bool]],
 ) -> Tuple[List[str], List[str], List[str]]:
     """Compare the response with the site_config directory of the site
 
@@ -2041,6 +2070,10 @@ def _get_file_names_to_sync(
     # Files to be deleted
     to_delete = list(remote_files - central_files)
 
+    if file_filter_func is not None:
+        to_sync_new = list(filterfalse(file_filter_func, to_sync_new))
+        to_sync_changed = list(filterfalse(file_filter_func, to_sync_changed))
+        to_delete = list(filterfalse(file_filter_func, to_delete))
     return to_sync_new, to_sync_changed, to_delete
 
 
@@ -2125,9 +2158,9 @@ class AutomationGetConfigSyncState(AutomationCommand):
             for e in ast.literal_eval(_request.get_ascii_input_mandatory("replication_paths"))
         ]
 
-    def execute(self, request: List[ReplicationPath]) -> GetConfigSyncStateResponse:
+    def execute(self, api_request: List[ReplicationPath]) -> GetConfigSyncStateResponse:
         with store.lock_checkmk_configuration():
-            file_infos = _get_config_sync_file_infos(request,
+            file_infos = _get_config_sync_file_infos(api_request,
                                                      base_dir=Path(cmk.utils.paths.omd_root))
             transport_file_infos = {
                 k: (v.st_mode, v.st_size, v.link_target, v.file_hash)
@@ -2238,17 +2271,17 @@ class AutomationReceiveConfigSync(AutomationCommand):
             _request.get_integer_input_mandatory("config_generation"),
         )
 
-    def execute(self, request: ReceiveConfigSyncRequest) -> bool:
+    def execute(self, api_request: ReceiveConfigSyncRequest) -> bool:
         with store.lock_checkmk_configuration():
-            if request.config_generation != _get_current_config_generation():
+            if api_request.config_generation != _get_current_config_generation():
                 raise MKGeneralException(
                     _("The configuration was changed during activation. "
                       "Terminating this activation to ensure configuration integrity. "
                       "Please try again."))
 
-            self._update_config_on_remote_site(request.sync_archive, request.to_delete)
+            self._update_config_on_remote_site(api_request.sync_archive, api_request.to_delete)
 
-            _execute_post_config_sync_actions(request.site_id)
+            _execute_post_config_sync_actions(api_request.site_id)
             return True
 
     def _update_config_on_remote_site(self, sync_archive: bytes, to_delete: List[str]) -> None:

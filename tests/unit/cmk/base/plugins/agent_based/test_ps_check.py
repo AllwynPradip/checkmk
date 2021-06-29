@@ -10,17 +10,14 @@ import datetime
 import itertools
 from typing import Any, Dict, List, Optional, Tuple
 
-import pytest  # type: ignore[import]
+import pytest
 
-from cmk.utils.type_defs import CheckPluginName, SectionName
-
-from cmk.base.api.agent_based import value_store
 from cmk.base.discovered_labels import DiscoveredHostLabels, HostLabel
 from cmk.base.plugins.agent_based.agent_based_api.v1 import Metric, Result, Service, State as state
 from cmk.base.plugins.agent_based import ps_section
 from cmk.base.plugins.agent_based.utils import ps as ps_utils
 
-from testlib import on_time  # type: ignore[import]
+from testlib import on_time
 
 pytestmark = pytest.mark.checks
 
@@ -191,7 +188,6 @@ PS_DISCOVERY_WATO_RULES = [
     {},
 ]
 
-
 PS_DISCOVERED_ITEMS = [
     Service(item="emacs on", parameters={
         "cpu_average": 15,
@@ -284,6 +280,7 @@ def test_inventory_common():
         ps_section.parse_ps(info),
         None,
         None,
+        None,
     )}.values(), key=lambda s: s.item or "") == sorted(PS_DISCOVERED_ITEMS, key=lambda s: s.item or
             "")  # type: ignore[attr-defined]
 
@@ -299,17 +296,17 @@ check_results = [
         Metric("count", 1, levels=(100000, 100000), boundaries=(0, None)),
         Result(
             state=state.WARN,
-            notice="virtual: 1.00 GiB (warn/crit at 1.00 GiB/2.00 GiB)",
+            summary="virtual: 1.00 GiB (warn/crit at 1.00 GiB/2.00 GiB)",
         ),
         Metric("vsz", 1050360, levels=(1073741824, 2147483648)),
         Result(
             state=state.OK,
-            notice="physical: 296 MiB",
+            summary="physical: 296 MiB",
         ),
         Metric("rss", 303252, levels=(1073741824, 2147483648)),
         Result(
             state=state.WARN,
-            notice="Percentage of total RAM: 28.92% (warn/crit at 25.00%/50.00%)",
+            summary="Percentage of total RAM: 28.92% (warn/crit at 25.00%/50.00%)",
         ),
         Metric("pcpu", 0.0),
         Metric("pcpuavg", 0.0, boundaries=(0, 15)),
@@ -319,7 +316,7 @@ check_results = [
         ),
         Result(
             state=state.OK,
-            notice="Running for: 1 day 3 hours",
+            summary="Running for: 1 day 3 hours",
         ),
         Result(
             state=state.OK,
@@ -339,17 +336,17 @@ check_results = [
         Metric("count", 1, levels=(100000, 100000), boundaries=(0, None)),
         Result(
             state=state.OK,
-            notice="virtual: 2.79 GiB",
+            summary="virtual: 2.79 GiB",
         ),
         Metric("vsz", 2924232),
         Result(
             state=state.OK,
-            notice="physical: 461 MiB",
+            summary="physical: 461 MiB",
         ),
         Metric("rss", 472252),
         Metric("pcpu", 0.0),
         Result(state=state.OK, summary="CPU: 0%"),
-        Result(state=state.OK, notice="Running for: 7 hours 24 minutes"),
+        Result(state=state.OK, summary="Running for: 7 hours 24 minutes"),
         Result(
             state=state.OK,
             notice=(
@@ -362,13 +359,13 @@ check_results = [
     [
         Result(state=state.OK, summary="Processes: 1"),
         Metric("count", 1, levels=(100000, 100000), boundaries=(0, None)),
-        Result(state=state.OK, notice="virtual: 10.9 MiB"),
+        Result(state=state.OK, summary="virtual: 10.9 MiB"),
         Metric("vsz", 11180),
-        Result(state=state.OK, notice="physical: 1.12 MiB"),
+        Result(state=state.OK, summary="physical: 1.12 MiB"),
         Metric("rss", 1144),
         Metric("pcpu", 0.0),
         Result(state=state.OK, summary="CPU: 0%"),
-        Result(state=state.OK, notice="Running for: 3 hours 54 minutes"),
+        Result(state=state.OK, summary="Running for: 3 hours 54 minutes"),
         Result(
             state=state.OK,
             notice=(
@@ -381,14 +378,16 @@ check_results = [
     [
         Result(state=state.OK, summary="Processes: 2"),
         Metric("count", 2, levels=(100000, 100000), boundaries=(0, None)),
-        Result(state=state.OK, notice="virtual: 21.8 MiB"),
+        Result(state=state.OK, summary="virtual: 21.8 MiB"),
         Metric("vsz", 22360),
-        Result(state=state.OK, notice="physical: 2.33 MiB"),
+        Result(state=state.OK, summary="physical: 2.33 MiB"),
         Metric("rss", 2388),
         Metric("pcpu", 0.0),
         Result(state=state.OK, summary="CPU: 0%"),
-        Result(state=state.OK, notice="Youngest running for: 2 hours 37 minutes"),
-        Result(state=state.OK, notice="Oldest running for: 3 hours 54 minutes"),
+        Result(state=state.OK, summary="Youngest running for: 2 hours 37 minutes"),
+        Metric("age_youngest", 9459.0),
+        Result(state=state.OK, summary="Oldest running for: 3 hours 54 minutes"),
+        Metric('age_oldest', 14050.0),
         Result(
             state=state.OK,
             notice=(
@@ -403,13 +402,13 @@ check_results = [
     [
         Result(state=state.OK, summary="Processes: 1"),
         Metric("count", 1, levels=(100000, 100000), boundaries=(0, None)),
-        Result(state=state.OK, notice="virtual: 10.9 MiB"),
+        Result(state=state.OK, summary="virtual: 10.9 MiB"),
         Metric("vsz", 11180),
-        Result(state=state.OK, notice="physical: 1.21 MiB"),
+        Result(state=state.OK, summary="physical: 1.21 MiB"),
         Metric("rss", 1244),
         Metric("pcpu", 0.0),
         Result(state=state.OK, summary="CPU: 0%"),
-        Result(state=state.OK, notice="Running for: 2 hours 37 minutes"),
+        Result(state=state.OK, summary="Running for: 2 hours 37 minutes"),
         Result(
             state=state.OK,
             notice=(
@@ -422,31 +421,31 @@ check_results = [
     [
         Result(state=state.OK, summary="Processes: 2"),
         Metric("count", 2, levels=(100000, 100000), boundaries=(0, None)),
-        Result(state=state.OK, notice="virtual: 20.7 MiB"),
+        Result(state=state.OK, summary="virtual: 20.7 MiB"),
         Metric("vsz", 21232),
-        Result(state=state.OK, notice="physical: 18.6 MiB"),
+        Result(state=state.OK, summary="physical: 18.6 MiB"),
         Metric("rss", 19052),
         Metric("pcpu", 0.0),
         Result(state=state.OK, summary="CPU: 0%"),
-        Result(state=state.OK, notice="Running for: 52 days 4 hours"),
+        Result(state=state.OK, summary="Running for: 52 days 4 hours"),
     ],
     [
         Result(state=state.OK, summary='Processes: 1'),
         Metric('count', 1, levels=(100000, 100000), boundaries=(0, None)),
         Metric('pcpu', 0.0),
         Result(state=state.OK, summary='CPU: 0%'),
-        Result(state=state.OK, notice='Running for: 0 seconds'),
+        Result(state=state.OK, summary='Running for: 0 seconds'),
     ],
     [
         Result(state=state.OK, summary="Processes: 3"),
         Metric("count", 3, levels=(100000, 100000), boundaries=(0, None)),
-        Result(state=state.OK, notice="virtual: 136 MiB"),
+        Result(state=state.OK, summary="virtual: 136 MiB"),
         Metric("vsz", 139532, levels=(1073741824000, 2147483648000)),
-        Result(state=state.OK, notice="physical: 38.6 MiB"),
+        Result(state=state.OK, summary="physical: 38.6 MiB"),
         Metric("rss", 39516, levels=(104857600, 209715200)),
         Result(
             state=state.UNKNOWN,
-            notice="Percentual RAM levels configured, but total RAM is unknown",
+            summary="Percentual RAM levels configured, but total RAM is unknown",
         ),
         Metric("pcpu", 0.0, levels=(90.0, 98.0)),
         Result(state=state.OK, summary="CPU: 0%"),
@@ -464,28 +463,30 @@ check_results = [
         ),
         Result(
             state=state.WARN,
-            notice="Process handles: 1204 (warn/crit at 1000/2000)",
+            summary="Process handles: 1204 (warn/crit at 1000/2000)",
         ),
         Metric("process_handles", 1204, levels=(1000, 2000)),
-        Result(state=state.OK, notice="Youngest running for: 12 seconds"),
+        Result(state=state.OK, summary="Youngest running for: 12 seconds"),
+        Metric("age_youngest", 12.0),
         Result(
             state=state.WARN,
-            notice=(
+            summary=(
                 "Oldest running for: 1 hour 11 minutes"
                 " (warn/crit at 1 hour 0 minutes/2 hours 0 minutes)"
             ),
         ),
+        Metric("age_oldest", 4300.0, levels=(3600.0, 7200.0)),
     ],
     [
         Result(state=state.OK, summary="Processes: 1"),
         Metric("count", 1, levels=(100000, 100000), boundaries=(0, None)),
-        Result(state=state.OK, notice="virtual: 4.47 MiB"),
+        Result(state=state.OK, summary="virtual: 4.47 MiB"),
         Metric("vsz", 4576),
-        Result(state=state.OK, notice="physical: 316 KiB"),
+        Result(state=state.OK, summary="physical: 316 KiB"),
         Metric("rss", 316),
         Metric("pcpu", 0.0),
         Result(state=state.OK, summary="CPU: 0%"),
-        Result(state=state.OK, notice="Process handles: 53"),
+        Result(state=state.OK, summary="Process handles: 53"),
         Metric("process_handles", 53),
     ],
 ]
@@ -500,19 +501,18 @@ def test_check_ps_common(inv_item, reference):
     for info in generate_inputs():
         _cpu_cores, data = ps_section.parse_ps(info)
         parsed.extend((None, ps_info, cmd_line) for (ps_info, cmd_line) in data)
-    total_ram = 1024**3 if "emacs" in inv_item.item else None
+
     with on_time(1540375342, "CET"):
         factory_defaults = {"levels": (1, 1, 99999, 99999)}
         factory_defaults.update(inv_item.parameters)
-        with value_store.context(CheckPluginName("ps"), "unit-test"):
-            test_result = list(ps_utils.check_ps_common(
-                label="Processes",
-                item=inv_item.item,
-                params=factory_defaults,  # type: ignore[arg-type]
-                process_lines=parsed,
-                cpu_cores=1,
-                total_ram=total_ram,
-            ))
+        test_result = list(ps_utils.check_ps_common(
+            label="Processes",
+            item=inv_item.item,
+            params=factory_defaults,  # type: ignore[arg-type]
+            process_lines=parsed,
+            cpu_cores=1,
+            total_ram_map={"": 1024**3} if "emacs" in inv_item.item else {},
+        ))
         assert test_result == reference
 
 
@@ -551,7 +551,7 @@ def test_check_ps_common_cpu(data):
     def time_info(service, agent_info, check_time, cputime, cpu_cores):
         with on_time(datetime.datetime.utcfromtimestamp(check_time), "CET"):
             _cpu_info, parsed_lines = ps_section.parse_ps(splitter(agent_info.format(cputime)))
-            lines_with_node_name: List[Tuple[Optional[str], ps_utils.ps_info, List[str]]] = [
+            lines_with_node_name: List[Tuple[Optional[str], ps_utils.PsInfo, List[str]]] = [
                 (None, ps_info, cmd_line) for (ps_info, cmd_line) in parsed_lines]
 
             return list(ps_utils.check_ps_common(
@@ -560,35 +560,34 @@ def test_check_ps_common_cpu(data):
                 params=service.parameters,  # type: ignore[arg-type]
                 process_lines=lines_with_node_name,
                 cpu_cores=cpu_cores,
-                total_ram=None,
+                total_ram_map={},
             ))
 
+    rescale_params = {"cpu_rescale_max": data.cpu_rescale_max} if data.cpu_rescale_max is not None else {}
     service = Service(
         item="test",
         parameters={
             "process": "~test",
             "user": None,
-            "levels": (1, 1, 99999, 99999)  # from factory defaults
+            "levels": (1, 1, 99999, 99999),  # from factory defaults
+            **rescale_params,
         })
-    if data.cpu_rescale_max is not None:
-        service.parameters.update({"cpu_rescale_max": data.cpu_rescale_max})
 
-    with value_store.context(CheckPluginName("ps"), "unit-test"):
-        # Initialize counters
-        time_info(service, data.agent_info, 0, 0, data.cpu_cores)
-        # Check_cpu_utilization
-        output = time_info(service, data.agent_info, 60, data.cputime, data.cpu_cores)
+    # Initialize counters
+    time_info(service, data.agent_info, 0, 0, data.cpu_cores)
+    # Check_cpu_utilization
+    output = time_info(service, data.agent_info, 60, data.cputime, data.cpu_cores)
 
     assert output[:6] == [
         Result(state=state.OK, summary="Processes: 1"),
         Metric("count", 1, levels=(100000, 100000), boundaries=(0, None)),
-        Result(state=state.OK, notice="virtual: 105 KiB"),
+        Result(state=state.OK, summary="virtual: 105 KiB"),
         Metric("vsz", 105),
-        Result(state=state.OK, notice="physical: 30.0 KiB"),
+        Result(state=state.OK, summary="physical: 30.0 KiB"),
         Metric("rss", 30),
     ]
     assert output[8:] == [
-        Result(state=state.OK, notice="Running for: 3 hours 59 minutes"),
+        Result(state=state.OK, summary="Running for: 3 hours 59 minutes"),
     ]
 
 
@@ -605,7 +604,7 @@ def test_check_ps_common_cpu(data):
 def test_check_ps_common_count(levels, reference):
     _cpu_info, parsed_lines = ps_section.parse_ps(
         splitter("(on,105,30,00:00:{:02}/03:59:39,902) single"))
-    lines_with_node_name: List[Tuple[Optional[str], ps_utils.ps_info, List[str]]] = [
+    lines_with_node_name: List[Tuple[Optional[str], ps_utils.PsInfo, List[str]]] = [
         (None, ps_info, cmd_line) for (ps_info, cmd_line) in parsed_lines]
 
     params = {
@@ -614,15 +613,14 @@ def test_check_ps_common_count(levels, reference):
         "levels": levels,
     }
 
-    with value_store.context(CheckPluginName("pstest"), "unit-test"):
-        output = list(ps_utils.check_ps_common(
-            label="Processes",
-            item='empty',
-            params=params,  # type: ignore[arg-type]
-            process_lines=lines_with_node_name,
-            cpu_cores=1,
-            total_ram=None,
-        ))
+    output = list(ps_utils.check_ps_common(
+        label="Processes",
+        item='empty',
+        params=params,  # type: ignore[arg-type]
+        process_lines=lines_with_node_name,
+        cpu_cores=1,
+        total_ram_map={},
+    ))
     assert output == reference
 
 
@@ -680,21 +678,20 @@ def test_subset_patterns():
         ),
     ]
 
-    test_discovered = ps_utils.discover_ps(inv_params, section_ps, None, None)  # type: ignore[arg-type]
+    test_discovered = ps_utils.discover_ps(inv_params, section_ps, None, None, None)  # type: ignore[arg-type]
     assert {s.item: s for s in test_discovered} == {s.item: s for s in discovered}  # type: ignore[attr-defined]
 
     for service, count in zip(discovered, [1, 2, 1]):
         assert isinstance(service.item, str)
-        with value_store.context(CheckPluginName("ps"), "unit-test"):
-            output = list(ps_utils.check_ps_common(
-                label="Processes",
-                item=service.item,
-                params=service.parameters,  # type: ignore[arg-type]
-                process_lines=[
-                    (None, psi, cmd_line) for (psi, cmd_line) in section_ps[1]],
-                cpu_cores=1,
-                total_ram=None,
-            ))
+        output = list(ps_utils.check_ps_common(
+            label="Processes",
+            item=service.item,
+            params=service.parameters,  # type: ignore[arg-type]
+            process_lines=[
+                (None, psi, cmd_line) for (psi, cmd_line) in section_ps[1]],
+            cpu_cores=1,
+            total_ram_map={},
+        ))
         assert output[0] == Result(state=state.OK, summary="Processes: %s" % count)
 
 
@@ -719,7 +716,7 @@ def test_cpu_util_single_process_levels(cpu_cores):
 (on,7962644,229660,00:00:10/26:56,25758) firefox
 (on,1523536,83064,00:{:02}:00/26:55,25898) firefox"""
             _cpu_info, parsed_lines = ps_section.parse_ps(splitter(agent_info.format(cputime)))
-            lines_with_node_name: List[Tuple[Optional[str], ps_utils.ps_info, List[str]]] = [
+            lines_with_node_name: List[Tuple[Optional[str], ps_utils.PsInfo, List[str]]] = [
                 (None, ps_info, cmd_line) for (ps_info, cmd_line) in parsed_lines]
 
             return list(ps_utils.check_ps_common(
@@ -728,14 +725,13 @@ def test_cpu_util_single_process_levels(cpu_cores):
                 params=params,  # type: ignore[arg-type]
                 process_lines=lines_with_node_name,
                 cpu_cores=cpu_cores,
-                total_ram=None,
+                total_ram_map={},
             ))
 
-    with value_store.context(CheckPluginName("ps"), "unit-test"):
-        # CPU utilization is a counter, initialize it
-        run_check_ps_common_with_elapsed_time(0, 0)
-        # CPU utilization is a counter, after 60s time, one process consumes 2 min of CPU
-        output = run_check_ps_common_with_elapsed_time(60, 2)
+    # CPU utilization is a counter, initialize it
+    run_check_ps_common_with_elapsed_time(0, 0)
+    # CPU utilization is a counter, after 60s time, one process consumes 2 min of CPU
+    output = run_check_ps_common_with_elapsed_time(60, 2)
 
     cpu_util = 200.0 / cpu_cores
     cpu_util_s = ps_utils.render.percent(cpu_util)
@@ -743,9 +739,9 @@ def test_cpu_util_single_process_levels(cpu_cores):
     reference = [
         Result(state=state.OK, summary="Processes: 4"),
         Metric("count", 4, levels=(100000, 100000), boundaries=(0, None)),
-        Result(state=state.OK, notice="virtual: 13.0 GiB"),
+        Result(state=state.OK, summary="virtual: 13.0 GiB"),
         Metric("vsz", 13631104),
-        Result(state=state.OK, notice="physical: 1.06 GiB"),
+        Result(state=state.OK, summary="physical: 1.06 GiB"),
         Metric("rss", 1106568),
         Metric('pcpu', cpu_util),
         Result(state=state.OK, summary="CPU: %s" % cpu_util_s),
@@ -753,8 +749,10 @@ def test_cpu_util_single_process_levels(cpu_cores):
         Result(state=state.OK, notice='firefox with PID 25664 CPU: 0%'),
         Result(state=state.OK, notice='firefox with PID 25758 CPU: 0%'),
         Result(state=state.OK, notice='firefox with PID 25898 CPU: 40.00%'),
-        Result(state=state.OK, notice='Youngest running for: 6 minutes 57 seconds'),
-        Result(state=state.OK, notice='Oldest running for: 26 minutes 58 seconds'),
+        Result(state=state.OK, summary='Youngest running for: 6 minutes 57 seconds'),
+        Metric("age_youngest", 417.0),
+        Result(state=state.OK, summary='Oldest running for: 26 minutes 58 seconds'),
+        Metric("age_oldest", 1618.0),
         Result(state=state.OK, notice="\r\n".join([
             'name firefox, user on, virtual size 2275004kB, resident size 434008kB,'
             ' creation time Jan 01 1970 00:34:02, pid 25576, cpu usage 0.0%',
@@ -769,8 +767,8 @@ def test_cpu_util_single_process_levels(cpu_cores):
     ]
 
     if cpu_util > params['single_cpulevels'][1]:
-        reference[11] = Result(state=state.CRIT, notice=single_msg)
+        reference[11] = Result(state=state.CRIT, summary=single_msg)
     elif cpu_util > params['single_cpulevels'][0]:
-        reference[11] = Result(state=state.WARN, notice=single_msg)
+        reference[11] = Result(state=state.WARN, summary=single_msg)
 
     assert output == reference

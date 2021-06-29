@@ -18,11 +18,11 @@ from cmk.utils.macros import MacroMapping, replace_macros_in_str
 from cmk.utils.type_defs import UserId
 
 import cmk.gui.config as config
-import cmk.gui.escaping as escaping
+import cmk.gui.utils.escaping as escaping
 import cmk.gui.sites as sites
 import cmk.gui.visuals as visuals
 from cmk.gui.breadcrumb import Breadcrumb, BreadcrumbItem, make_topic_breadcrumb
-from cmk.gui.exceptions import MKGeneralException, MKTimeout, MKUserError
+from cmk.gui.exceptions import MKGeneralException, MKMissingDataError, MKTimeout, MKUserError
 from cmk.gui.figures import create_figures_response
 from cmk.gui.globals import g, html, request
 from cmk.gui.i18n import _, _u
@@ -33,11 +33,12 @@ from cmk.gui.pagetypes import PagetypeTopics
 from cmk.gui.plugins.metrics.rrd_fetch import merge_multicol
 from cmk.gui.plugins.metrics.valuespecs import transform_graph_render_options
 from cmk.gui.plugins.views.utils import get_all_views, get_permitted_views, transform_painter_spec
+from cmk.gui.plugins.views.painters import service_state_short
 from cmk.gui.sites import get_alias_of_host
-from cmk.gui.type_defs import HTTPVariables, SingleInfos, VisualContext
+from cmk.gui.type_defs import HTTPVariables, SingleInfos, VisualContext, Row
 from cmk.gui.utils.html import HTML
 from cmk.gui.utils.rendering import text_with_links_to_user_translated_html
-from cmk.gui.utils.urls import makeuri, makeuri_contextless
+from cmk.gui.utils.urls import makeuri, makeuri_contextless, urlencode_vars
 from cmk.gui.valuespec import (
     Checkbox,
     Dictionary,
@@ -45,7 +46,7 @@ from cmk.gui.valuespec import (
     DictionaryEntry,
     DropdownChoice,
     FixedValue,
-    TextUnicode,
+    TextInput,
     ValueSpec,
     ValueSpecValidateFunc,
 )
@@ -252,8 +253,8 @@ class Dashlet(metaclass=abc.ABCMeta):
             return None
 
         return visuals.get_merged_context(
-            visuals.get_context_from_uri_vars(self.infos(), self.single_infos()),
             self._dashboard["context"],
+            visuals.get_context_from_uri_vars(self.infos(), self.single_infos()),
             self._dashlet_spec["context"],
         )
 
@@ -506,7 +507,7 @@ def dashlet_vs_general_settings(dashlet_type: Type[Dashlet], single_infos: List[
                  default_value=True,
              )),
             ('title',
-             TextUnicode(
+             TextInput(
                  title=_('Custom title') + '<sup>*</sup>',
                  placeholder=_(
                      "This option is macro-capable, please check the inline help for more "
@@ -521,7 +522,7 @@ def dashlet_vs_general_settings(dashlet_type: Type[Dashlet], single_infos: List[
                  size=75,
              )),
             ('title_url',
-             TextUnicode(
+             TextInput(
                  title=_('Link of Title'),
                  help=_('The URL of the target page the link of the element should link to.'),
                  size=50,
@@ -587,7 +588,7 @@ dashlet_registry = DashletRegistry()
 @page_registry.register_page("ajax_figure_dashlet_data")
 class FigureDashletPage(AjaxPage):
     def page(self):
-        settings = json.loads(html.request.get_str_input_mandatory("settings"))
+        settings = json.loads(request.get_str_input_mandatory("settings"))
 
         try:
             dashlet_type = cast(Type[ABCFigureDashlet], dashlet_registry[settings.get("type")])
@@ -597,9 +598,11 @@ class FigureDashletPage(AjaxPage):
         settings = dashlet_vs_general_settings(
             dashlet_type, dashlet_type.single_infos()).value_from_json(settings)
 
-        raw_properties = html.request.get_str_input_mandatory("properties")
+        raw_properties = request.get_str_input_mandatory("properties")
         properties = dashlet_type.vs_parameters().value_from_json(json.loads(raw_properties))
-        context = json.loads(html.request.get_str_input_mandatory("context", "{}"))
+        context = json.loads(request.get_str_input_mandatory("context", "{}"))
+        # Inject the infos because the datagenerator is a separate instance to dashlet
+        settings["infos"] = dashlet_type.infos()
         response_data = dashlet_type.generate_response_data(properties, context, settings)
         return create_figures_response(response_data)
 
@@ -678,7 +681,7 @@ class ABCFigureDashlet(Dashlet, metaclass=abc.ABCMeta):
 
         # TODO: Would be good to align this scheme with AjaxPage.webapi_request()
         # (a single HTTP variable "request=<json-body>".
-        post_body = html.urlencode_vars(self._dashlet_http_variables())
+        post_body = urlencode_vars(self._dashlet_http_variables())
 
         html.javascript(
             """
@@ -705,13 +708,9 @@ class ABCFigureDashlet(Dashlet, metaclass=abc.ABCMeta):
         assert isinstance(dashlet_params, Dictionary)  # help mypy
         dashlet_properties = dashlet_params.value_to_json(self._dashlet_spec)
 
-        context = visuals.get_merged_context(
-            visuals.get_context_from_uri_vars(["host", "service"], self.single_infos()),
-            self._dashlet_spec["context"])
-
         args: HTTPVariables = []
         args.append(("settings", json.dumps(dashlet_settings)))
-        args.append(("context", json.dumps(context)))
+        args.append(("context", json.dumps(self.context)))
         args.append(("properties", json.dumps(dashlet_properties)))
 
         return args
@@ -992,7 +991,8 @@ def copy_view_into_dashlet(dashlet: DashletConfig,
 
 
 def service_table_query(properties, context, column_generator):
-    filter_headers, only_sites = visuals.get_filter_headers("log", ["host", "service"], context)
+    filter_headers, only_sites = visuals.get_filter_headers("services", ["host", "service"],
+                                                            context)
     columns = column_generator(properties, context)
 
     query = ("GET services\n"
@@ -1078,3 +1078,17 @@ def purge_metric_for_js(metric):
         "bounds": metric.get("scalar", {}),
         "unit": {k: v for k, v in metric["unit"].items() if k in ["js_render", "stepping"]}
     }
+
+
+def make_mk_missing_data_error() -> MKMissingDataError:
+    return MKMissingDataError(_("No data was found with the current parameters of this dashlet."))
+
+
+def svc_map(
+    conf: Optional[Tuple[str, str]],
+    row: Row,
+    message_template: str = "{}",
+) -> Dict[str, str]:
+    style = dict(zip(("paint", "status"), conf)) if isinstance(conf, tuple) else {}
+    state, status_name = service_state_short(row)
+    return {"css": "svcstate state%s" % state, "msg": message_template.format(status_name), **style}

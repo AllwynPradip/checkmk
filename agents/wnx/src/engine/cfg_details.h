@@ -108,6 +108,8 @@ public:
         return data_ / dirs::kPluginConfig;
     }
 
+    inline std::filesystem::path getLog() const { return data_ / dirs::kLog; }
+
     inline std::filesystem::path getBackup() const {
         return data_ / dirs::kBackup;
     }
@@ -153,7 +155,7 @@ int CreateTree(const std::filesystem::path& base_path);
 
 namespace cma::cfg {
 namespace details {
-constexpr size_t kMaxFoldersStackSize = 10;
+constexpr size_t kMaxFoldersStackSize = 32;
 // low level API to combine sequences
 enum class Combine { overwrite, merge, merge_value };
 constexpr Combine GetCombineMode(std::string_view name);
@@ -265,6 +267,13 @@ public:
         return {};
     }
 
+    void setConfig(YAML::Node yaml) {
+        std::lock_guard lk(lock_);
+        if (yaml_.IsDefined()) {
+            yaml_ = yaml;
+        }
+    }
+
     std::wstring getRootYamlPath() const noexcept {
         std::lock_guard lk(lock_);
         return root_yaml_path_;
@@ -357,6 +366,11 @@ public:
         return folders_.getTemp();
     }
 
+    auto getLogDir() const {
+        std::lock_guard lk(lock_);
+        return folders_.getLog();
+    }
+
     auto getHostName() const {
         std::lock_guard lk(lock_);
         return host_name_;
@@ -367,7 +381,7 @@ public:
         return cwd_;
     }
 
-    auto getLogFileDir() const {
+    auto getConfiguredLogFileDir() const {
         std::lock_guard lk(lock_);
         return logfile_dir_;
     }
@@ -381,7 +395,7 @@ public:
 
     int getBackupLogMaxCount() const noexcept { return backup_log_max_count_; }
 
-    void setLogFileDir(const std::wstring& Path) {
+    void setConfiguredLogFileDir(const std::wstring& Path) {
         std::lock_guard lk(lock_);
         logfile_dir_ = Path;
     }

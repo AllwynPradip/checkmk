@@ -36,11 +36,27 @@ from collections.abc import MutableMapping
 from collections.abc import Sequence as ABCSequence
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, Final, Generic, Iterable, List, NamedTuple
-from typing import Optional as _Optional
-from typing import Pattern, Protocol, Sequence, Set, SupportsFloat
-from typing import Tuple as _Tuple
-from typing import Type, TypeVar, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Final,
+    Generic,
+    Iterable,
+    ItemsView,
+    List,
+    Literal,
+    NamedTuple,
+    Optional as _Optional,
+    Pattern,
+    Protocol,
+    Sequence,
+    SupportsFloat,
+    Tuple as _Tuple,
+    Type,
+    TypeVar,
+    Union,
+)
 
 from Cryptodome.Cipher import AES
 from Cryptodome.PublicKey import RSA
@@ -56,24 +72,31 @@ import cmk.utils.defines as defines
 import cmk.utils.log
 import cmk.utils.paths
 import cmk.utils.regex
+import cmk.utils.plugin_registry
 from cmk.utils.type_defs import Seconds
 
 import cmk.gui.config as config
-import cmk.gui.escaping as escaping
+import cmk.gui.utils.escaping as escaping
 import cmk.gui.forms as forms
 import cmk.gui.sites as sites
 import cmk.gui.utils as utils
+from cmk.gui.htmllib.foldable_container import foldable_container
 from cmk.gui.exceptions import MKGeneralException, MKUserError
-from cmk.gui.globals import html
-from cmk.gui.globals import request as global_request
+from cmk.gui.globals import html, theme, output_funnel, request
 from cmk.gui.http import UploadedFile
-from cmk.gui.i18n import _
+from cmk.gui.i18n import _, ungettext
 from cmk.gui.pages import AjaxPage, page_registry
-from cmk.gui.type_defs import ChoiceGroup, Choices, GroupedChoices
+from cmk.gui.type_defs import ChoiceGroup, ChoiceId, ChoiceText, Choices, GroupedChoices
 from cmk.gui.utils.html import HTML
-from cmk.gui.utils.labels import encode_labels_for_http, encode_labels_for_tagify, label_help_text
+from cmk.gui.utils.labels import (
+    encode_labels_for_http,
+    encode_labels_for_tagify,
+    get_labels_cache,
+    label_help_text,
+)
 from cmk.gui.utils.popups import MethodAjax, MethodColorpicker
-from cmk.gui.utils.urls import makeuri
+from cmk.gui.utils.urls import makeuri, urlencode
+from cmk.gui.utils.escaping import escape_html_permissive
 from cmk.gui.view_utils import render_labels
 
 seconds_per_day = 86400
@@ -83,6 +106,7 @@ DEF_VALUE = object()
 
 ValueSpecValidateFunc = Callable[[Any, str], None]
 ValueSpecHelp = Union[str, HTML, Callable[[], Union[str, HTML]]]
+ValueSpecText = Union[str, HTML]
 
 C = TypeVar('C', bound='Comparable')
 
@@ -187,7 +211,7 @@ class ValueSpec:
             return self.canonical_value()
 
     # TODO: Rename to value_to_html?
-    def value_to_text(self, value: Any) -> str:
+    def value_to_text(self, value: Any) -> ValueSpecText:
         """Creates a text-representation of the value that can be
         used in tables and other contextes
 
@@ -225,7 +249,7 @@ class ValueSpec:
         # types being written to the configuration. For the moment we can not
         # enable this because of the Web API: When using JSON as request_format
         # the JSON modules decodes all strings to unicode strings which are not
-        # accepted by some attribute valuespecs which base on e.g. TextAscii.
+        # accepted by some attribute valuespecs which base on e.g. TextInput.
         # This should be solved during Python3 transformation where we will
         # finally make a huge switch to unicode strings in many places.
         # TODO: Cleanup all external direct calls to validate_datatype() once this is
@@ -273,14 +297,14 @@ class FixedValue(ValueSpec):
         return self._value
 
     def render_input(self, varprefix: str, value: Any) -> None:
-        html.write(self.value_to_text(value))
+        html.write_text(self.value_to_text(value))
 
     def value_to_text(self, value: Any) -> str:
         if self._totext is not None:
             return self._totext
         if isinstance(value, str):
             return value
-        return ensure_str(value)
+        return str(value)
 
     def value_to_json(self, value):
         return value
@@ -342,17 +366,17 @@ class Age(ValueSpec):
                                 default_value=str(val),
                                 size=4,
                                 cssclass="number")
-                html.write(" %s " % title)
+                html.write_text(" %s " % title)
             else:
                 takeover = (takeover + val) * tkovr_fac
         html.close_div()
 
     def from_html_vars(self, varprefix: str) -> Seconds:
         # TODO: Validate for correct numbers!
-        return (html.request.get_integer_input_mandatory(varprefix + '_days', 0) * 3600 * 24 +
-                html.request.get_integer_input_mandatory(varprefix + '_hours', 0) * 3600 +
-                html.request.get_integer_input_mandatory(varprefix + '_minutes', 0) * 60 +
-                html.request.get_integer_input_mandatory(varprefix + '_seconds', 0))
+        return (request.get_integer_input_mandatory(varprefix + '_days', 0) * 3600 * 24 +
+                request.get_integer_input_mandatory(varprefix + '_hours', 0) * 3600 +
+                request.get_integer_input_mandatory(varprefix + '_minutes', 0) * 60 +
+                request.get_integer_input_mandatory(varprefix + '_seconds', 0))
 
     def value_to_text(self, value: Seconds) -> str:
         days, rest = divmod(value, 60 * 60 * 24)
@@ -480,7 +504,7 @@ class Integer(ValueSpec):
         return self._display_format % utils.saveint(value)
 
     def from_html_vars(self, varprefix: str) -> int:
-        return html.request.get_integer_input_mandatory(varprefix)
+        return request.get_integer_input_mandatory(varprefix)
 
     def value_to_text(self, value: int) -> str:
         return self._renderer.format_text(self._render_value(value))
@@ -526,13 +550,12 @@ class Filesize(Integer):
 
     def from_html_vars(self, varprefix: str) -> int:
         try:
-            return html.request.get_integer_input_mandatory(varprefix + '_size') * (
-                1024**html.request.get_integer_input_mandatory(varprefix + '_unit'))
+            return request.get_integer_input_mandatory(varprefix + '_size') * (
+                1024**request.get_integer_input_mandatory(varprefix + '_unit'))
         except Exception:
             raise MKUserError(varprefix + '_size', _("Please enter a valid integer number"))
 
-    # TODO: Cleanup this hierarchy problem
-    def value_to_text(self, value: int) -> str:  # type: ignore[override]
+    def value_to_text(self, value: int) -> str:
         exp, count = self.get_exponent(value)
         return "%s %s" % (count, self._names[exp])
 
@@ -543,10 +566,8 @@ class Filesize(Integer):
         return json_value
 
 
-class TextAscii(ValueSpec):
+class TextInput(ValueSpec):
     """Editor for a line of text"""
-
-    # TODO: Cleanup attrencode attribute
     def __init__(  # pylint: disable=redefined-builtin
         self,
         label: _Optional[str] = None,
@@ -554,7 +575,6 @@ class TextAscii(ValueSpec):
         try_max_width: bool = False,
         cssclass: str = "text",
         strip: bool = True,
-        attrencode: bool = True,
         allow_empty: bool = True,
         empty_text: str = "",
         read_only: bool = False,
@@ -562,6 +582,7 @@ class TextAscii(ValueSpec):
         regex: Union[None, str, Pattern[str]] = None,
         regex_error: _Optional[str] = None,
         minlen: _Optional[int] = None,
+        maxlen: _Optional[int] = None,
         onkeyup: _Optional[str] = None,
         autocomplete: bool = True,
         hidden: bool = False,
@@ -578,7 +599,6 @@ class TextAscii(ValueSpec):
         self._try_max_width = try_max_width  # If set, uses calc(100%-10px)
         self._cssclass = cssclass
         self._strip = strip
-        self._attrencode = attrencode
         self._allow_empty = allow_empty
         self._empty_text = empty_text
         self._read_only = read_only
@@ -590,6 +610,7 @@ class TextAscii(ValueSpec):
         self._regex_error = regex_error if regex_error is not None else \
             _("Your input does not match the required format.")
         self._minlen = minlen
+        self._maxlen = maxlen
         self._onkeyup = onkeyup
         self._autocomplete = autocomplete
         self._hidden = hidden
@@ -601,7 +622,6 @@ class TextAscii(ValueSpec):
     def canonical_value(self) -> str:
         return ""
 
-    # NOTE: Class hierarchy is broken, we can get Unicode here!
     def render_input(self, varprefix: str, value: _Optional[str]) -> None:
         if self._label:
             html.span(self._label, class_="vs_floating_text")
@@ -619,21 +639,15 @@ class TextAscii(ValueSpec):
             placeholder=self._placeholder,
         )
 
-    # NOTE: Class hierarchy is broken, we can get Unicode here!
-    def value_to_text(self, value: str) -> str:
+    def value_to_text(self, value: str) -> ValueSpecText:
         if not value:
             return self._empty_text
-
-        if self._attrencode:
-            return escaping.escape_attribute(value)
-        return ensure_str(value)
+        return str(value)
 
     def from_html_vars(self, varprefix: str) -> str:
-        value = html.request.get_str_input_mandatory(varprefix, "")
-
+        value = request.get_str_input_mandatory(varprefix, "")
         if self._strip and value:
             value = value.strip()
-
         return value
 
     def validate_datatype(self, value: str, varprefix: str) -> None:
@@ -642,7 +656,6 @@ class TextAscii(ValueSpec):
                 varprefix,
                 _("The value must be of type str, but it has type %s") % _type_name(value))
 
-    # NOTE: Class hierarchy is broken, we can get Unicode here!
     def _validate_value(self, value: str, varprefix: str) -> None:
         try:
             if isinstance(value, bytes):
@@ -668,33 +681,9 @@ class TextAscii(ValueSpec):
         if self._minlen is not None and len(value) < self._minlen:
             raise MKUserError(varprefix,
                               _("You need to provide at least %d characters.") % self._minlen)
-
-
-class UUID(TextAscii):
-    """Documentation for UUID
-
-    """
-    def from_html_vars(self, varprefix: str) -> str:
-        value = html.request.get_str_input_mandatory(varprefix, "")
-        if not value:
-            value = str(uuid.uuid4())
-        return value
-
-    def render_input(self, varprefix: str, value: _Optional[str]) -> None:
-        html.hidden_field(varprefix, value, add_var=True)
-
-
-class TextUnicode(TextAscii):
-    # TODO: Once we switched to Python 3 we can merge the unicode and non unicode class
-    def from_html_vars(self, varprefix: str) -> str:  # type: ignore[override]
-        return html.request.get_unicode_input_mandatory(varprefix, "").strip()
-
-    def validate_datatype(self, value: str, varprefix: str) -> None:
-        if not isinstance(value, str):
-            raise MKUserError(
-                varprefix,
-                _("The value must be of type str or unicode, but it has type %s") %
-                _type_name(value))
+        if self._maxlen is not None and len(value) > self._maxlen:
+            raise MKUserError(varprefix,
+                              _("You must not provide more than %d characters.") % self._maxlen)
 
     def value_to_json(self, value):
         return value
@@ -703,10 +692,28 @@ class TextUnicode(TextAscii):
         return json_value
 
 
+TextAscii = TextInput  # alias added in 2.1.0 for compatibility
+TextUnicode = TextInput  # alias added in 2.1.0 for compatibility
+
+
+class UUID(TextInput):
+    """Documentation for UUID
+
+    """
+    def from_html_vars(self, varprefix: str) -> str:
+        value = request.get_str_input_mandatory(varprefix, "")
+        if not value:
+            value = str(uuid.uuid4())
+        return value
+
+    def render_input(self, varprefix: str, value: _Optional[str]) -> None:
+        html.hidden_field(varprefix, value, add_var=True)
+
+
 # TODO: Cleanup kwargs
 def ID(**kwargs):
     """Internal ID as used in many places (for contact names, group name, an so on)"""
-    return TextAscii(regex=re.compile('^[a-zA-Z_][-a-zA-Z0-9_]*$'),
+    return TextInput(regex=re.compile('^[a-zA-Z_][-a-zA-Z0-9_]*$'),
                      regex_error=_("An identifier must only consist of letters, digits, dash and "
                                    "underscore and it must start with a letter or underscore."),
                      **kwargs)
@@ -715,22 +722,22 @@ def ID(**kwargs):
 # TODO: Cleanup kwargs
 def UnicodeID(**kwargs):
     """Same as the ID class, but allowing unicode objects"""
-    return TextUnicode(regex=re.compile(r'^[\w][-\w0-9_]*$', re.UNICODE),
-                       regex_error=_("An identifier must only consist of letters, digits, dash and "
-                                     "underscore and it must start with a letter or underscore."),
-                       **kwargs)
+    return TextInput(regex=re.compile(r'^[\w][-\w0-9_]*$', re.UNICODE),
+                     regex_error=_("An identifier must only consist of letters, digits, dash and "
+                                   "underscore and it must start with a letter or underscore."),
+                     **kwargs)
 
 
 # TODO: Cleanup kwargs
 def UserID(**kwargs):
-    return TextUnicode(regex=re.compile(r'^[\w][-\w0-9_\.@]*$', re.UNICODE),
-                       regex_error=_(
-                           "An identifier must only consist of letters, digits, dash, dot, "
-                           "at and underscore. But it must start with a letter or underscore."),
-                       **kwargs)
+    return TextInput(regex=re.compile(r'^[\w][-\w0-9_\.@]*$', re.UNICODE),
+                     regex_error=_(
+                         "An identifier must only consist of letters, digits, dash, dot, "
+                         "at and underscore. But it must start with a letter or underscore."),
+                     **kwargs)
 
 
-class RegExp(TextAscii):
+class RegExp(TextInput):
     infix = "infix"
     prefix = "prefix"
     complete = "complete"
@@ -741,13 +748,12 @@ class RegExp(TextAscii):
         case_sensitive: bool = True,
         mingroups: int = 0,
         maxgroups: _Optional[int] = None,
-        # TextAscii
+        # TextInput
         label: _Optional[str] = None,
         size: Union[int, str] = 25,
         try_max_width: bool = False,
         cssclass: str = "text",
         strip: bool = True,
-        attrencode: bool = True,
         allow_empty: bool = True,
         empty_text: str = "",
         read_only: bool = False,
@@ -755,6 +761,7 @@ class RegExp(TextAscii):
         regex: Union[None, str, Pattern[str]] = None,
         regex_error: _Optional[str] = None,
         minlen: _Optional[int] = None,
+        maxlen: _Optional[int] = None,
         onkeyup: _Optional[str] = None,
         autocomplete: bool = True,
         hidden: bool = False,
@@ -770,7 +777,6 @@ class RegExp(TextAscii):
             try_max_width=try_max_width,
             cssclass=self._css_classes(case_sensitive, mode),
             strip=strip,
-            attrencode=attrencode,
             allow_empty=allow_empty,
             empty_text=empty_text,
             read_only=read_only,
@@ -778,6 +784,7 @@ class RegExp(TextAscii):
             regex=regex,
             regex_error=regex_error,
             minlen=minlen,
+            maxlen=maxlen,
             onkeyup=onkeyup,
             autocomplete=autocomplete,
             hidden=hidden,
@@ -797,7 +804,9 @@ class RegExp(TextAscii):
 
         default_help_text = super().help()
         if default_help_text is not None:
-            help_text.append(default_help_text + "<br><br>")
+            help_text.append(
+                escaping.escape_html_permissive(str(default_help_text)) + html.render_br() +
+                html.render_br())
 
         help_text.append(_("The text entered here is handled as a regular expression pattern."))
 
@@ -822,8 +831,8 @@ class RegExp(TextAscii):
             help_text.append(_("The match is performed case insensitive."))
 
         help_text.append(
-            _("Read more about [cms_regexes|regular expression matching in Checkmk] in our user manual."
-             ))
+            _("Read more about [regexes|regular expression matching in Checkmk] in our user guide.")
+        )
 
         return u" ".join(u"%s" % h for h in help_text)
 
@@ -861,28 +870,26 @@ class RegExp(TextAscii):
                   "It must have at most <b>%d</b> groups.") % (compiled.groups, self._maxgroups))
 
 
-# TODO: Cleanup this multiple inheritance
-class RegExpUnicode(TextUnicode, RegExp):
-    pass
+RegExpUnicode = RegExp  # alias added in 2.1.0 for compatibility
 
 
-class EmailAddress(TextUnicode):
+class EmailAddress(TextInput):
     def __init__(  # pylint: disable=redefined-builtin
         self,
         make_clickable: bool = False,
-        # TextAscii
+        # TextInput
         label: _Optional[str] = None,
         size: Union[int, str] = 40,
         try_max_width: bool = False,
         cssclass: str = "text",
         strip: bool = True,
-        attrencode: bool = True,
         allow_empty: bool = True,
         empty_text: str = "",
         read_only: bool = False,
         forbidden_chars: str = "",
         regex_error: _Optional[str] = None,
         minlen: _Optional[int] = None,
+        maxlen: _Optional[int] = None,
         onkeyup: _Optional[str] = None,
         autocomplete: bool = True,
         hidden: bool = False,
@@ -898,7 +905,6 @@ class EmailAddress(TextUnicode):
             try_max_width=try_max_width,
             cssclass=cssclass,
             strip=strip,
-            attrencode=attrencode,
             allow_empty=allow_empty,
             empty_text=empty_text,
             read_only=read_only,
@@ -934,6 +940,7 @@ class EmailAddress(TextUnicode):
                              re.I | re.UNICODE),
             regex_error=regex_error,
             minlen=minlen,
+            maxlen=maxlen,
             onkeyup=onkeyup,
             autocomplete=autocomplete,
             hidden=hidden,
@@ -944,25 +951,24 @@ class EmailAddress(TextUnicode):
         )
         self._make_clickable = make_clickable
 
-    def value_to_text(self, value: str) -> str:
+    def value_to_text(self, value: str) -> ValueSpecText:
         if not value:
             return super().value_to_text(value)
         if self._make_clickable:
-            # TODO: This is a workaround for a bug. This function needs to return str objects right now.
-            return "%s" % html.render_a(HTML(value), href="mailto:%s" % value)
+            return html.render_a(value, href="mailto:%s" % value)
         return value
 
 
 def IPNetwork(  # pylint: disable=redefined-builtin
     ip_class: Union[None, Type[ipaddress.IPv4Network], Type[ipaddress.IPv6Network]] = None,
-    # TextAscii
+    # TextInput
     allow_empty: bool = True,
     size: Union[int, str] = 34,
     # From ValueSpec
     title: _Optional[str] = None,
     help: _Optional[ValueSpecHelp] = None,
     default_value: Any = DEF_VALUE,
-) -> TextAscii:
+) -> TextInput:
     """Same as IPv4Network, but allowing both IPv4 and IPv6"""
     def _validate_value_for_one_class(value: str, varprefix: str) -> None:
         assert ip_class is not None
@@ -997,7 +1003,7 @@ def IPNetwork(  # pylint: disable=redefined-builtin
 
         _validate_value_for_both_classes(value, varprefix)
 
-    return TextAscii(
+    return TextInput(
         validate=_validate_value,
         allow_empty=allow_empty,
         size=size,
@@ -1009,7 +1015,7 @@ def IPNetwork(  # pylint: disable=redefined-builtin
 
 def IPv4Network(  # pylint: disable=redefined-builtin
         title: _Optional[str] = None,
-        help: _Optional[ValueSpecHelp] = None) -> TextAscii:
+        help: _Optional[ValueSpecHelp] = None) -> TextInput:
     """Network as used in routing configuration, such as '10.0.0.0/8' or '192.168.56.1'"""
     return IPNetwork(ip_class=ipaddress.IPv4Network, size=18, title=title, help=help)
 
@@ -1019,14 +1025,14 @@ def IPv4Address(  # pylint: disable=redefined-builtin
     title: _Optional[str] = None,
     help: _Optional[ValueSpecHelp] = None,
     default_value: Any = DEF_VALUE,
-) -> TextAscii:
+) -> TextInput:
     def _validate_value(value: str, varprefix: str):
         try:
             ipaddress.IPv4Address(ensure_str(value))
         except ValueError as exc:
             raise MKUserError(varprefix, _("Invalid IPv4 address: %s") % exc)
 
-    return TextAscii(
+    return TextInput(
         validate=_validate_value,
         size=16,
         title=title,
@@ -1036,167 +1042,8 @@ def IPv4Address(  # pylint: disable=redefined-builtin
     )
 
 
-class TextAsciiAutocomplete(TextAscii):
-    ident = ""
-
-    def __init__(  # pylint: disable=redefined-builtin
-        self,
-        completion_ident: str,
-        completion_params: Dict[str, Any],
-        completion_params_js: str = "",
-        # TextAscii
-        label: _Optional[str] = None,
-        size: Union[int, str] = 40,
-        try_max_width: bool = False,
-        cssclass: str = "text",
-        strip: bool = True,
-        attrencode: bool = True,
-        allow_empty: bool = True,
-        empty_text: str = "",
-        read_only: bool = False,
-        forbidden_chars: str = "",
-        regex: Union[None, str, Pattern[str]] = None,
-        regex_error: _Optional[str] = None,
-        minlen: _Optional[int] = None,
-        onkeyup: _Optional[str] = None,
-        hidden: bool = False,
-        placeholder: _Optional[str] = None,
-        # From ValueSpec
-        title: _Optional[str] = None,
-        help: _Optional[ValueSpecHelp] = None,
-        default_value: Any = DEF_VALUE,
-        validate: _Optional[ValueSpecValidateFunc] = None,
-    ):
-        onkeyup = "cmk.valuespecs.autocomplete(this, %s, %s, %s)" % (
-            json.dumps(completion_ident),
-            completion_params_js or json.dumps(completion_params),
-            json.dumps(onkeyup),
-        )
-        super().__init__(
-            label=label,
-            size=size,
-            try_max_width=try_max_width,
-            cssclass=cssclass,
-            strip=strip,
-            attrencode=attrencode,
-            allow_empty=allow_empty,
-            empty_text=empty_text,
-            read_only=read_only,
-            forbidden_chars=forbidden_chars,
-            regex=regex,
-            regex_error=regex_error,
-            minlen=minlen,
-            onkeyup=onkeyup,
-            autocomplete=False,
-            hidden=hidden,
-            placeholder=placeholder,
-            title=title,
-            help=help,
-            default_value=default_value,
-            validate=validate,
-        )
-
-    @classmethod
-    def idents(cls) -> 'Dict[str, Type[TextAsciiAutocomplete]]':
-        idents = {}
-        for type_class in cls.__subclasses__():
-            idents[type_class.ident] = type_class
-        return idents
-
-    @classmethod
-    def ajax_handler(cls, request) -> Choices:
-        ident = request["ident"]
-        if not ident:
-            raise MKUserError("ident", _("You need to set the \"%s\" parameter.") % "ident")
-
-        if ident not in cls.idents():
-            raise MKUserError("ident", _("Invalid ident: %s") % ident)
-
-        params = request.get("params")
-        if params is None:
-            raise MKUserError("params", _("You need to set the \"%s\" parameter.") % "params")
-
-        value = request.get("value")
-        if value is None:
-            raise MKUserError("params", _("You need to set the \"%s\" parameter.") % "value")
-
-        result_data = cls.idents()[ident].autocomplete_choices(value, params)
-
-        # Check for correct result_data format
-        assert isinstance(result_data, list)
-        if result_data:
-            assert isinstance(result_data[0], (list, tuple))
-            assert len(result_data[0]) == 2
-
-        return result_data
-
-    #@abc.abstractclassmethod
-    @classmethod
-    def autocomplete_choices(cls, value: str, params: Dict) -> Choices:
-        raise NotImplementedError()
-
-
-# TODO: Cleanup kwargs
-class MonitoredHostname(TextAsciiAutocomplete):
-    """Hostname input with dropdown completion
-
-    Renders an input field for entering a host name while providing an auto completion dropdown field.
-    Fetching the choices from the current live config via livestatus"""
-    ident = "monitored_hostname"
-
-    def __init__(self, **kwargs):
-        super().__init__(completion_ident=self.ident, completion_params={}, **kwargs)
-
-    @classmethod
-    def autocomplete_choices(cls, value: str, params: Dict) -> Choices:
-        """Return the matching list of dropdown choices
-        Called by the webservice with the current input field value and the completions_params to get the list of choices"""
-        query = ("GET hosts\n"
-                 "Cache: reload\n"
-                 "Columns: host_name\n"
-                 "Filter: host_name ~~ %s" % livestatus.lqencode(value))
-
-        return [(h, h) for h in sorted(sites.live().query_column_unique(query))]
-
-
-class MonitoredServiceDescription(TextAsciiAutocomplete):
-    """Unfiltered Service Descriptions for input with dropdown completion
-
-    Renders an input field for entering a service description while providing an auto completion dropdown field.
-    Fetching the choices from the current live config via livestatus"""
-    ident = "monitored_service_description"
-
-    def __init__(self, **kwargs):
-        kwargs.setdefault(
-            'completion_params_js',
-            '(() => {let host_elem=document.getElementsByName("context_host_p_host"); return host_elem.length?{host:host_elem[0].value}:{}})()'
-        )
-        super().__init__(completion_ident=self.ident, completion_params={}, **kwargs)
-
-    @classmethod
-    def autocomplete_choices(cls, value: str, params: Dict) -> Choices:
-        """Return the matching list of dropdown choices
-        Called by the webservice with the current input field value and the completions_params to get the list of choices"""
-        query = ("GET services\n"
-                 "Cache: reload\n"
-                 "Columns: service_description\n"
-                 "Filter: service_description ~~ %s\n" % livestatus.lqencode(value))
-
-        if params.get("host"):
-            query += "Filter: host_name = %s\n" % livestatus.lqencode(params['host'])
-
-        return [(h, h) for h in sorted(sites.live().query_column_unique(query))]
-
-
-@page_registry.register_page("ajax_vs_autocomplete")
-class PageVsAutocomplete(AjaxPage):
-    def page(self):
-        # TODO: Move ajax_handler to this class? Should we also move the autocomplete_choices()?
-        return {"choices": TextAsciiAutocomplete.ajax_handler(self.webapi_request())}
-
-
 def Hostname(  # pylint: disable=redefined-builtin
-    # TextAscii
+    # TextInput
     allow_empty=False,
     # ValueSpec
     title: _Optional[str] = None,
@@ -1204,7 +1051,7 @@ def Hostname(  # pylint: disable=redefined-builtin
     default_value: Any = DEF_VALUE,
 ):
     """A host name with or without domain part. Also allow IP addresses"""
-    return TextAscii(
+    return TextInput(
         regex=cmk.utils.regex.regex(cmk.utils.regex.REGEX_HOST_NAME),
         regex_error=_("Please enter a valid hostname or IPv4 address. "
                       "Only letters, digits, dash, underscore and dot are allowed."),
@@ -1215,20 +1062,19 @@ def Hostname(  # pylint: disable=redefined-builtin
     )
 
 
-class HostAddress(TextAscii):
+class HostAddress(TextInput):
     """Use this for all host / ip address input fields!"""
     def __init__(  # pylint: disable=redefined-builtin
         self,
         allow_host_name: bool = True,
         allow_ipv4_address: bool = True,
         allow_ipv6_address: bool = True,
-        # TextAscii
+        # TextInput
         label: _Optional[str] = None,
         size: Union[int, str] = 64,
         try_max_width: bool = False,
         cssclass: str = "text",
         strip: bool = True,
-        attrencode: bool = True,
         allow_empty: bool = True,
         empty_text: str = "",
         read_only: bool = False,
@@ -1236,6 +1082,7 @@ class HostAddress(TextAscii):
         regex: Union[None, str, Pattern[str]] = None,
         regex_error: _Optional[str] = None,
         minlen: _Optional[int] = None,
+        maxlen: _Optional[int] = None,
         onkeyup: _Optional[str] = None,
         autocomplete: bool = True,
         hidden: bool = False,
@@ -1251,7 +1098,6 @@ class HostAddress(TextAscii):
             try_max_width=try_max_width,
             cssclass=cssclass,
             strip=strip,
-            attrencode=attrencode,
             allow_empty=allow_empty,
             empty_text=empty_text,
             read_only=read_only,
@@ -1259,6 +1105,7 @@ class HostAddress(TextAscii):
             regex=regex,
             regex_error=regex_error,
             minlen=minlen,
+            maxlen=maxlen,
             onkeyup=onkeyup,
             autocomplete=autocomplete,
             hidden=hidden,
@@ -1342,7 +1189,7 @@ class HostAddress(TextAscii):
 
 
 def AbsoluteDirname(  # pylint: disable=redefined-builtin
-    # TextAscii
+    # TextInput
     allow_empty: bool = True,
     size: Union[int, str] = 25,
     # ValueSpec
@@ -1350,8 +1197,8 @@ def AbsoluteDirname(  # pylint: disable=redefined-builtin
     help: _Optional[ValueSpecHelp] = None,
     default_value: Any = DEF_VALUE,
     validate: _Optional[ValueSpecValidateFunc] = None,
-) -> TextAscii:
-    return TextAscii(
+) -> TextInput:
+    return TextInput(
         regex=re.compile('^(/|(/[^/]+)+)$'),
         regex_error=_("Please enter a valid absolut pathname with / as a path separator."),
         allow_empty=allow_empty,
@@ -1363,20 +1210,19 @@ def AbsoluteDirname(  # pylint: disable=redefined-builtin
     )
 
 
-class Url(TextAscii):
+class Url(TextInput):
     def __init__(  # pylint: disable=redefined-builtin
         self,
         default_scheme: str,
         allowed_schemes: List[str],
         show_as_link: bool = False,
         target: _Optional[str] = None,
-        # TextAscii
+        # TextInput
         label: _Optional[str] = None,
         size: Union[int, str] = 64,
         try_max_width: bool = False,
         cssclass: str = "text",
         strip: bool = True,
-        attrencode: bool = True,
         allow_empty: bool = True,
         empty_text: str = "",
         read_only: bool = False,
@@ -1384,6 +1230,7 @@ class Url(TextAscii):
         regex: Union[None, str, Pattern[str]] = None,
         regex_error: _Optional[str] = None,
         minlen: _Optional[int] = None,
+        maxlen: _Optional[int] = None,
         onkeyup: _Optional[str] = None,
         autocomplete: bool = True,
         hidden: bool = False,
@@ -1399,7 +1246,6 @@ class Url(TextAscii):
             try_max_width=try_max_width,
             cssclass=cssclass,
             strip=strip,
-            attrencode=attrencode,
             allow_empty=allow_empty,
             empty_text=empty_text,
             read_only=read_only,
@@ -1407,6 +1253,7 @@ class Url(TextAscii):
             regex=regex,
             regex_error=regex_error,
             minlen=minlen,
+            maxlen=maxlen,
             onkeyup=onkeyup,
             autocomplete=autocomplete,
             hidden=hidden,
@@ -1442,7 +1289,7 @@ class Url(TextAscii):
             value = self._default_scheme + "://" + value
         return value
 
-    def value_to_text(self, value: str) -> str:
+    def value_to_text(self, value: str) -> ValueSpecText:
         if not any(value.startswith(scheme + "://") for scheme in self._allowed_schemes):
             value = self._default_scheme + "://" + value
 
@@ -1457,8 +1304,9 @@ class Url(TextAscii):
 
         # Remove trailing / if the url does not contain any path component
         if self._show_as_link:
-            return u"%s" % html.render_a(
-                text, href=value, target=self._link_target if self._link_target else None)
+            return html.render_a(text,
+                                 href=value,
+                                 target=self._link_target if self._link_target else None)
 
         return value
 
@@ -1468,7 +1316,7 @@ def HTTPUrl(  # pylint: disable=redefined-builtin
     # Url
     regex: Union[None, str, Pattern[str]] = None,
     regex_error: _Optional[str] = None,
-    # TextAscii
+    # TextInput
     allow_empty: bool = True,
     size: Union[int, str] = 80,
     # ValueSpec
@@ -1496,7 +1344,7 @@ def CheckMKVersion(
     title: _Optional[str] = None,
     default_value: Any = DEF_VALUE,
 ):
-    return TextAscii(
+    return TextInput(
         regex=r"[0-9]+\.[0-9]+\.[0-9]+([bpi][0-9]+|i[0-9]+p[0-9]+)?$",
         regex_error=_("This is not a valid Checkmk version number"),
         title=title,
@@ -1504,20 +1352,19 @@ def CheckMKVersion(
     )
 
 
-class TextAreaUnicode(TextUnicode):
+class TextAreaUnicode(TextInput):
     def __init__(  # pylint: disable=redefined-builtin
         self,
         cols: int = 60,
         rows: Union[int, str] = 20,
         minrows: int = 0,
         monospaced: bool = False,
-        # TextAscii
+        # TextInput
         label: _Optional[str] = None,
         size: Union[int, str] = 64,
         try_max_width: bool = False,
         cssclass: str = "text",
         strip: bool = True,
-        attrencode: bool = True,
         allow_empty: bool = True,
         empty_text: str = "",
         read_only: bool = False,
@@ -1525,6 +1372,7 @@ class TextAreaUnicode(TextUnicode):
         regex: Union[None, str, Pattern[str]] = None,
         regex_error: _Optional[str] = None,
         minlen: _Optional[int] = None,
+        maxlen: _Optional[int] = None,
         onkeyup: _Optional[str] = None,
         autocomplete: bool = True,
         hidden: bool = False,
@@ -1540,7 +1388,6 @@ class TextAreaUnicode(TextUnicode):
             try_max_width=try_max_width,
             cssclass=cssclass,
             strip=strip,
-            attrencode=attrencode,
             allow_empty=allow_empty,
             empty_text=empty_text,
             read_only=read_only,
@@ -1548,6 +1395,7 @@ class TextAreaUnicode(TextUnicode):
             regex=regex,
             regex_error=regex_error,
             minlen=minlen,
+            maxlen=maxlen,
             onkeyup=onkeyup,
             autocomplete=autocomplete,
             hidden=hidden,
@@ -1562,20 +1410,18 @@ class TextAreaUnicode(TextUnicode):
         self._minrows = minrows  # Minimum number of initial rows when "auto"
         self._monospaced = monospaced  # select TT font
 
-    def value_to_text(self, value: str) -> str:
+    def value_to_text(self, value: str) -> ValueSpecText:
         if self._monospaced:
-            # TODO: This is a workaround for a bug. This function needs to return str objects right now.
-            return "%s" % html.render_pre(HTML(value), class_="ve_textarea")
-        return escaping.escape_attribute(value).replace("\n", "<br>")
+            return html.render_pre(HTML(value), class_="ve_textarea")
+        return value.replace("\n", "<br>")
 
-    # TODO: Once we switched to Python 3 we can merge the unicode and non unicode class
-    def render_input(self, varprefix: str, value: str) -> None:  # type: ignore[override]
+    def render_input(self, varprefix: str, value: _Optional[str]) -> None:
         if value is None:
             value = ""  # should never happen, but avoids exception for invalid input
         if self._rows == "auto":
             func = 'cmk.valuespecs.textarea_resize(this);'
             attrs = {"onkeyup": func, "onmousedown": func, "onmouseup": func, "onmouseout": func}
-            if html.request.has_var(varprefix):
+            if request.has_var(varprefix):
                 rows = len(self.from_html_vars(varprefix).splitlines())
             else:
                 rows = len(value.splitlines())
@@ -1596,9 +1442,8 @@ class TextAreaUnicode(TextUnicode):
                        **attrs)
 
     # Overridden because we do not want to strip() here and remove '\r'
-    # TODO: Once we switched to Python 3 we can merge the unicode and non unicode class
-    def from_html_vars(self, varprefix: str) -> str:  # type: ignore[override]
-        text = html.request.get_unicode_input_mandatory(varprefix, "").replace('\r', '')
+    def from_html_vars(self, varprefix: str) -> str:
+        text = request.get_unicode_input_mandatory(varprefix, "").replace('\r', '')
         if text and not text.endswith("\n"):
             text += "\n"  # force newline at end
         return text
@@ -1606,21 +1451,20 @@ class TextAreaUnicode(TextUnicode):
 
 # TODO: Rename the valuespec here to ExistingFilename or somehting similar
 # TODO: Change to factory?
-class Filename(TextAscii):
-    """A variant of TextAscii() that validates a path to a filename that lies in an existing directory."""
+class Filename(TextInput):
+    """A variant of TextInput() that validates a path to a filename that lies in an existing directory."""
 
     # TODO: Cleanup default / default_value?
     def __init__(  # pylint: disable=redefined-builtin
         self,
         default: str = "/tmp/foo",
         trans_func: _Optional[Callable[[str], str]] = None,
-        # TextAscii
+        # TextInput
         label: _Optional[str] = None,
         size: Union[int, str] = 60,
         try_max_width: bool = False,
         cssclass: str = "text",
         strip: bool = True,
-        attrencode: bool = True,
         allow_empty: bool = True,
         empty_text: str = "",
         read_only: bool = False,
@@ -1628,6 +1472,7 @@ class Filename(TextAscii):
         regex: Union[None, str, Pattern[str]] = None,
         regex_error: _Optional[str] = None,
         minlen: _Optional[int] = None,
+        maxlen: _Optional[int] = None,
         onkeyup: _Optional[str] = None,
         autocomplete: bool = True,
         hidden: bool = False,
@@ -1643,7 +1488,6 @@ class Filename(TextAscii):
             try_max_width=try_max_width,
             cssclass=cssclass,
             strip=strip,
-            attrencode=attrencode,
             allow_empty=allow_empty,
             empty_text=empty_text,
             read_only=read_only,
@@ -1651,6 +1495,7 @@ class Filename(TextAscii):
             regex=regex,
             regex_error=regex_error,
             minlen=minlen,
+            maxlen=maxlen,
             onkeyup=onkeyup,
             autocomplete=autocomplete,
             hidden=hidden,
@@ -1715,7 +1560,7 @@ class ListOfStrings(ValueSpec):
     ):
         super().__init__(title=title, help=help, default_value=default_value, validate=validate)
 
-        self._valuespec = valuespec if valuespec is not None else TextAscii(size=size)
+        self._valuespec = valuespec if valuespec is not None else TextInput(size=size)
         self._vertical = orientation == "vertical"
         self._allow_empty = allow_empty
         self._empty_text = empty_text
@@ -1745,13 +1590,13 @@ class ListOfStrings(ValueSpec):
 
     def render_input(self, varprefix: str, value: List[str]) -> None:
         # Form already submitted?
-        if html.request.has_var(varprefix + "_0"):
+        if request.has_var(varprefix + "_0"):
             value = self.from_html_vars(varprefix)
             # Remove variables from URL, so that they do not appear
             # in hidden_fields()
             nr = 0
-            while html.request.has_var(varprefix + "_%d" % nr):
-                html.request.del_var(varprefix + "_%d" % nr)
+            while request.has_var(varprefix + "_%d" % nr):
+                request.del_var(varprefix + "_%d" % nr)
                 nr += 1
 
         class_ = ["listofstrings"]
@@ -1769,7 +1614,7 @@ class ListOfStrings(ValueSpec):
             self._valuespec.render_input(varprefix + "_%d" % nr, s)
             if not self._vertical and self._separator:
                 html.nbsp()
-                html.write(self._separator)
+                html.write_text(self._separator)
                 html.nbsp()
             html.close_div()
         html.close_div()
@@ -1781,30 +1626,26 @@ class ListOfStrings(ValueSpec):
     def canonical_value(self) -> List[str]:
         return []
 
-    def value_to_text(self, value: List[str]) -> str:
+    def value_to_text(self, value: List[str]) -> ValueSpecText:
         if not value:
             return self._empty_text
 
         if self._vertical:
-            # TODO: This is a workaround for a bug. This function needs to return str objects right now.
             s = [
                 html.render_tr(html.render_td(HTML(self._valuespec.value_to_text(v))))
                 for v in value
             ]
-            return "%s" % html.render_table(HTML().join(s))
-        return u", ".join([self._valuespec.value_to_text(v) for v in value])
+            return html.render_table(HTML().join(s))
+        return HTML(", ").join(self._valuespec.value_to_text(v) for v in value)
 
     def from_html_vars(self, varprefix: str) -> List[str]:
-        value: List[str] = []
-        nr = 0
-        while True:
-            varname = varprefix + "_%d" % nr
-            if not html.request.has_var(varname):
-                break
-            if html.request.get_str_input_mandatory(varname, "").strip():
-                value.append(self._valuespec.from_html_vars(varname))
-            nr += 1
-        return value
+        list_prefix = varprefix + "_"
+        return [
+            self._valuespec.from_html_vars(varname)
+            for varname, value in request.itervars()
+            if varname.startswith(list_prefix) and varname[len(list_prefix):].isdigit() and
+            value.strip()
+        ]
 
     def validate_datatype(self, value: List[str], varprefix: str) -> None:
         if not isinstance(value, list):
@@ -1921,7 +1762,7 @@ class ListOf(ValueSpec):
         # In the 'complain' phase, where the user already saved the
         # form but the validation failed, we must not display the
         # original 'value' but take the value from the HTML variables.
-        if html.request.has_var("%s_count" % varprefix):
+        if request.has_var("%s_count" % varprefix):
             count = len(self.get_indexes(varprefix))
             value = [None] * count  # dummy for the loop
         else:
@@ -2066,7 +1907,7 @@ class ListOf(ValueSpec):
     def canonical_value(self) -> List[Any]:
         return []
 
-    def value_to_text(self, value: List[Any]) -> str:
+    def value_to_text(self, value: List[Any]) -> ValueSpecText:
         if self._totext:
             if "%d" in self._totext:
                 return self._totext % len(value)
@@ -2074,16 +1915,15 @@ class ListOf(ValueSpec):
         if not value:
             return self._text_if_empty
 
-        # TODO: This is a workaround for a bug. This function needs to return str objects right now.
-        s = [html.render_tr(html.render_td(HTML(self._valuespec.value_to_text(v)))) for v in value]
-        return "%s" % html.render_table(HTML().join(s))
+        return html.render_table(HTML().join(
+            html.render_tr(html.render_td(self._valuespec.value_to_text(v))) for v in value))
 
     def get_indexes(self, varprefix: str) -> Dict[int, int]:
-        count = html.request.get_integer_input_mandatory(varprefix + "_count", 0)
+        count = request.get_integer_input_mandatory(varprefix + "_count", 0)
         n = 1
         indexes = {}
         while n <= count:
-            indexof = html.request.var(varprefix + "_indexof_%d" % n)
+            indexof = request.var(varprefix + "_indexof_%d" % n)
             # for deleted entries, we have removed the whole row, therefore indexof is None
             if indexof is not None:
                 indexes[int(indexof)] = n
@@ -2187,7 +2027,7 @@ class ListOfMultiple(ValueSpec):
         # In the 'complain' phase, where the user already saved the
         # form but the validation failed, we must not display the
         # original 'value' but take the value from the HTML variables.
-        if html.request.var("%s_active" % varprefix):
+        if request.var("%s_active" % varprefix):
             value = self.from_html_vars(varprefix)
 
         sorted_idents: List[str] = []
@@ -2255,18 +2095,17 @@ class ListOfMultiple(ValueSpec):
     def canonical_value(self) -> Dict[str, Any]:
         return {}
 
-    def value_to_text(self, value: Dict[str, Any]) -> str:
+    def value_to_text(self, value: Dict[str, Any]) -> HTML:
         table_content = HTML()
         for ident, val in value.items():
             vs = self._choice_dict[ident]
-            # TODO: This is a workaround for a bug. This function needs to return str objects right now.
             table_content += html.render_tr(
-                html.render_td(vs.title()) + html.render_td(HTML(vs.value_to_text(val))))
-        return "%s" % html.render_table(table_content)
+                html.render_td(vs.title()) + html.render_td(vs.value_to_text(val)))
+        return html.render_table(table_content)
 
     def from_html_vars(self, varprefix: str) -> Dict[str, Any]:
         value: Dict[str, Any] = {}
-        active = html.request.get_str_input_mandatory('%s_active' % varprefix).strip()
+        active = request.get_str_input_mandatory('%s_active' % varprefix).strip()
         if not active:
             return value
 
@@ -2290,15 +2129,16 @@ class ListOfMultiple(ValueSpec):
 
 class ABCPageListOfMultipleGetChoice(AjaxPage, metaclass=abc.ABCMeta):
     @abc.abstractmethod
-    def _get_choices(self, request: Dict[str, str]) -> List[_Tuple[str, ValueSpec]]:
+    def _get_choices(self, api_request: Dict[str, str]) -> List[_Tuple[str, ValueSpec]]:
         raise NotImplementedError()
 
     def page(self) -> Dict:
-        request = html.get_request()
-        vs = ListOfMultiple(self._get_choices(request), "unused_dummy_page")
-        with html.plugged():
-            vs.show_choice_row(ensure_str(request["varprefix"]), ensure_str(request["ident"]), {})
-            return {"html_code": html.drain()}
+        api_request = request.get_request()
+        vs = ListOfMultiple(self._get_choices(api_request), "unused_dummy_page")
+        with output_funnel.plugged():
+            vs.show_choice_row(ensure_str(api_request["varprefix"]),
+                               ensure_str(api_request["ident"]), {})
+            return {"html_code": output_funnel.drain()}
 
 
 class Float(ValueSpec):
@@ -2344,7 +2184,7 @@ class Float(ValueSpec):
         return self._display_format % utils.savefloat(value)
 
     def from_html_vars(self, varprefix: str) -> float:
-        return html.request.get_float_input_mandatory(varprefix)
+        return request.get_float_input_mandatory(varprefix)
 
     def value_to_text(self, value: float) -> str:
         txt = self._renderer.format_text(self._render_value(value))
@@ -2456,7 +2296,7 @@ class Checkbox(ValueSpec):
         return json_value
 
     def from_html_vars(self, varprefix: str) -> bool:
-        return bool(html.request.var(varprefix))
+        return bool(request.var(varprefix))
 
     def validate_datatype(self, value: bool, varprefix: str) -> None:
         if not isinstance(value, bool):
@@ -2574,11 +2414,11 @@ class DropdownChoice(ValueSpec):
                                                                   value)))
 
         if value is None and not options:
-            html.write(self._empty_text)
+            html.write_text(self._empty_text)
             return
 
         if len(options) == 0:
-            html.write(self._empty_text)
+            html.write_text(self._empty_text)
             return
 
         html.dropdown(varprefix,
@@ -2602,15 +2442,13 @@ class DropdownChoice(ValueSpec):
             return tmpl % (value,)
         return tmpl
 
-    def value_to_text(self, value: DropdownChoiceValue) -> str:
+    def value_to_text(self, value: DropdownChoiceValue) -> ValueSpecText:
         for val, title in self.choices():
             if value == val:
                 if self._help_separator:
-                    return escaping.escape_attribute(
-                        title.split(self._help_separator, 1)[0].strip())
-                return escaping.escape_attribute(title)
-        return escaping.escape_attribute(
-            self._get_invalid_choice_text(self._invalid_choice_title, value))
+                    return title.split(self._help_separator, 1)[0].strip()
+                return title
+        return self._get_invalid_choice_text(self._invalid_choice_title, value)
 
     def value_to_json(self, value):
         return value
@@ -2631,10 +2469,10 @@ class DropdownChoice(ValueSpec):
             raise MKUserError(varprefix, self._empty_text)
         raise MKUserError(
             varprefix,
-            self._get_invalid_choice_text(self._invalid_choice_error, html.request.var(varprefix)))
+            self._get_invalid_choice_text(self._invalid_choice_error, request.var(varprefix)))
 
     def _is_selected_option_from_html(self, varprefix: str, val: DropdownChoiceValue) -> bool:
-        selected_value = html.request.var(varprefix)
+        selected_value = request.var(varprefix)
         return selected_value == self._option_for_html(val)
 
     def _option_for_html(self, value: DropdownChoiceValue) -> DropdownChoiceValue:
@@ -2662,6 +2500,185 @@ class DropdownChoice(ValueSpec):
 
     def _value_is_invalid(self, value: DropdownChoiceValue) -> bool:
         return all(value != val for val, _title in self.choices())
+
+
+class AjaxDropdownChoice(DropdownChoice):
+    ident = ""
+
+    def __init__(  # pylint: disable=redefined-builtin
+        self,
+        regex: Union[None, str, Pattern[str]] = None,
+        regex_error: _Optional[str] = None,
+        strict: Literal["True", "False", "withHost"] = "False",
+        # DropdownChoice
+        label: _Optional[str] = None,
+        choices: _Optional[DropdownChoices] = None,
+        # From ValueSpec
+        title: _Optional[str] = None,
+        help: _Optional[ValueSpecHelp] = None,
+        default_value: Any = DEF_VALUE,
+        validate: _Optional[ValueSpecValidateFunc] = None,
+    ):
+        super().__init__(
+            label=label,
+            choices=choices or [],
+            encode_value=False,  # because JS picks & passes the values on same page
+            title=title,
+            help=help,
+            default_value=default_value,
+            validate=validate,
+        )
+
+        if isinstance(regex, str):
+            self._regex: _Optional[Pattern[str]] = re.compile(regex)
+        else:
+            self._regex = regex
+        self._regex_error = regex_error if regex_error is not None else \
+            _("Your input does not match the required format.")
+        self._strict = strict
+
+    def from_html_vars(self, varprefix: str) -> str:
+        return request.get_str_input_mandatory(varprefix, "")
+
+    def validate_datatype(self, value: str, varprefix: str) -> None:
+        if not isinstance(value, str):
+            raise MKUserError(
+                varprefix,
+                _("The value must be of type str, but it has type %s") % _type_name(value))
+
+    def _validate_value(self, value: str, varprefix: str) -> None:
+        if value and self._regex and not self._regex.match(ensure_str(value)):
+            raise MKUserError(varprefix, self._regex_error)
+
+    def render_input(self, varprefix: str, value) -> None:
+        if self._label:
+            html.write_text(self._label)
+
+        clean_choices = [(value, value)] if value else self.choices()
+
+        html.dropdown(varprefix,
+                      self._options_for_html(clean_choices),
+                      deflt=self._option_for_html(value),
+                      onchange=self._on_change,
+                      ordered=self._sorted,
+                      style="width: 250px;",
+                      class_=["ajax-vals", self.ident],
+                      read_only=self._read_only,
+                      data_strict=self._strict)
+        #**{"data-strict":self._strict})
+
+    @classmethod
+    @abc.abstractmethod
+    def autocomplete_choices(cls, value: str, params: Dict) -> Choices:
+        raise NotImplementedError()
+
+
+class AutocompleterRegistry(cmk.utils.plugin_registry.Registry[Type[AjaxDropdownChoice]]):
+    def plugin_name(self, instance):
+        return instance.ident
+
+
+autocompleter_registry = AutocompleterRegistry()
+
+
+def _sorted_unique_lq(query: str, limit: int, value: str, params: Dict) -> Choices:
+    """Livestatus query of single column of unique elements.
+    Prepare dropdown choices"""
+    with sites.set_limit(limit):
+        choices = [(h, h) for h in sorted(sites.live().query_column_unique(query))]
+
+    if len(choices) > limit:
+        choices.insert(0, (None, _("(Max suggestions reached, be more specific)")))
+
+    if (value, value) not in choices and params["strict"] == "False":
+        choices.insert(0, (value, value))  # User is allowed to enter anything they want
+    return choices
+
+
+# TODO: Cleanup kwargs
+@autocompleter_registry.register
+class MonitoredHostname(AjaxDropdownChoice):
+    """Hostname input with dropdown completion
+
+    Renders an input field for entering a host name while providing an auto completion dropdown field.
+    Fetching the choices from the current live config via livestatus"""
+    ident = "monitored_hostname"
+
+    def __init__(self, **kwargs):
+        super().__init__(regex=cmk.utils.regex.regex(cmk.utils.regex.REGEX_HOST_NAME),
+                         regex_error=_(
+                             "Please enter a valid hostname or IPv4 address. "
+                             "Only letters, digits, dash, underscore and dot are allowed."),
+                         **kwargs)
+
+    @classmethod
+    def autocomplete_choices(cls, value: str, params: Dict) -> Choices:
+        """Return the matching list of dropdown choices
+        Called by the webservice with the current input field value and the completions_params to get the list of choices"""
+        query = ("GET hosts\n"
+                 "Cache: reload\n"
+                 "Columns: host_name\n"
+                 "Filter: host_name ~~ %s" % livestatus.lqencode(value))
+
+        return _sorted_unique_lq(query, 200, value, params)
+
+
+@autocompleter_registry.register
+class MonitoredServiceDescription(AjaxDropdownChoice):
+    """Unfiltered Service Descriptions for input with dropdown completion
+
+    Renders an input field for entering a service description while providing an auto completion dropdown field.
+    Fetching the choices from the current live config via livestatus"""
+    ident = "monitored_service_description"
+
+    @classmethod
+    def autocomplete_choices(cls, value: str, params: Dict) -> Choices:
+        """Return the matching list of dropdown choices
+        Called by the webservice with the current input field value and the completions_params to get the list of choices"""
+        host = params.get("host")
+        if host is None and params["strict"] == "withHost":
+            return []
+
+        query = ("GET services\n"
+                 "Cache: reload\n"
+                 "Columns: service_description\n"
+                 "Filter: service_description ~~ %s\n" % livestatus.lqencode(value))
+
+        if host:
+            query += "Filter: host_name = %s\n" % livestatus.lqencode(params['host'])
+
+        return _sorted_unique_lq(query, 200, value, params)
+
+
+@page_registry.register_page("ajax_vs_autocomplete")
+class PageVsAutocomplete(AjaxPage):
+    def page(self):
+        api_request = self.webapi_request()
+        ident = api_request["ident"]
+        if not ident:
+            raise MKUserError("ident", _("You need to set the \"%s\" parameter.") % "ident")
+
+        completer = autocompleter_registry.get(ident)
+        if completer is None:
+            raise MKUserError("ident", _("Invalid ident: %s") % ident)
+
+        params = api_request.get("params")
+        if params is None:
+            raise MKUserError("params", _("You need to set the \"%s\" parameter.") % "params")
+
+        value = api_request.get("value")
+        if value is None:
+            raise MKUserError("params", _("You need to set the \"%s\" parameter.") % "value")
+
+        result_data = completer.autocomplete_choices(value, params)
+
+        # Check for correct result_data format
+        assert isinstance(result_data, list)
+        if result_data:
+            assert isinstance(result_data[0], (list, tuple))
+            assert len(result_data[0]) == 2
+
+        return {"choices": result_data}
 
 
 # TODO: Rename to ServiceState() or something like this
@@ -2825,7 +2842,7 @@ class CascadingDropdown(ValueSpec):
         options: Choices = []
         choices = self.choices()
         if not choices:
-            html.write(self._no_elements_text)
+            html.write_text(self._no_elements_text)
             return
 
         for nr, (val, title, vs) in enumerate(choices):
@@ -2848,7 +2865,7 @@ class CascadingDropdown(ValueSpec):
         # cases:
         # 1. Form painted for the first time (no submission yet, vp missing in URL)
         # 2. Form already submitted -> honor URL variable vp for visibility
-        cur_val = html.request.var(vp)
+        cur_val = request.var(vp)
 
         if self._orientation == "vertical":
             html.br()
@@ -2919,13 +2936,13 @@ class CascadingDropdown(ValueSpec):
                              "request_vars": request_vars,
                          })))
 
-    def value_to_text(self, value: CascadingDropdownChoiceValue) -> str:
+    def value_to_text(self, value: CascadingDropdownChoiceValue) -> ValueSpecText:
         value_ident: CascadingDropdownChoiceIdent = value[0] if isinstance(value, tuple) else value
 
         try:
             ident, title, vs = next(elem for elem in self.choices() if elem[0] == value_ident)
         except StopIteration:
-            return "Could not render: %r" % (value,)
+            return _("Could not render: %r") % (value,)
 
         if vs is None and ident == value:
             return title
@@ -2937,19 +2954,18 @@ class CascadingDropdown(ValueSpec):
             return title
 
         if self._render == CascadingDropdown.Render.foldable:
-            with html.plugged():
-                html.begin_foldable_container(
-                    "foldable_cascading_dropdown",
+            with output_funnel.plugged(), foldable_container(
+                    treename="foldable_cascading_dropdown",
                     id_=hashlib.sha256(ensure_binary(repr(value))).hexdigest(),
                     isopen=False,
                     title=title,
                     indent=False,
-                )
-                html.write(rendered_value)
-                html.end_foldable_container()
-            return html.drain()
+            ):
+                html.write_text(rendered_value)
+            return HTML(output_funnel.drain())
 
-        return title + self._separator + rendered_value
+        return (HTML(escaping.escape_text(title)) + HTML(escaping.escape_text(self._separator)) +
+                rendered_value)
 
     def value_to_json(self, value: CascadingDropdownChoiceValue):
         value_ident: CascadingDropdownChoiceIdent = value[0] if isinstance(value, tuple) else value
@@ -2999,7 +3015,7 @@ class CascadingDropdown(ValueSpec):
         if not choices:
             return self.default_value()
 
-        sel = html.request.get_integer_input_mandatory(varprefix + "_sel", 0)
+        sel = request.get_integer_input_mandatory(varprefix + "_sel", 0)
         choice: CascadingDropdownCleanChoice = choices[sel]
         value: CascadingDropdownChoiceValue = choice[0]
         vs: _Optional[ValueSpec] = choice[2]
@@ -3143,7 +3159,7 @@ class ListChoice(ValueSpec):
     def render_input(self, varprefix, value):
         self.load_elements()
         if not self._elements:
-            html.write(self._no_elements_text)
+            html.write_text(self._no_elements_text)
             return
 
         self._draw_listchoice(varprefix, value, self._elements, self._columns, self._toggle_all)
@@ -3151,7 +3167,7 @@ class ListChoice(ValueSpec):
         # Make sure that at least one variable with the prefix is present
         html.hidden_field(varprefix, "1", add_var=True)
 
-    def value_to_text(self, value):
+    def value_to_text(self, value) -> ValueSpecText:
         if not value:
             return self._empty_text
 
@@ -3161,10 +3177,7 @@ class ListChoice(ValueSpec):
         if self._render_orientation == "horizontal":
             return ", ".join(texts)
 
-        # TODO: This is a workaround for a bug. This function needs to return str objects right now.
-        return "%s" % html.render_table(
-            html.render_tr(html.render_td(html.render_br().join(HTML(x) for x in texts))))
-        #OLD: return "<table><tr><td>" + "<br>".join(texts) + "</td></tr></table>"
+        return html.render_table(html.render_tr(html.render_td(html.render_br().join(texts))))
 
     def from_html_vars(self, varprefix):
         self.load_elements()
@@ -3234,6 +3247,9 @@ class DualListChoice(ListChoice):
         help: _Optional[ValueSpecHelp] = None,
         default_value: Any = DEF_VALUE,
         validate: _Optional[ValueSpecValidateFunc] = None,
+        locked_choices: _Optional[List[ChoiceId]] = None,
+        locked_choices_text_singular: _Optional[ChoiceText] = None,
+        locked_choices_text_plural: _Optional[ChoiceText] = None,
     ):
         super().__init__(
             choices=choices,
@@ -3259,6 +3275,11 @@ class DualListChoice(ListChoice):
         else:
             self._rows = 5
         self._size = size  # Total width in ex
+        self._locked_choices = [] if locked_choices is None else locked_choices
+        self._locked_choices_text_singular = locked_choices_text_singular if locked_choices_text_singular is not None else _(
+            "%%d locked element")
+        self._locked_choices_text_plural = locked_choices_text_plural if locked_choices_text_plural is not None else _(
+            "%%d locked elements")
 
     def render_input(self, varprefix, value):
         self.load_elements()
@@ -3332,6 +3353,7 @@ class DualListChoice(ListChoice):
                 style='height:auto' if self._autoheight else "height: %dpx" % (self._rows * 16),
                 ondblclick=select_func if not self._instant_add else '',
                 onchange=onchange_func,
+                locked_choice=self._locked_choice_text(value) if suffix == "selected" else None,
             )
 
             html.close_td()
@@ -3343,17 +3365,25 @@ class DualListChoice(ListChoice):
                           id_=varprefix,
                           add_var=True)
 
-    def _validate_value(self, value, varprefix):
-        try:
-            super()._validate_value(value, varprefix)
-        except MKUserError as e:
-            v = "" if e.varname is None else e.varname
-            raise MKUserError(v + "_selected", e.message)
+    def _locked_choice_text(self, value: Any) -> _Optional[ChoiceText]:
+        locked_choices_text: _Optional[ChoiceText] = None
+        num_locked_choices: int = sum(1 for choice_id in value if choice_id in self._locked_choices)
+        if num_locked_choices:
+            locked_choices_text = ungettext(
+                self._locked_choices_text_singular,
+                self._locked_choices_text_plural,
+                num_locked_choices,
+            ) % num_locked_choices
+        return locked_choices_text
+
+    def _value_is_invalid(self, value: ListChoiceChoiceValue) -> bool:
+        all_elements: List[ChoiceId] = list(dict(self._elements).keys()) + self._locked_choices
+        return all(value != val for val in all_elements)
 
     def from_html_vars(self, varprefix):
         self.load_elements()
         value: List = []
-        selection_str = html.request.var(varprefix, '')
+        selection_str = request.var(varprefix, '')
         if selection_str is None:
             return value
         selected = selection_str.split('|')
@@ -3367,6 +3397,10 @@ class DualListChoice(ListChoice):
             for key, _title in self._elements:
                 if key in selected:
                     value.append(key)
+
+        for locked_choice in self._locked_choices:
+            value.append(locked_choice)
+
         return value
 
 
@@ -3448,8 +3482,8 @@ class OptionalDropdownChoice(DropdownChoice):
             options,
             deflt=defval,  # style="float:left;",
             onchange="cmk.valuespecs.toggle_dropdown(this, '%s_ex');" % varprefix)
-        if html.request.has_var(varprefix):
-            div_is_open = html.request.var(varprefix) == "other"
+        if request.has_var(varprefix):
+            div_is_open = request.var(varprefix) == "other"
         else:
             div_is_open = self.value_is_explicit(value)
 
@@ -3465,7 +3499,7 @@ class OptionalDropdownChoice(DropdownChoice):
         self._explicit.render_input(varprefix + "_ex", input_value)
         html.close_span()
 
-    def value_to_text(self, value):
+    def value_to_text(self, value) -> ValueSpecText:
         for val, title in self.choices():
             if val == value:
                 return title
@@ -3473,7 +3507,7 @@ class OptionalDropdownChoice(DropdownChoice):
 
     def from_html_vars(self, varprefix):
         choices = self.choices()
-        sel = html.request.var(varprefix)
+        sel = request.var(varprefix)
         if sel == "other":
             return self._explicit.from_html_vars(varprefix + "_ex")
 
@@ -3546,7 +3580,7 @@ class RelativeDate(OptionalDropdownChoice):
         reldays = int((round_date(value) - today()) / seconds_per_day)  # fixed: true-division
         super().render_input(varprefix, reldays)
 
-    def value_to_text(self, value):
+    def value_to_text(self, value) -> str:
         reldays = int((round_date(value) - today()) / seconds_per_day)  # fixed: true-division
         if reldays == -1:
             return _("yesterday")
@@ -3681,7 +3715,7 @@ class AbsoluteDate(ValueSpec):
     def set_focus(self, varprefix):
         html.set_focus(varprefix + "_year")
 
-    def value_to_text(self, value):
+    def value_to_text(self, value) -> str:
         return time.strftime(self._format, time.localtime(value))
 
     def value_to_json(self, value):
@@ -3709,7 +3743,7 @@ class AbsoluteDate(ValueSpec):
         for what, title, mmin, mmax in entries:
             try:
                 varname = varprefix + "_" + what
-                part_str = html.request.var(varname, "")
+                part_str = request.var(varname, "")
                 if part_str is None:
                     raise ValueError()
                 part = int(part_str)
@@ -3763,7 +3797,8 @@ class AbsoluteDate(ValueSpec):
                 _("The type of the timestamp must be int or float, but is %s") % _type_name(value))
 
     def _validate_value(self, value, varprefix):
-        if (not self._allow_empty and value is None) or value < 0 or int(value) > (2**31 - 1):
+        if (not self._allow_empty and value is None) or (value is not None and
+                                                         (value < 0 or int(value) > (2**31 - 1))):
             return MKUserError(varprefix, _("%s is not a valid UNIX timestamp") % value)
 
 
@@ -3810,7 +3845,7 @@ class Timeofday(ValueSpec):
 
     def from_html_vars(self, varprefix: str) -> _Optional[TimeofdayValue]:
         # Fully specified
-        text = html.request.get_str_input_mandatory(varprefix, "").strip()
+        text = request.get_str_input_mandatory(varprefix, "").strip()
         if not text:
             return None
 
@@ -3903,10 +3938,10 @@ class TimeofdayRange(ValueSpec):
 
     def value_to_text(self, value: _Optional[TimeofdayRangeValue]) -> str:
         if value is None:
-            return u""
+            return ""
 
-        return ensure_str(self._bounds[0].value_to_text(value[0]) + "-" +
-                          self._bounds[1].value_to_text(value[1]))
+        return (self._bounds[0].value_to_text(value[0]) + "-" +
+                self._bounds[1].value_to_text(value[1]))
 
     def from_html_vars(self, varprefix: str) -> _Optional[TimeofdayRangeValue]:
         from_value = self._bounds[0].from_html_vars(varprefix + "_from")
@@ -3954,9 +3989,9 @@ class TimeofdayRange(ValueSpec):
 class TimeHelper:
     @staticmethod
     def round(timestamp, unit):
-        lt = datetime.datetime.fromtimestamp(timestamp, tzlocal()).replace(hour=0,
-                                                                           minute=0,
-                                                                           second=0)
+        lt = datetime.datetime.fromtimestamp(timestamp, tzlocal()).replace(minute=0, second=0)
+        if unit != 'h':
+            lt = lt.replace(hour=0)
 
         if unit == 'w':
             lt -= datetime.timedelta(days=lt.weekday())
@@ -3964,7 +3999,7 @@ class TimeHelper:
             lt = lt.replace(day=1)
         elif unit == 'y':
             lt = lt.replace(month=1, day=1)
-        elif unit != 'd':
+        elif unit not in {'d', 'h'}:
             raise MKGeneralException("invalid time unit %s" % unit)
 
         return time.mktime(lt.timetuple())
@@ -3988,6 +4023,14 @@ class TimeHelper:
 
         return time.mktime(lt.timetuple())
         # py3 return lt.timestamp()
+
+
+TimerangeValue = Union[None, int, str, _Tuple[str, Any]]  # TODO: Be more specific
+
+
+class ComputedTimerange(NamedTuple):
+    range: _Tuple[int, int]
+    title: str
 
 
 class Timerange(CascadingDropdown):
@@ -4103,7 +4146,7 @@ class Timerange(CascadingDropdown):
                 ("400d", _("The last 400 days")),
             ])
 
-    def value_to_text(self, value: CascadingDropdownChoiceValue):
+    def value_to_text(self, value: CascadingDropdownChoiceValue) -> ValueSpecText:
         for ident, title, _vs in self._get_graph_timeranges():
             if value == ident:
                 return title
@@ -4126,15 +4169,16 @@ class Timerange(CascadingDropdown):
                 return ident
         return value
 
-    def compute_range(self, rangespec):
-        def _date_span(from_time, until_time):
+    @staticmethod
+    def compute_range(rangespec: TimerangeValue) -> ComputedTimerange:
+        def _date_span(from_time: float, until_time: float) -> str:
             start = AbsoluteDate().value_to_text(from_time)
             end = AbsoluteDate().value_to_text(until_time - 1)
             if start == end:
                 return start
-            return start + u" \u2014 " + end
+            return start + " \u2014 " + end
 
-        def _month_edge_days(now: float, day_id: str) -> _Tuple[_Tuple[float, float], str]:
+        def _month_edge_days(now: float, day_id: str) -> ComputedTimerange:
             # base time is current time rounded down to month
             from_time = TimeHelper.round(now, 'm')
             if day_id == 'f1':
@@ -4142,9 +4186,10 @@ class Timerange(CascadingDropdown):
             if day_id == 'l1':
                 from_time = TimeHelper.add(from_time, -1, 'd')
             end_time = TimeHelper.add(from_time, 1, 'd')
-            return (from_time, end_time), time.strftime("%d/%m/%Y", time.localtime(from_time))
+            return ComputedTimerange((int(from_time), int(end_time)),
+                                     time.strftime("%d/%m/%Y", time.localtime(from_time)))
 
-        def _fixed_dates(rangespec):
+        def _fixed_dates(rangespec: _Tuple[str, _Tuple[float, float]]) -> ComputedTimerange:
             from_time, until_time = rangespec[1]
             if from_time > until_time:
                 raise MKUserError("avo_rangespec_9_0_year",
@@ -4152,15 +4197,16 @@ class Timerange(CascadingDropdown):
             if rangespec[0] == 'date':
                 # This includes the end day
                 until_time = TimeHelper.add(until_time, 1, 'd')
-            return (from_time, until_time), _date_span(from_time, until_time)
+            return ComputedTimerange((int(from_time), int(until_time)),
+                                     _date_span(from_time, until_time))
 
         if rangespec is None:
             rangespec = "4h"
         elif isinstance(rangespec, int):
             rangespec = ("age", rangespec)
 
-        # Compatibility with previous versions
-        elif rangespec[0] == "pnp_view":
+        elif isinstance(rangespec, tuple) and rangespec[0] == "pnp_view":
+            # Compatibility with previous versions
             rangespec = {
                 1: "4h",
                 2: "25h",
@@ -4171,23 +4217,29 @@ class Timerange(CascadingDropdown):
 
         now = time.time()
 
-        if rangespec[0] == 'age':
-            title = _("The last ") + Age().value_to_text(rangespec[1])
-            return (now - rangespec[1], now), title
-        if rangespec[0] == 'next':
-            title = _("The next ") + Age().value_to_text(rangespec[1])
-            return (now, now + rangespec[1]), title
-        if rangespec[0] == 'until':
-            return (now, rangespec[1]), AbsoluteDate().value_to_text(rangespec[1])
-        if rangespec[0] in ['date', 'time']:
-            return _fixed_dates(rangespec)
+        if isinstance(rangespec, tuple):
+            if rangespec[0] == 'age':
+                title = _("The last ") + Age().value_to_text(rangespec[1])
+                return ComputedTimerange((int(now - rangespec[1]), int(now)), title)
+            if isinstance(rangespec, tuple) and rangespec[0] == 'next':
+                title = _("The next ") + Age().value_to_text(rangespec[1])
+                return ComputedTimerange((int(now), int(now + rangespec[1])), title)
+            if isinstance(rangespec, tuple) and rangespec[0] == 'until':
+                return ComputedTimerange((int(now), int(rangespec[1])),
+                                         AbsoluteDate().value_to_text(rangespec[1]))
+            if isinstance(rangespec, tuple) and rangespec[0] in ['date', 'time']:
+                return _fixed_dates(rangespec)
+
+            raise NotImplementedError()
+
+        assert isinstance(rangespec, str)
 
         if rangespec[0].isdigit():  # 4h, 400d
             count = int(rangespec[:-1])
             from_time = TimeHelper.add(now, count * -1, rangespec[-1])
             unit_name = {'d': "days", 'h': "hours"}[rangespec[-1]]
             title = _("Last %d %s") % (count, unit_name)
-            return (from_time, now), title
+            return ComputedTimerange((int(from_time), int(now)), title)
 
         if rangespec in ['f0', 'f1', 'l1']:
             return _month_edge_days(now, rangespec)
@@ -4204,7 +4256,7 @@ class Timerange(CascadingDropdown):
         }[rangespec[0]]
 
         if rangespec[1] == '0':
-            return (from_time, now), titles[0]
+            return ComputedTimerange((int(from_time), int(now)), titles[0])
 
         # last (previous)
         span = int(rangespec[1:])
@@ -4212,8 +4264,9 @@ class Timerange(CascadingDropdown):
         # day and week spans for historic data
         if rangespec[0] in ['d', 'w']:
             end_time = TimeHelper.add(prev_time, 1, rangespec[0])
+            assert isinstance(titles[1], str)
             title = _date_span(prev_time, end_time) if span > 1 else titles[1]
-            return (prev_time, end_time), title
+            return ComputedTimerange((int(prev_time), int(end_time)), title)
 
         # This only works for Months, but those are the only defaults in Forecast Graphs
         # Language localization to system language not CMK GUI language
@@ -4222,11 +4275,11 @@ class Timerange(CascadingDropdown):
         prev_time_str: str = time.strftime("%B %Y", time.localtime(prev_time))
         end_time_str = time.strftime("%B %Y", time.localtime(from_time - 1))
         if prev_time_str != end_time_str:
-            prev_time_str += u" \u2014 " + end_time_str
+            prev_time_str += " \u2014 " + end_time_str
         if rangespec[0] == "y":
             prev_time_str = time.strftime("%Y", time.localtime(prev_time))
 
-        return (prev_time, from_time), titles[1] or prev_time_str
+        return ComputedTimerange((int(prev_time), int(from_time)), titles[1] or prev_time_str)
 
 
 # TODO: Cleanup kwargs
@@ -4328,7 +4381,7 @@ class Optional(ValueSpec):
             value = self._valuespec.default_value()
         if self._valuespec.title():
             the_title = self._valuespec.title()
-            html.write(("???" if the_title is None else the_title) + " ")
+            html.write_text(("???" if the_title is None else the_title) + " ")
         self._valuespec.render_input(varprefix + "_value", value)
         html.close_span()
 
@@ -4342,7 +4395,7 @@ class Optional(ValueSpec):
             return _(" Ignore this option")
         return _(" Activate this option")
 
-    def value_to_text(self, value):
+    def value_to_text(self, value) -> ValueSpecText:
         if value == self._none_value:
             return self._none_label
         return self._valuespec.value_to_text(value)
@@ -4415,7 +4468,7 @@ class Alternative(ValueSpec):
     def render_input(self, varprefix, value):
         mvs, value = self.matching_alternative(value)
         options: List[_Tuple[_Optional[str], str]] = []
-        sel_option = html.request.var(varprefix + "_use")
+        sel_option = request.var(varprefix + "_use")
         for nr, vs in enumerate(self._elements):
             if not sel_option and vs == mvs:
                 sel_option = str(nr)
@@ -4471,14 +4524,14 @@ class Alternative(ValueSpec):
         except Exception:
             return self._elements[0].default_value()
 
-    def value_to_text(self, value):
+    def value_to_text(self, value) -> ValueSpecText:
         vs, value = self.matching_alternative(value)
         if vs:
-            output = ""
+            output = HTML()
             if self._show_alternative_title and vs.title():
-                output = "%s<br>" % vs.title()
+                output = escape_html_permissive(vs.title()) + html.render_br()
             return output + vs.value_to_text(value)
-        return _("invalid:") + " " + escaping.escape_attribute(str(value))
+        return _("invalid:") + " " + str(value)
 
     def value_to_json(self, value):
         return value
@@ -4487,7 +4540,7 @@ class Alternative(ValueSpec):
         return json_value
 
     def from_html_vars(self, varprefix):
-        nr = html.request.get_integer_input_mandatory(varprefix + "_use")
+        nr = request.get_integer_input_mandatory(varprefix + "_use")
         vs = self._elements[nr]
         return vs.from_html_vars(varprefix + "_%d" % nr)
 
@@ -4555,7 +4608,7 @@ class Tuple(ValueSpec):
             if self._orientation == "vertical":
                 html.open_tr()
             elif self._orientation == "float":
-                html.write(self._separator)
+                html.write_text(self._separator)
 
             if self._show_titles:
                 elem_title = element.title()
@@ -4572,10 +4625,8 @@ class Tuple(ValueSpec):
                 elif self._orientation == "horizontal":
                     html.open_td(class_="tuple_td")
                     if title:
-                        html.open_span(class_=["title"])
-                        html.write(title)
+                        html.span(title, class_=["title"])
 
-                    html.close_span()
                     if self._title_br and title:
                         html.br()
                     else:
@@ -4604,9 +4655,9 @@ class Tuple(ValueSpec):
     def set_focus(self, varprefix):
         self._elements[0].set_focus(varprefix + "_0")
 
-    def value_to_text(self, value):
-        return "" + ", ".join(
-            [element.value_to_text(val) for (element, val) in zip(self._elements, value)]) + ""
+    def value_to_text(self, value) -> ValueSpecText:
+        return HTML(", ").join(
+            element.value_to_text(val) for (element, val) in zip(self._elements, value))
 
     def value_to_json(self, value):
         json_value = []
@@ -4771,7 +4822,8 @@ class Dictionary(ValueSpec):
             else:
                 visible = True
                 if vs.title():
-                    html.write(" %s" % vs.title())
+                    html.write_text(" ")
+                    html.write_text(vs.title())
                 # two_columns are used for space efficiency in very few places like e.g. filters
                 # where it is clear from the context if values are required or not. Therefore, we
                 # dont add a required label in this case.
@@ -4895,7 +4947,7 @@ class Dictionary(ValueSpec):
             if name in self._required_keys or not self._optional_keys or name in self._default_keys
         }
 
-    def value_to_text(self, value):
+    def value_to_text(self, value) -> ValueSpecText:
         value = self.migrate(value)
         if not value:
             return self._empty_text
@@ -4906,18 +4958,14 @@ class Dictionary(ValueSpec):
         elem = self._get_elements()
         return self._value_to_text_multiline(elem, value)
 
-    def _value_to_text_multiline(self, elem, value):
+    def _value_to_text_multiline(self, elem, value) -> HTML:
         s = HTML()
         for param, vs in elem:
             if param in value:
                 s += html.render_tr(
                     html.render_td("%s:&nbsp;" % vs.title(), class_="title") +
-                    html.render_td(self._funny_workaround(vs, value[param])))
-        return str(html.render_table(s))
-
-    def _funny_workaround(self, vs, value):
-        # TODO: This is a workaround for a bug. This function needs to return str objects right now.
-        return HTML(vs.value_to_text(value))
+                    html.render_td(vs.value_to_text(value[param])))
+        return html.render_table(s)
 
     def value_to_json(self, value):
         json_value = {}
@@ -5044,18 +5092,18 @@ class ElementSelection(ValueSpec):
     def render_input(self, varprefix, value):
         self.load_elements()
         if len(self._elements) == 0:
-            html.write(self._empty_text)
+            html.write_text(self._empty_text)
         else:
             if self._label:
                 html.span(self._label, class_="vs_floating_text")
             html.dropdown(varprefix, self._elements.items(), deflt=value, ordered=True)
 
-    def value_to_text(self, value):
+    def value_to_text(self, value) -> ValueSpecText:
         self.load_elements()
-        return escaping.escape_attribute(self._elements.get(value, value))
+        return self._elements.get(value, value)
 
     def from_html_vars(self, varprefix):
-        return html.request.var(varprefix)
+        return request.var(varprefix)
 
     def _validate_value(self, value, varprefix):
         self.load_elements()
@@ -5105,16 +5153,15 @@ class Foldable(ValueSpec):
         self._title_function = title_function
 
     def render_input(self, varprefix: str, value: Any) -> None:
-        html.begin_foldable_container(
-            treename="valuespec_foldable",
-            id_=varprefix,
-            isopen=False,
-            title=self._get_title(varprefix, value),
-            indent=False,
-        )
-        html.help(self._valuespec.help())
-        self._valuespec.render_input(varprefix, value)
-        html.end_foldable_container()
+        with foldable_container(
+                treename="valuespec_foldable",
+                id_=varprefix,
+                isopen=False,
+                title=self._get_title(varprefix, value),
+                indent=False,
+        ):
+            html.help(self._valuespec.help())
+            self._valuespec.render_input(varprefix, value)
 
     def _get_title(self, varprefix: str, value: Any) -> str:
         if self._title_function:
@@ -5140,7 +5187,7 @@ class Foldable(ValueSpec):
     def default_value(self) -> Any:
         return self._valuespec.default_value()
 
-    def value_to_text(self, value: Any) -> str:
+    def value_to_text(self, value: Any) -> ValueSpecText:
         return self._valuespec.value_to_text(value)
 
     def from_html_vars(self, varprefix: str) -> Any:
@@ -5223,7 +5270,7 @@ class Transform(ValueSpec):
     def default_value(self) -> Any:
         return self.back(self._valuespec.default_value())
 
-    def value_to_text(self, value: Any) -> str:
+    def value_to_text(self, value: Any) -> ValueSpecText:
         return self._valuespec.value_to_text(self.forth(value))
 
     def from_html_vars(self, varprefix: str) -> Any:
@@ -5243,7 +5290,7 @@ class Transform(ValueSpec):
 
 
 # TODO: Change to factory, cleanup kwargs
-class LDAPDistinguishedName(TextUnicode):
+class LDAPDistinguishedName(TextInput):
     def __init__(self, enforce_suffix: _Optional[str] = None, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.enforce_suffix = enforce_suffix
@@ -5257,7 +5304,7 @@ class LDAPDistinguishedName(TextUnicode):
             raise MKUserError(varprefix, _('Does not ends with "%s".') % self.enforce_suffix)
 
 
-class Password(TextAscii):
+class Password(TextInput):
     # TODO: Cleanup kwargs
     def __init__(self,
                  is_stored_plain: bool = True,
@@ -5278,7 +5325,7 @@ class Password(TextAscii):
             else:
                 kwargs["help"] = plain_help
 
-        super().__init__(attrencode=True, **kwargs)
+        super().__init__(**kwargs)
 
     def render_input(self, varprefix: str, value: _Optional[str]) -> None:
         if value is None:
@@ -5312,7 +5359,7 @@ class Password(TextAscii):
     def value_to_text(self, value: _Optional[str]) -> str:
         if value is None:
             return _("none")
-        return u'******'
+        return '******'
 
     def from_html_vars(self, varprefix: str) -> str:
         value = super().from_html_vars(varprefix)
@@ -5320,7 +5367,7 @@ class Password(TextAscii):
             return value  # New password entered or unencrypted password
 
         # Gather the value produced by render_input() and use it.
-        value = html.request.get_str_input_mandatory(varprefix + "_orig", "")
+        value = request.get_str_input_mandatory(varprefix + "_orig", "")
         if not value:
             return value
 
@@ -5380,7 +5427,8 @@ class ValueEncrypter:
 
 class PasswordSpec(Password):
     # TODO: Cleanup kwargs
-    def __init__(self, hidden: bool = True, **kwargs: Any) -> None:
+    def __init__(self, hidden: bool = True, pwlen: int = 8, **kwargs: Any) -> None:
+        self._pwlen = pwlen
         super().__init__(hidden=hidden, encrypt_value=False, **kwargs)
 
     def render_input(self, varprefix: str, value: _Optional[str]) -> None:
@@ -5389,7 +5437,7 @@ class PasswordSpec(Password):
             html.icon_button("#",
                              _("Randomize password"),
                              "random",
-                             onclick="cmk.valuespecs.passwordspec_randomize(this);")
+                             onclick=f"cmk.valuespecs.passwordspec_randomize(this, {self._pwlen});")
         if self._hidden:
             html.icon_button("#",
                              _("Show/Hide password"),
@@ -5442,7 +5490,7 @@ class FileUpload(ValueSpec):
         html.upload_file(varprefix)
 
     def from_html_vars(self, varprefix: str) -> UploadedFile:
-        return html.request.uploaded_file(varprefix)
+        return request.uploaded_file(varprefix)
 
 
 class ImageUpload(FileUpload):
@@ -5457,6 +5505,9 @@ class ImageUpload(FileUpload):
         super().__init__(**kwargs)
 
     def render_input(self, varprefix: str, value: bytes) -> None:
+        if isinstance(value, str):
+            # since latin_1 only uses one byte, we can use it for str->byte conversion
+            value = value.encode("latin_1")
         if self._show_current_image and value:
             html.open_table()
             html.open_tr()
@@ -5529,29 +5580,19 @@ class UploadOrPasteTextFile(Alternative):
         return value
 
 
-class ABCTextOrRegExp(Alternative, metaclass=abc.ABCMeta):
-    #@classmethod
-    @abc.abstractmethod
-    def _text_valuespec_class(self) -> Type[ValueSpec]:
-        raise NotImplementedError()
-
-    #@classmethod
-    @abc.abstractmethod
-    def _regex_valuespec_class(self) -> Type[ValueSpec]:
-        raise NotImplementedError()
-
+class TextOrRegExp(Alternative):
     def __init__(self, **kwargs):
         allow_empty = kwargs.pop("allow_empty", True)
 
         if "text_valuespec" in kwargs:
             vs_text = kwargs.pop("text_valuespec")
         else:
-            vs_text = self._text_valuespec_class()(
+            vs_text = TextInput(
                 title=_("Explicit match"),
                 allow_empty=allow_empty,
             )
 
-        vs_regex = self._regex_valuespec_class()(
+        vs_regex = RegExp(
             mode=RegExp.prefix,
             title=_("Regular expression match"),
             allow_empty=allow_empty,
@@ -5574,24 +5615,7 @@ class ABCTextOrRegExp(Alternative, metaclass=abc.ABCMeta):
         super().__init__(**kwargs)
 
 
-class TextOrRegExp(ABCTextOrRegExp):
-    @classmethod
-    def _text_valuespec_class(cls):
-        return TextAscii
-
-    @classmethod
-    def _regex_valuespec_class(cls):
-        return RegExp
-
-
-class TextOrRegExpUnicode(ABCTextOrRegExp):
-    @classmethod
-    def _text_valuespec_class(cls):
-        return TextUnicode
-
-    @classmethod
-    def _regex_valuespec_class(cls):
-        return RegExpUnicode
+TextOrRegExpUnicode = TextOrRegExp  # alias added in 2.1.0 for compatibility
 
 
 class Labels(ValueSpec):
@@ -5625,7 +5649,7 @@ class Labels(ValueSpec):
 
     def help(self) -> Union[str, HTML, None]:
         h = super().help()
-        return (u"" if h is None else h) + label_help_text()
+        return escaping.escape_html_permissive(("" if h is None else str(h)) + label_help_text())
 
     def canonical_value(self):
         return {}
@@ -5634,7 +5658,7 @@ class Labels(ValueSpec):
         labels: Dict[str, Any] = {}
 
         try:
-            decoded_labels = json.loads(html.request.get_unicode_input(varprefix) or "[]")
+            decoded_labels = json.loads(request.get_unicode_input(varprefix) or "[]")
         except ValueError as e:
             raise MKUserError(varprefix, _("Failed to parse labels: %s") % e)
 
@@ -5660,7 +5684,7 @@ class Labels(ValueSpec):
                     varprefix,
                     _("The label value %r is of type %s, but should be %s") % (k, type(v), str))
 
-    def value_to_text(self, value):
+    def value_to_text(self, value) -> HTML:
         label_sources = {k: self._label_source.value for k in value.keys()
                         } if self._label_source else {}
         return render_labels(value, "host", with_links=False, label_sources=label_sources)
@@ -5684,11 +5708,11 @@ def SingleLabel(world, label_source=None, **kwargs):
 class PageAutocompleteLabels(AjaxPage):
     """Return all known labels to support tagify label input dropdown completion"""
     def page(self):
-        request = html.get_request()
+        api_request = request.get_request()
         return encode_labels_for_tagify(
-            self._get_labels(Labels.World(request["world"]), request["search_label"]))
+            self._get_labels(Labels.World(api_request["world"]), api_request["search_label"]))
 
-    def _get_labels(self, world, search_label):
+    def _get_labels(self, world, search_label: str) -> ItemsView[str, str]:
         if world is Labels.World.CONFIG:
             return self._get_labels_from_config(search_label)
 
@@ -5697,28 +5721,17 @@ class PageAutocompleteLabels(AjaxPage):
 
         raise NotImplementedError()
 
-    def _get_labels_from_config(self, search_label):
+    def _get_labels_from_config(self, search_label: str) -> ItemsView[str, str]:
         # TODO: Until we have a config specific implementation we now use the labels known to the
         # core. This is not optimal, but better than doing nothing.
         # To implement a setup specific search, we need to decide which occurrences of labels we
         # want to search: hosts / folders, rules, ...?
         return self._get_labels_from_core(search_label)
 
-    # TODO: Provide information about the label source
-    # Would be better to optimize this kind of query somehow. The best we can
-    # do without extending livestatus is to use the Cache header for liveproxyd
-    def _get_labels_from_core(self, search_label):
-        query = (
-            "GET services\n"  #
-            "Cache: reload\n"  #
-            "Columns: host_labels labels\n")
+    def _get_labels_from_core(self, search_label: str) -> ItemsView[str, str]:
+        labels = get_labels_cache().get_labels()
 
-        labels: Set = set()
-        for row in sites.live().query(query):
-            labels.update(row[0].items())
-            labels.update(row[1].items())
-
-        return list(labels)
+        return labels.items()
 
 
 class IconSelector(ValueSpec):
@@ -5767,10 +5780,10 @@ class IconSelector(ValueSpec):
             return {}
 
         icons = {}
-        for theme in html.icon_themes():
-            dirs = [Path(cmk.utils.paths.local_web_dir) / "htdocs/themes" / theme / "images"]
+        for theme_id in theme.icon_themes():
+            dirs = [Path(cmk.utils.paths.local_web_dir) / "htdocs/themes" / theme_id / "images"]
             if not only_local:
-                dirs.append(Path(cmk.utils.paths.web_dir) / "htdocs/themes" / theme / "images")
+                dirs.append(Path(cmk.utils.paths.web_dir) / "htdocs/themes" / theme_id / "images")
 
             for file_stem, category in self._get_icons_from_directories(
                     dirs, default_category="builtin").items():
@@ -5870,7 +5883,7 @@ class IconSelector(ValueSpec):
         # Handle complain phase with validation errors correctly and get the value
         # from the HTML vars
         if value is None:
-            value = html.request.var(varprefix + "_value")
+            value = request.var(varprefix + "_value")
 
         if not value:
             value = self._empty_img
@@ -5893,7 +5906,7 @@ class IconSelector(ValueSpec):
                            ('varprefix', varprefix),
                            ('allow_empty', '1' if self._allow_empty else '0'),
                            ('show_builtin_icons', '1' if self._show_builtin_icons else '0'),
-                           ('back', makeuri(global_request, [])),
+                           ('back', makeuri(request, [])),
                        ]),
             resizable=True,
         )
@@ -5934,7 +5947,7 @@ class IconSelector(ValueSpec):
                     title=icon,
                 )
 
-                icon_path = (html.detect_icon_path(icon, prefix="emblem")
+                icon_path = (theme.detect_icon_path(icon, prefix="emblem_")
                              if is_emblem and icon != 'empty' else icon)
                 html.write_html(
                     self._render_icon(icon_path, id_=varprefix + '_i_' + icon, title=icon))
@@ -5953,8 +5966,8 @@ class IconSelector(ValueSpec):
                       json.dumps(varprefix))
 
         if config.user.may('wato.icons'):
-            back_param = '&back=' + html.urlencode(
-                html.get_url_input('back')) if html.request.has_var('back') else ''
+            back_param = '&back=' + urlencode(
+                request.get_url_input('back')) if request.has_var('back') else ''
             html.buttonlink('wato.py?mode=icons' + back_param, _('Manage'))
 
         html.close_div()
@@ -5973,14 +5986,13 @@ class IconSelector(ValueSpec):
         return {'icon': icon, 'emblem': emblem}
 
     def _from_html_vars(self, varprefix):
-        icon = html.request.var(varprefix + '_value')
+        icon = request.var(varprefix + '_value')
         if icon == 'empty':
             return None
         return icon
 
-    def value_to_text(self, value):
-        # TODO: This is a workaround for a bug. This function needs to return str objects right now.
-        return "%s" % self._render_icon(value["icon"] if isinstance(value, dict) else value)
+    def value_to_text(self, value) -> HTML:
+        return self._render_icon(value["icon"] if isinstance(value, dict) else value)
 
     def validate_datatype(self, value, varprefix):
         if self._with_emblem and not isinstance(value, (str, dict)):
@@ -6061,12 +6073,12 @@ class Color(ValueSpec):
                            onclose=self._on_change)
 
     def from_html_vars(self, varprefix):
-        color = html.request.var(varprefix + '_value')
+        color = request.var(varprefix + '_value')
         if color == '':
             return None
         return color
 
-    def value_to_text(self, value):
+    def value_to_text(self, value) -> str:
         return value
 
     def validate_datatype(self, value, varprefix):
@@ -6119,40 +6131,46 @@ def ColorWithThemeAndMetricDefault(
     )
 
 
+SSHKeyPairValue = _Tuple[str, str]
+
+
 class SSHKeyPair(ValueSpec):
-    def render_input(self, varprefix, value):
+    def render_input(self, varprefix: str, value: _Optional[SSHKeyPairValue]):
         if value:
-            html.write(_("Fingerprint: %s") % self.value_to_text(value))
+            html.write_text(_("Fingerprint: %s") % self.value_to_text(value))
             html.hidden_field(varprefix, self._encode_key_for_url(value), add_var=True)
         else:
-            html.write(_("Key pair will be generated when you save."))
+            html.write_text(_("Key pair will be generated when you save."))
 
-    def value_to_text(self, value):
+    def value_to_text(self, value: SSHKeyPairValue) -> str:
         return self._get_key_fingerprint(value)
 
-    def from_html_vars(self, varprefix):
-        if html.request.has_var(varprefix):
-            return self._decode_key_from_url(html.request.var(varprefix))
+    def from_html_vars(self, varprefix: str) -> SSHKeyPairValue:
+        if request.has_var(varprefix):
+            return self._decode_key_from_url(request.get_ascii_input_mandatory(varprefix))
         return self._generate_ssh_key(varprefix)
 
     @staticmethod
-    def _encode_key_for_url(value):
+    def _encode_key_for_url(value: SSHKeyPairValue) -> str:
         return "|".join(value)
 
     @staticmethod
-    def _decode_key_from_url(text):
-        return text.split("|")
+    def _decode_key_from_url(text: str) -> SSHKeyPairValue:
+        parts = text.split("|")
+        if len(parts) != 2:
+            raise ValueError("Invalid value: %r" % text)
+        return parts[0], parts[1]
 
     @classmethod
-    def _generate_ssh_key(cls, varprefix):
+    def _generate_ssh_key(cls, varprefix: str) -> SSHKeyPairValue:
         key = RSA.generate(4096)
-        private_key = key.exportKey('PEM')
+        private_key = key.exportKey('PEM').decode("ascii")
         pubkey = key.publickey()
-        public_key = pubkey.exportKey('OpenSSH')
+        public_key = pubkey.exportKey('OpenSSH').decode("ascii")
         return (private_key, public_key)
 
     @classmethod
-    def _get_key_fingerprint(cls, value):
+    def _get_key_fingerprint(cls, value: SSHKeyPairValue) -> str:
         _private_key, public_key = value
         key = base64.b64decode(public_key.strip().split()[1].encode('ascii'))
         fp_plain = hashlib.md5(key).hexdigest()
@@ -6214,19 +6232,21 @@ class CAorCAChain(UploadOrPasteTextFile):
                     cert_info[what][titles[key]] = raw_val.decode("utf-8")
         return cert_info
 
-    def value_to_text(self, value):
+    def value_to_text(self, value) -> str:
         cert_info = self.analyse_cert(value)
-        text = u"<table>"
+
+        rows = []
         for what, title in [
             ("issuer", _("Issuer")),
             ("subject", _("Subject")),
         ]:
-            text += u"<tr><td>%s:</td><td>" % title
-            for title1, val in sorted(cert_info[what].items()):
-                text += u"%s: %s<br>" % (title1, val)
-            text += u"</tr>"
-        text += u"</table>"
-        return text
+            rows.append(
+                html.render_tr(
+                    html.render_td("%s:" % title) + html.render_td(HTML().join(
+                        escaping.escape_html_permissive("%s: %s" % (title1, val))
+                        for title1, val in sorted(cert_info[what].items())))))
+        # TODO: This cast will be removed soon
+        return str(html.render_table(HTML().join(rows)))
 
 
 # TODO: Cleanup kwargs
@@ -6305,7 +6325,7 @@ def LogLevelChoice(**kwargs):
 def rule_option_elements(disabling: bool = True) -> List[DictionaryEntry]:
     elements: List[DictionaryEntry] = [
         ("description",
-         TextUnicode(
+         TextInput(
              title=_("Description"),
              help=_("A description or title of this rule"),
              size=80,
@@ -6336,8 +6356,7 @@ class RuleComment(TextAreaUnicode):
             cols=80,
         )
 
-    # TODO: Once we switched to Python 3 we can merge the unicode and non unicode class
-    def render_input(self, varprefix: str, value: str) -> None:  # type: ignore[override]
+    def render_input(self, varprefix: str, value: _Optional[str]) -> None:
         html.open_div(style="white-space: nowrap;")
 
         super().render_input(varprefix, value)
@@ -6353,8 +6372,8 @@ class RuleComment(TextAreaUnicode):
         html.close_div()
 
 
-def DocumentationURL() -> TextAscii:
-    return TextAscii(
+def DocumentationURL() -> TextInput:
+    return TextInput(
         title=_("Documentation URL"),
         help=HTML(
             _("An optional URL pointing to documentation or any other page. This will be displayed "
@@ -6373,19 +6392,16 @@ def _type_name(v):
         return escaping.escape_attribute(str(type(v)))
 
 
-class DropdownChoiceWithHostAndServiceHints(DropdownChoice):
+class DropdownChoiceWithHostAndServiceHints(AjaxDropdownChoice):
     def __init__(
         self,
-        css_spec: str,
+        css_spec: List[str],
         hint_label: str,
         **kwargs: Any,
     ):
         super().__init__(**kwargs)
         self._css_spec = css_spec
         self._hint_label = hint_label
-
-    def from_html_vars(self, varprefix: str) -> _Optional[str]:
-        return html.request.var(varprefix)
 
     def _choices_from_value(self, value: DropdownChoiceValue) -> Choices:
         raise NotImplementedError()
@@ -6405,26 +6421,15 @@ class DropdownChoiceWithHostAndServiceHints(DropdownChoice):
 
         vs_host = MonitoredHostname(
             label=_("Filter %s selection by hostname: ") % self._hint_label,
-            placeholder=_("Hint a hostname"),
-            size=20,
+            choices=[],
+            strict="True",
         )
         html.br()
-        host_varprefix = varprefix + "_hostname_hint"
-        vs_host.render_input(host_varprefix, None)
-        html.javascript("cmk.valuespecs.transfer_context_onchange('context_host_p_host', %s)" %
-                        json.dumps(host_varprefix))
+        vs_host.render_input(varprefix + "_hostname_hint", None)
 
-        completion_js = '(() => ({host: document.getElementsByName(%s)[0].value}))()' % json.dumps(
-            host_varprefix)
-        vs_service = MonitoredServiceDescription(
-            label=_("Filter %s selection by service: ") % self._hint_label,
-            placeholder=_("Hint a service"),
-            completion_params_js=completion_js,
-            size=20,
-        )
-        service_varprefix = varprefix + "_service_hint"
+        vs_service = MonitoredServiceDescription(label=_("Filter %s selection by service: ") %
+                                                 self._hint_label,
+                                                 choices=[],
+                                                 strict="True")
         html.br()
-        vs_service.render_input(service_varprefix, None)
-        html.javascript(
-            "cmk.valuespecs.transfer_context_onchange('context_service_p_service', %s)" %
-            json.dumps(service_varprefix))
+        vs_service.render_input(varprefix + "_service_hint", None)

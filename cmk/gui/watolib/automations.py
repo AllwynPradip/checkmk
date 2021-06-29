@@ -27,13 +27,13 @@ from cmk.utils.type_defs import AutomationDiscoveryResponse, DiscoveryResult
 import cmk.utils.store as store
 import cmk.utils.version as cmk_version
 
-from cmk.gui.globals import html
+from cmk.gui.globals import request
 import cmk.gui.config as config
 import cmk.gui.hooks as hooks
-from cmk.gui.utils.url_encoder import URLEncoder
+from cmk.gui.utils.urls import urlencode_vars
 from cmk.gui.i18n import _
 from cmk.gui.log import logger
-import cmk.gui.escaping as escaping
+import cmk.gui.utils.escaping as escaping
 from cmk.gui.watolib.sites import SiteManagementFactory
 from cmk.gui.watolib.utils import mk_repr
 from cmk.gui.background_job import BackgroundProcessInterface
@@ -111,7 +111,7 @@ def check_mk_local_automation(command: str,
         # This debug output makes problems when doing bulk inventory, because
         # it garbles the non-HTML response output
         # if config.debug:
-        #     html.write("<div class=message>Running <tt>%s</tt></div>\n" % subprocess.list2cmdline(cmd))
+        #     html.write_text("<div class=message>Running <tt>%s</tt></div>\n" % subprocess.list2cmdline(cmd))
         auto_logger.info("RUN: %s" % subprocess.list2cmdline(cmd))
         p = subprocess.Popen(cmd,
                              stdin=subprocess.PIPE,
@@ -281,9 +281,8 @@ def do_remote_automation(site, command, vars_, files=None, timeout=None):
     if not secret:
         raise MKAutomationException(_("You are not logged into the remote site."))
 
-    url = (base_url + "automation.py?" +
-           URLEncoder().urlencode_vars([("command", command), ("secret", secret),
-                                        ("debug", config.debug and '1' or '')]))
+    url = (base_url + "automation.py?" + urlencode_vars([("command", command), ("secret", secret),
+                                                         ("debug", config.debug and '1' or '')]))
 
     response = get_url(url,
                        site.get('insecure', False),
@@ -313,6 +312,10 @@ def get_url_raw(url, insecure, auth=None, data=None, files=None, timeout=None):
         auth=auth,
         files=files,
         timeout=timeout,
+        headers={
+            "x-checkmk-version": cmk_version.__version__,
+            "x-checkmk-edition": cmk_version.edition_short(),
+        },
     )
 
     response.encoding = "utf-8"  # Always decode with utf-8
@@ -445,11 +448,11 @@ class AutomationCheckmkAutomationStart(AutomationCommand):
 
     def get_request(self) -> CheckmkAutomationRequest:
         return CheckmkAutomationRequest(
-            *ast.literal_eval(html.request.get_ascii_input_mandatory("request")))
+            *ast.literal_eval(request.get_ascii_input_mandatory("request")))
 
-    def execute(self, request: CheckmkAutomationRequest) -> Tuple:
-        job = CheckmkAutomationBackgroundJob(request=request)
-        job.set_function(job.execute_automation, request=request)
+    def execute(self, api_request: CheckmkAutomationRequest) -> Tuple:
+        job = CheckmkAutomationBackgroundJob(api_request=api_request)
+        job.set_function(job.execute_automation, api_request=api_request)
         job.start()
         return job.get_job_id()
 
@@ -462,10 +465,10 @@ class AutomationCheckmkAutomationGetStatus(AutomationCommand):
         return "checkmk-remote-automation-get-status"
 
     def get_request(self) -> str:
-        return ast.literal_eval(html.request.get_ascii_input_mandatory("request"))
+        return ast.literal_eval(request.get_ascii_input_mandatory("request"))
 
-    def execute(self, request: str) -> Tuple:
-        job_id = request
+    def execute(self, api_request: str) -> Tuple:
+        job_id = api_request
         job = CheckmkAutomationBackgroundJob(job_id)
         job_status = job.get_status_snapshot().get_status_as_dict()[job.get_job_id()]
 
@@ -486,28 +489,29 @@ class CheckmkAutomationBackgroundJob(WatoBackgroundJob):
 
     def __init__(self,
                  job_id: Optional[str] = None,
-                 request: Optional[CheckmkAutomationRequest] = None) -> None:
+                 api_request: Optional[CheckmkAutomationRequest] = None) -> None:
         if job_id is not None:
             # Loading an existing job
             super(CheckmkAutomationBackgroundJob, self).__init__(job_id=job_id)
             return
 
-        assert request is not None
+        assert api_request is not None
 
         # A new job is started
         automation_id = str(uuid.uuid4())
         super(CheckmkAutomationBackgroundJob, self).__init__(
-            job_id="%s%s-%s" % (self.job_prefix, request.command, automation_id),
-            title=_("Checkmk automation %s %s") % (request.command, automation_id),
+            job_id="%s%s-%s" % (self.job_prefix, api_request.command, automation_id),
+            title=_("Checkmk automation %s %s") % (api_request.command, automation_id),
         )
 
     def execute_automation(self, job_interface: BackgroundProcessInterface,
-                           request: CheckmkAutomationRequest) -> None:
-        self._logger.info("Starting automation: %s", request.command)
-        self._logger.debug(request)
+                           api_request: CheckmkAutomationRequest) -> None:
+        self._logger.info("Starting automation: %s", api_request.command)
+        self._logger.debug(api_request)
 
-        result = check_mk_local_automation(request.command, request.args, request.indata,
-                                           request.stdin_data, request.timeout)
+        result = check_mk_local_automation(api_request.command, api_request.args,
+                                           api_request.indata, api_request.stdin_data,
+                                           api_request.timeout)
 
         # This file will be read by the get-status request
         result_file_path = os.path.join(job_interface.get_work_dir(), "result.mk")

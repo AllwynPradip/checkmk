@@ -4,8 +4,8 @@
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-import pytest  # type: ignore[import]
-from testlib import on_time  # type: ignore[import]
+import pytest
+from testlib import on_time
 
 from cmk.base.plugins.agent_based.agent_based_api.v1 import (
     Service,
@@ -17,6 +17,7 @@ from cmk.base.plugins.agent_based.agent_based_api.v1 import (
 import cmk.base.plugins.agent_based.docker_container_status as docker
 from cmk.base.plugins.agent_based.utils.docker import AgentOutputMalformatted
 from cmk.base.plugins.agent_based.utils import uptime
+
 NOW_SIMULATED = 1559728800, "UTC"
 STRING_TABLE_WITH_VERSION = [
     [

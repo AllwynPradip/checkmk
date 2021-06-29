@@ -4,12 +4,12 @@
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-import pytest  # type: ignore[import]
-from testlib import ActiveCheck  # type: ignore[import]
+import pytest
+from testlib import ActiveCheck
 
 pytestmark = pytest.mark.checks
 
-STATIC_ARGS = ["--cache", "--inventory-as-check", "$HOSTNAME$"]
+STATIC_ARGS = ["--inventory-as-check", "$HOSTNAME$"]
 
 
 @pytest.mark.parametrize("params,expected_args", [

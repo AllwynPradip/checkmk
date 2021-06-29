@@ -22,7 +22,7 @@ from cmk.gui.log import logger
 from cmk.gui.htmllib import HTML
 from cmk.gui.exceptions import MKUserError
 from cmk.gui.i18n import _
-from cmk.gui.globals import html, request
+from cmk.gui.globals import html, request, transactions
 from cmk.gui.plugins.userdb.utils import load_connection_config, save_connection_config
 from cmk.gui.breadcrumb import Breadcrumb
 from cmk.gui.page_menu import (
@@ -48,6 +48,7 @@ from cmk.gui.plugins.wato import (
 )
 
 from cmk.gui.utils.urls import makeuri_contextless
+from cmk.gui.utils.escaping import escape_html_permissive
 
 if cmk_version.is_managed_edition():
     import cmk.gui.cme.managed as managed  # pylint: disable=no-name-in-module
@@ -127,21 +128,21 @@ class ModeLDAPConfig(LDAPMode):
         )
 
     def action(self) -> ActionResult:
-        if not html.check_transaction():
+        if not transactions.check_transaction():
             return redirect(self.mode_url())
 
         connections = load_connection_config(lock=True)
-        if html.request.has_var("_delete"):
-            index = html.request.get_integer_input_mandatory("_delete")
+        if request.has_var("_delete"):
+            index = request.get_integer_input_mandatory("_delete")
             connection = connections[index]
             self._add_change("delete-ldap-connection",
                              _("Deleted LDAP connection %s") % (connection["id"]))
             del connections[index]
             save_connection_config(connections)
 
-        elif html.request.has_var("_move"):
-            from_pos = html.request.get_integer_input_mandatory("_move")
-            to_pos = html.request.get_integer_input_mandatory("_index")
+        elif request.has_var("_move"):
+            from_pos = request.get_integer_input_mandatory("_move")
+            to_pos = request.get_integer_input_mandatory("_index")
             connection = connections[from_pos]
             self._add_change(
                 "move-ldap-connection",
@@ -193,7 +194,7 @@ class ModeLDAPConfig(LDAPMode):
                                      _("Context information about this connection"),
                                      "url",
                                      target="_blank")
-                    html.write("&nbsp;")
+                    html.write_text("&nbsp;")
                 html.write_text(connection["description"])
 
 
@@ -212,12 +213,12 @@ class ModeEditLDAPConnection(LDAPMode):
         return ModeLDAPConfig
 
     def _from_vars(self):
-        self._connection_id = html.request.get_ascii_input("id")
+        self._connection_id = request.get_ascii_input("id")
         self._connection_cfg = {}
-        self._connections = load_connection_config(lock=html.is_transaction())
+        self._connections = load_connection_config(lock=transactions.is_transaction())
 
         if self._connection_id is None:
-            clone_id = html.request.var("clone")
+            clone_id = request.var("clone")
             if clone_id is not None:
                 self._connection_cfg = self._get_connection_cfg_and_index(clone_id)[0]
 
@@ -239,7 +240,8 @@ class ModeEditLDAPConnection(LDAPMode):
     def title(self):
         if self._new:
             return _("Add LDAP connection")
-        return _("Edit LDAP connection: %s") % html.render_text(self._connection_id)
+        assert self._connection_id is not None
+        return _("Edit LDAP connection: %s") % escape_html_permissive(self._connection_id)
 
     def page_menu(self, breadcrumb: Breadcrumb) -> PageMenu:
         menu = make_simple_form_page_menu(_("Connection"),
@@ -260,7 +262,7 @@ class ModeEditLDAPConnection(LDAPMode):
         return menu
 
     def action(self) -> ActionResult:
-        if not html.check_transaction():
+        if not transactions.check_transaction():
             return None
 
         vs = self._valuespec()
@@ -288,7 +290,7 @@ class ModeEditLDAPConnection(LDAPMode):
 
         save_connection_config(self._connections)
         config.user_connections = self._connections  # make directly available on current page
-        if html.request.var("_save"):
+        if request.var("_save"):
             return redirect(mode_url("ldap_config"))
         # Handle the case where a user hit "Save & Test" during creation
         return redirect(self.mode_url(_test="1", id=self._connection_id))
@@ -310,7 +312,7 @@ class ModeEditLDAPConnection(LDAPMode):
 
         html.open_td(style="padding-left:10px;vertical-align:top")
         html.h2(_('Diagnostics'))
-        if not html.request.var('_test') or not self._connection_id:
+        if not request.var('_test') or not self._connection_id:
             html.show_message(
                 HTML(
                     '<p>%s</p><p>%s</p>' %
@@ -335,7 +337,7 @@ class ModeEditLDAPConnection(LDAPMode):
                             state, msg = test_func(connection, address)
                         except Exception as e:
                             state = False
-                            msg = _('Exception: %s') % html.render_text("%s" % e)
+                            msg = _('Exception: %s') % e
                             logger.exception("error testing LDAP %s for %s", title, address)
 
                         if state:

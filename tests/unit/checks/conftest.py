@@ -4,9 +4,9 @@
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-import pytest  # type: ignore[import]
+import pytest
 
-from testlib.base import Scenario  # type: ignore[import]
+from testlib.base import Scenario
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -35,3 +35,8 @@ def clear_config_caches(monkeypatch):
     ts = Scenario()
     ts.add_host("non-existent-testhost")
     ts.apply(monkeypatch)
+
+
+@pytest.fixture(autouse=True)
+def _autouse_initialised_item_state(initialised_item_state):
+    pass

@@ -44,7 +44,7 @@ import cmk.gui.bi as bi
 import cmk.gui.config as config
 import cmk.utils
 import cmk.utils.render
-from cmk.gui.globals import g, html, request
+from cmk.gui.globals import g, html, request, response
 from cmk.gui.i18n import _
 from cmk.gui.plugins.views import (
     display_options,
@@ -57,7 +57,8 @@ from cmk.gui.type_defs import VisualLinkSpec
 from cmk.gui.plugins.views.icons import Icon, icon_and_action_registry
 from cmk.gui.plugins.views.graphs import cmk_graph_url
 from cmk.gui.utils.popups import MethodAjax
-from cmk.gui.utils.urls import makeuri, makeuri_contextless
+from cmk.gui.utils.urls import makeuri, makeuri_contextless, urlencode
+from cmk.gui.utils.mobile import is_mobile
 
 #   .--Action Menu---------------------------------------------------------.
 #   |          _        _   _               __  __                         |
@@ -98,10 +99,10 @@ class ActionMenuIcon(Icon):
         if what == 'service':
             url_vars.append(('service', row['service_description']))
 
-        if html.request.has_var('display_options'):
-            url_vars.append(('display_options', html.request.var('display_options')))
-        if html.request.has_var('_display_options'):
-            url_vars.append(('_display_options', html.request.var('_display_options')))
+        if request.has_var('display_options'):
+            url_vars.append(('display_options', request.var('display_options')))
+        if request.has_var('_display_options'):
+            url_vars.append(('_display_options', request.var('_display_options')))
         url_vars.append(('_back_url', makeuri(request, [])))
 
         return html.render_popup_trigger(
@@ -399,7 +400,7 @@ class PerfgraphIcon(Icon):
         # Don't show the icon with Checkmk graphing. The hover makes no sense and there is no
         # mobile view for graphs, so the graphs on the bottom of the host/service view are enough
         # for the moment.
-        if html.is_mobile():
+        if is_mobile(request, response):
             return
 
         return html.render_a(
@@ -457,15 +458,17 @@ class PredictionIcon(Icon):
                 if p.startswith("predict_"):
                     varname, _value = p.split("=")
                     dsname = varname[8:]
-                    sitename = row["site"]
-                    url_prefix = config.site(sitename)["url_prefix"]
-                    url = url_prefix + "check_mk/prediction_graph.py?" + html.urlencode_vars([
+                    urlvars = [
+                        ("site", row["site"]),
                         ("host", row["host_name"]),
                         ("service", row["service_description"]),
                         ("dsname", dsname),
-                    ])
-                    title = _("Analyse predictive monitoring for this service")
-                    return 'prediction', title, url
+                    ]
+                    return (
+                        'prediction',
+                        _("Analyse predictive monitoring for this service"),
+                        makeuri_contextless(request, urlvars, "prediction_graph.py"),
+                    )
 
 
 #.
@@ -533,7 +536,7 @@ class LogwatchIcon(Icon):
     def render(self, what, row, tags, custom_vars):
         if what != "service" or row[what + "_check_command"] not in [
                 'check_mk-logwatch',
-                'check_mk-logwatch.groups',
+                'check_mk-logwatch_groups',
         ]:
             return
 
@@ -579,7 +582,7 @@ class NotesIcon(Icon):
         if display_options.enabled(display_options.X):
             notes_url = row[what + "_notes_url_expanded"]
             if notes_url:
-                return 'notes', _('Custom Notes'), notes_url
+                return 'notes', _('Custom Notes'), (notes_url, "_blank")
 
 
 #.
@@ -1076,7 +1079,7 @@ class AggregationIcon(Icon):
             aggr_name = args[start:end]
 
             url = "%s/check_mk/view.py?view_name=aggr_single&aggr_name=%s" % \
-                  (base_url, html.urlencode(aggr_name))
+                  (base_url, urlencode(aggr_name))
 
             return 'aggr', _('Open this Aggregation'), url
 

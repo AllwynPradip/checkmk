@@ -5,17 +5,18 @@
 # conditions defined in the file COPYING, which is part of this source code package.
 
 from typing import Dict, List
+
 from cmk.gui.i18n import _
+from cmk.gui.exceptions import MKUserError
 from cmk.gui.valuespec import (
     Dictionary,
     ListChoice,
     ListOf,
     ListOfStrings,
     Transform,
-    CascadingDropdown,
     DropdownChoice,
-    TextAscii,
-    TextOrRegExpUnicode,
+    TextInput,
+    TextOrRegExp,
 )
 
 from cmk.gui.plugins.wato import (
@@ -28,48 +29,104 @@ from cmk.gui.plugins.wato import (
 from cmk.gui.plugins.wato.check_parameters.utils import vs_filesystem
 
 
+def _validate_discovery_filesystem_params(value, varprefix):
+    mountpoint_for_block_devices = value.get("mountpoint_for_block_devices",
+                                             "volume_name_as_mountpoint")
+    item_appearance = value.get("item_appearance", "mountpoint")
+    grouping_behaviour = value.get("grouping_behaviour", "mountpoint")
+
+    if (item_appearance == "mountpoint" and grouping_behaviour != "mountpoint"):
+        raise MKUserError(
+            varprefix,
+            _("You cannot use mountpoint as item and grouping based on"
+              " volume name and mountpoint."))
+
+    parameters = [
+        p for p in [mountpoint_for_block_devices, item_appearance, grouping_behaviour] if p
+    ]
+    if any("volume_name" in p for p in parameters) and any("uuid" in p for p in parameters):
+        raise MKUserError(
+            varprefix,
+            _("You cannot mix volume name and UUID in 'Mountpoint for block devices',"
+              " 'Item appearance' or 'Grouping'"))
+
+
+def _transform_discovery_filesystem_params(params):
+    include_volume_name = params.pop("include_volume_name", None)
+
+    if isinstance(include_volume_name, tuple):
+        params["item_appearance"] = "volume_name_and_mountpoint"
+        params["grouping_behaviour"] = include_volume_name[1]
+
+    if include_volume_name is True:
+        params["item_appearance"] = "volume_name_and_mountpoint"
+        params["grouping_behaviour"] = "mountpoint"
+
+    if include_volume_name is False:
+        params["item_appearance"] = "mountpoint"
+        params["grouping_behaviour"] = "mountpoint"
+
+    return params
+
+
 def _valuespec_inventory_df_rules():
-    return Dictionary(
-        title=_("Filesystem discovery"),
-        elements=[
-            ("include_volume_name",
-             Transform(
-                 CascadingDropdown(
-                     title=_("Service description format"),
-                     choices=
-                     [(False, _("Name of mount point")),
-                      (True, _("Name of volume and name of mount point"),
-                       DropdownChoice(
-                           label=_("Filesystem grouping"),
-                           choices=[
-                               ('mountpoint', _('Grouping pattern applies to mount point only')),
-                               ('volume_name_and_mountpoint',
-                                _('Grouping pattern applies to volume name and mount point')),
-                           ],
-                           help=_(
-                               "Specifies how the <a href='wato.py?mode=edit_ruleset&varname=filesystem_groups'>Filesystem grouping patterns</a> "
-                               "feature processes this filesystem."),
-                       ))]),
-                 forth=lambda x: (True, "mountpoint") if x is True else x,
-             )),
-            ("ignore_fs_types",
-             ListChoice(title=_("Filesystem types to ignore"),
-                        choices=[
-                            ("tmpfs", "tmpfs"),
-                            ("nfs", "nfs"),
-                            ("smbfs", "smbfs"),
-                            ("cifs", "cifs"),
-                            ("iso9660", "iso9660"),
-                        ],
-                        default_value=["tmpfs", "nfs", "smbfs", "cifs", "iso9660"])),
-            ("never_ignore_mountpoints",
-             ListOf(
-                 TextOrRegExpUnicode(),
-                 title=_("Mountpoints to never ignore"),
-                 help=_(
-                     "Regardless of filesystem type, these mountpoints will always be discovered."
-                     "Regular expressions are supported."))),
-        ],
+    return Transform(
+        Dictionary(
+            title=_("Filesystem discovery"),
+            elements=[
+                ("mountpoint_for_block_devices",
+                 DropdownChoice(
+                     title=_("Mountpoint for block devices (brtfs)"),
+                     choices=[
+                         ("volume_name_as_mountpoint", _("Use volume name as mountpoint")),
+                         ("uuid_as_mountpoint", _("Use UUID as mountpoint")),
+                     ],
+                     default_value="volume_name_as_mountpoint",
+                 )),
+                ("item_appearance",
+                 DropdownChoice(
+                     title=_("Item appearance"),
+                     choices=[
+                         ("mountpoint", _("Use mountpoint")),
+                         ("volume_name_and_mountpoint", _("Use volume name and mountpoint")),
+                         ("uuid_and_mountpoint", _("Use UUID and mountpoint")),
+                     ],
+                     default_value="mountpoint",
+                 )),
+                ("grouping_behaviour",
+                 DropdownChoice(
+                     title=_("Grouping applies to"),
+                     choices=[
+                         ("mountpoint", _("mountpoint only")),
+                         ("volume_name_and_mountpoint", _("volume name and mountpoint")),
+                         ("uuid_and_mountpoint", _("UUID and mountpoint")),
+                     ],
+                     help=_(
+                         "Specifies how the <a href='wato.py?mode=edit_ruleset&varname=filesystem_groups'>Filesystem grouping patterns</a>"
+                         " feature processes this filesystem."),
+                     default_value="mountpoint",
+                 )),
+                ("ignore_fs_types",
+                 ListChoice(title=_("Filesystem types to ignore"),
+                            choices=[
+                                ("tmpfs", "tmpfs"),
+                                ("nfs", "nfs"),
+                                ("smbfs", "smbfs"),
+                                ("cifs", "cifs"),
+                                ("iso9660", "iso9660"),
+                            ],
+                            default_value=["tmpfs", "nfs", "smbfs", "cifs", "iso9660"])),
+                ("never_ignore_mountpoints",
+                 ListOf(
+                     TextOrRegExp(),
+                     title=_("Mountpoints to never ignore"),
+                     help=_(
+                         "Regardless of filesystem type, these mountpoints will always be discovered."
+                         "Regular expressions are supported."))),
+            ],
+            validate=_validate_discovery_filesystem_params,
+        ),
+        forth=_transform_discovery_filesystem_params,
     )
 
 
@@ -115,7 +172,7 @@ def _valuespec_filesystem_groups():
             Dictionary(
                 optional_keys=False,
                 elements=[
-                    ('group_name', TextAscii(title=_("Group name"),)),
+                    ('group_name', TextInput(title=_("Group name"),)),
                     (
                         'patterns_include',
                         ListOfStrings(
@@ -175,7 +232,7 @@ rulespec_registry.register(
 
 
 def _item_spec_filesystem():
-    return TextAscii(
+    return TextInput(
         title=_("Mount point"),
         help=_("For Linux/UNIX systems, specify the mount point, for Windows systems "
                "the drive letter uppercase followed by a colon and a slash, e.g. <tt>C:/</tt>"),

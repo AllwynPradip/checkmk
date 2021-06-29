@@ -11,7 +11,7 @@ import os
 import copy
 import json
 from types import ModuleType
-from typing import Set, Any, AnyStr, Callable, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Set, Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 from pathlib import Path
 import time
 
@@ -121,6 +121,13 @@ class DT_AGGR_WARN:
     pass
 
 
+config_storage_format = "standard"  # new in 2.1. Possible also: "raw"
+
+
+def get_storage_format() -> 'store.StorageFormat':
+    return store.StorageFormat.from_str(config_storage_format)
+
+
 # Has to be declared here once since the functions can be assigned in
 # bi.py and also in multisite.mk. "Double" declarations are no problem
 # here since this is a dict (List objects have problems with duplicate
@@ -140,8 +147,7 @@ aggregation_functions: Dict[str, Callable] = {}
 #   '----------------------------------------------------------------------'
 
 
-def initialize():
-    # type () -> None
+def initialize() -> None:
     clear_user_login()
     load_config()
     log.set_log_levels(log_levels)
@@ -151,9 +157,8 @@ def initialize():
 def _load_config_file(path: str) -> None:
     """Load the given GUI configuration file"""
     try:
-        # TODO: Can be changed to text IO with Python 3
         with Path(path).open("rb") as f:
-            exec(f.read(), globals(), globals())  # yapf: disable
+            exec(f.read(), globals(), globals())
     except IOError as e:
         if e.errno != errno.ENOENT:  # No such file or directory
             raise
@@ -173,9 +178,14 @@ def load_config() -> None:
     # Set default values for all user-changable configuration settings
     _initialize_with_default_config()
 
-    # Initialze sites with default site configuration. Need to do it here to
+    # Initialize sites with default site configuration. Need to do it here to
     # override possibly deleted sites
     sites = default_single_site_configuration()
+
+    # Load assorted experimental parameters if any
+    experimental_config = cmk.utils.paths.make_experimental_config_file()
+    if experimental_config.exists():
+        _load_config_file(str(experimental_config))
 
     # First load main file
     _load_config_file(cmk.utils.paths.default_config_dir + "/multisite.mk")
@@ -359,6 +369,11 @@ def get_ntop_misconfiguration_reason() -> str:
                  "under the current's user settings (identity) but this is not "
                  "set for the current user.")
     return ""
+
+
+def has_custom_logo() -> bool:
+    return cmk_version.is_managed_edition() and customers.get(current_customer, {}).get(
+        "globals", {}).get("logo")
 
 
 #.
@@ -1038,13 +1053,12 @@ def _migrate_pre_16_socket_config(site_cfg: Dict[str, Any]) -> None:
         site_cfg["socket"] = _migrate_string_encoded_socket(socket)
 
 
-def _migrate_string_encoded_socket(value: AnyStr) -> Tuple[str, Union[Dict]]:
-    str_value = ensure_str(value)
-    family_txt, address = str_value.split(":", 1)
+def _migrate_string_encoded_socket(value: str) -> Tuple[str, Union[Dict]]:
+    family_txt, address = value.split(":", 1)
 
     if family_txt == "unix":
         return "unix", {
-            "path": str_value.split(":", 1)[1],
+            "path": value.split(":", 1)[1],
         }
 
     if family_txt in ["tcp", "tcp6"]:
@@ -1233,7 +1247,7 @@ def get_event_console_site_choices() -> List[Tuple[SiteId, str]]:
     return site_choices({
         site_id: site
         for site_id, site in user.authorized_sites(unfiltered_sites=configured_sites()).items()
-        if site_is_local(site_id) or site.get("replication_ec", False)
+        if site_is_local(site_id) or site.get("replicate_ec", False)
     })
 
 

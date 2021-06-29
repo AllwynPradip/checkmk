@@ -321,6 +321,7 @@ default_user_profile: _Dict[str, _Any] = {
     'roles': ['user'],
     'force_authuser': False,
 }
+log_logon_failures = True
 lock_on_logon_failures = False
 user_idle_timeout = 5400
 single_user_session = None
@@ -479,7 +480,6 @@ wato_use_git = False
 wato_hidden_users: _List = []
 wato_user_attrs: _List = []
 wato_host_attrs: _List = []
-wato_legacy_eval = False
 wato_read_only: _Dict = {}
 wato_hide_folders_without_read_permissions = False
 wato_pprint_config = False
@@ -491,6 +491,18 @@ wato_icon_categories = [
 
 _ActivateChangesCommentMode = _Literal["enforce", "optional", "disabled"]
 wato_activate_changes_comment_mode: _ActivateChangesCommentMode = "disabled"
+
+#.
+#   .--REST API------------------------------------------------------------.
+#   |               ____  _____ ____ _____      _    ____ ___              |
+#   |              |  _ \| ____/ ___|_   _|    / \  |  _ \_ _|             |
+#   |              | |_) |  _| \___ \ | |     / _ \ | |_) | |              |
+#   |              |  _ <| |___ ___) || |    / ___ \|  __/| |              |
+#   |              |_| \_\_____|____/ |_|   /_/   \_\_|  |___|             |
+#   |                                                                      |
+#   '----------------------------------------------------------------------'
+
+rest_api_etag_locking = True
 
 #.
 #   .--BI------------------------------------------------------------------.

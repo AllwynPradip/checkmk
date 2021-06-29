@@ -6,8 +6,9 @@
 
 from __future__ import annotations
 
+import copy
 import logging
-from typing import Any, Dict, Final, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Final, List, Mapping, Optional, Tuple, TYPE_CHECKING
 
 import pyghmi.constants as ipmi_const  # type: ignore[import]
 from pyghmi.exceptions import IpmiException  # type: ignore[import]
@@ -57,26 +58,29 @@ class IPMIFetcher(AgentFetcher):
         self.password: Final = password
         self._command: Optional[ipmi_cmd.Command] = None
 
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}(" + ", ".join((
+            f"{type(self.file_cache).__name__}",
+            f"address={self.address!r}",
+            f"username={self.username!r}",
+            f"password={self.password!r}",
+        )) + ")"
+
     @classmethod
-    def _from_json(cls, serialized: Dict[str, Any]) -> IPMIFetcher:
+    def _from_json(cls, serialized: Mapping[str, Any]) -> IPMIFetcher:
+        serialized_ = copy.deepcopy(dict(serialized))
         return cls(
-            DefaultAgentFileCache.from_json(serialized.pop("file_cache")),
-            **serialized,
+            DefaultAgentFileCache.from_json(serialized_.pop("file_cache")),
+            **serialized_,
         )
 
-    def to_json(self) -> Dict[str, Any]:
+    def to_json(self) -> Mapping[str, Any]:
         return {
             "file_cache": self.file_cache.to_json(),
             "address": self.address,
             "username": self.username,
             "password": self.password,
         }
-
-    def _is_cache_read_enabled(self, mode: Mode) -> bool:
-        return mode not in (Mode.CHECKING, Mode.FORCE_SECTIONS)
-
-    def _is_cache_write_enabled(self, mode: Mode) -> bool:
-        return True
 
     def _fetch_from_io(self, mode: Mode) -> AgentRawData:
         if self._command is None:
@@ -170,7 +174,7 @@ class IPMIFetcher(AgentFetcher):
                 # not installed
                 if "GPU" in reading.name and has_no_gpu:
                     continue
-                sensors.append(IPMIFetcher._parse_sensor_reading(sensor.sensor_number, reading))
+                sensors.append(self._parse_sensor_reading(sensor.sensor_number, reading))
 
         return AgentRawData(b"<<<ipmi_sensors:sep(124)>>>\n" +
                             b"".join(b"|".join(sensor) + b"\n" for sensor in sensors))
@@ -212,8 +216,8 @@ class IPMIFetcher(AgentFetcher):
 
         return any("GPU" in line for line in inventory_entries)
 
-    @staticmethod
-    def _parse_sensor_reading(number: int, reading: ipmi_sdr.SensorReading) -> List[AgentRawData]:
+    def _parse_sensor_reading(self, number: int,
+                              reading: ipmi_sdr.SensorReading) -> List[AgentRawData]:
         # {'states': [], 'health': 0, 'name': 'CPU1 Temp', 'imprecision': 0.5,
         #  'units': '\xc2\xb0C', 'state_ids': [], 'type': 'Temperature',
         #  'value': 25.0, 'unavailable': 0}]]
@@ -224,7 +228,7 @@ class IPMIFetcher(AgentFetcher):
             health_txt = b"CRITICAL"
         elif reading.health >= ipmi_const.Health.Warning:
             # workaround for pyghmi bug: https://bugs.launchpad.net/pyghmi/+bug/1790120
-            health_txt = IPMIFetcher._handle_false_positive_warnings(reading)
+            health_txt = self._handle_false_positive_warnings(reading)
         elif reading.health == ipmi_const.Health.Ok:
             health_txt = b"OK"
 
@@ -239,8 +243,7 @@ class IPMIFetcher(AgentFetcher):
             )
         ]
 
-    @staticmethod
-    def _handle_false_positive_warnings(reading: ipmi_sdr.SensorReading) -> AgentRawData:
+    def _handle_false_positive_warnings(self, reading: ipmi_sdr.SensorReading) -> AgentRawData:
         """This is a workaround for a pyghmi bug
         (bug report: https://bugs.launchpad.net/pyghmi/+bug/1790120)
 
@@ -258,13 +261,12 @@ class IPMIFetcher(AgentFetcher):
         The health warning is set, but only due to the lookup errors. We remove the lookup
         errors, and see whether the remaining states are meaningful.
         """
+        self._logger.debug("Raw reading states of %s: %s", reading.name, reading.states)
+
         states = [s.encode("utf-8") for s in reading.states if not s.startswith("Unknown state ")]
 
         if not states:
             return AgentRawData(b"no state reported")
-
-        if any(b"non-critical" in s for s in states):
-            return AgentRawData(b"WARNING")
 
         # just keep all the available info. It should be dealt with in
         # ipmi_sensors.include (freeipmi_status_txt_mapping),

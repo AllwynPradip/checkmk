@@ -239,11 +239,8 @@ class APICallHosts(APICallCollection):
                                                 request.get("create_folders", "1"))
         create_parent_folders = bool(int(create_parent_folders_var))
 
-        # Werk #10863: In 1.6 some hosts / rulesets were saved as unicode
-        # strings.  After reading the config into the GUI ensure we really
-        # process the host names as str. TODO: Can be removed with Python 3.
-        hostname = str(request.get("hostname"))
-        folder_path = str(request.get("folder"))
+        hostname = request["hostname"]
+        folder_path = request.get("folder", "")
         attributes = request.get("attributes", {})
         cluster_nodes = request.get("nodes")
 
@@ -791,6 +788,10 @@ class APICallRules(APICallCollection):
 #   +----------------------------------------------------------------------+
 
 
+def _format_missing_tags(tags):
+    return ", ".join(sorted(["%s:%s" % p for p in tags]))
+
+
 @api_call_collection_registry.register
 class APICallHosttags(APICallCollection):
     def get_api_calls(self):
@@ -853,11 +854,12 @@ class APICallHosttags(APICallCollection):
 
         missing_tags = used_tags - new_tags
         if missing_tags:
+            tags = _format_missing_tags(missing_tags)
             raise MKUserError(
                 None,
                 _("Unable to apply new hosttag configuration. The following tags "
                   "are still in use, but not mentioned in the updated "
-                  "configuration: %s") % ", ".join([":".join(p) for p in missing_tags]))
+                  "configuration: %s") % tags)
 
     def _get_used_tags_from_hosts_and_folders(self):
         used_tags = set()

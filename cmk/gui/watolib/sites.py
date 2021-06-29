@@ -22,13 +22,14 @@ from cmk.gui.sites import SiteConfigurations
 import cmk.gui.config as config
 import cmk.gui.plugins.userdb.utils as userdb_utils
 import cmk.gui.hooks as hooks
-from cmk.gui.globals import html
+from cmk.gui.globals import request, transactions
+from cmk.gui.utils.urls import makeactionuri
 from cmk.gui.i18n import _
 from cmk.gui.exceptions import MKUserError, MKGeneralException
 from cmk.gui.valuespec import (
     CascadingDropdown,
     Checkbox,
-    TextAscii,
+    TextInput,
     Float,
     Integer,
     Tuple,
@@ -94,7 +95,7 @@ class SiteManagement:
             ("unix", _("Connect via UNIX socket"),
              Dictionary(
                  elements=[
-                     ("path", TextAscii(
+                     ("path", TextInput(
                          label=_("Path:"),
                          size=40,
                          allow_empty=False,
@@ -316,7 +317,7 @@ class SiteManagement:
 
         # Make sure that site is not being used by hosts and folders
         if site_id in Folder.root_folder().all_site_ids():
-            search_url = html.makeactionuri([
+            search_url = makeactionuri(request, transactions, [
                 ("host_search_change_site", "on"),
                 ("host_search_site", site_id),
                 ("host_search", "1"),
@@ -335,7 +336,6 @@ class SiteManagement:
         del all_sites[site_id]
         cls.save_sites(all_sites)
         cmk.gui.watolib.activate_changes.clear_site_replication_status(site_id)
-        cmk.gui.watolib.activate_changes.remove_site_config_directory(site_id)
         cmk.gui.watolib.changes.add_change("edit-sites",
                                            _("Deleted site %s") % site_id,
                                            domains=domains,
@@ -514,7 +514,7 @@ class CEESiteManagement(SiteManagement):
         }
 
         defaults = ConfigDomainLiveproxy.connection_params_defaults()
-        for key, val in value.items():
+        for key, val in list(value.items()):
             if val == defaults[key]:
                 del value[key]
 
@@ -708,19 +708,19 @@ class AutomationPushSnapshot(AutomationCommand):
         return "push-snapshot"
 
     def get_request(self) -> PushSnapshotRequest:
-        site_id = html.request.get_ascii_input_mandatory("siteid")
+        site_id = request.get_ascii_input_mandatory("siteid")
         cmk.gui.watolib.activate_changes.verify_remote_site_config(site_id)
 
-        snapshot = html.request.uploaded_file("snapshot")
+        snapshot = request.uploaded_file("snapshot")
         if not snapshot:
             raise MKGeneralException(_('Invalid call: The snapshot is missing.'))
 
         return PushSnapshotRequest(site_id=site_id, tar_content=ensure_binary(snapshot[2]))
 
-    def execute(self, request: PushSnapshotRequest) -> bool:
+    def execute(self, api_request: PushSnapshotRequest) -> bool:
         with store.lock_checkmk_configuration():
             return cmk.gui.watolib.activate_changes.apply_pre_17_sync_snapshot(
-                request.site_id, request.tar_content, Path(cmk.utils.paths.omd_root),
+                api_request.site_id, api_request.tar_content, Path(cmk.utils.paths.omd_root),
                 cmk.gui.watolib.activate_changes.get_replication_paths())
 
 
@@ -732,7 +732,7 @@ def get_effective_global_setting(site_id: SiteId, is_wato_slave_site: bool, varn
         current_settings = load_configuration_settings(site_specific=True)
     else:
         sites = SiteManagementFactory.factory().load_sites()
-        current_settings = sites[site_id].get("globals", {})
+        current_settings = sites.get(site_id, {}).get("globals", {})
 
     if varname in current_settings:
         return current_settings[varname]

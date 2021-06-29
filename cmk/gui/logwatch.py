@@ -17,7 +17,7 @@ import cmk.gui.config as config
 from cmk.gui.table import table_element
 import cmk.gui.sites as sites
 from cmk.gui.i18n import _
-from cmk.gui.globals import html, request
+from cmk.gui.globals import html, request, transactions
 from cmk.gui.exceptions import MKGeneralException, MKUserError, MKAuthException
 from cmk.gui.type_defs import HTTPVariables
 from cmk.gui.breadcrumb import make_simple_page_breadcrumb
@@ -32,7 +32,8 @@ from cmk.gui.page_menu import (
     make_simple_link,
     make_display_options_dropdown,
 )
-from cmk.gui.utils.urls import makeuri, makeuri_contextless, make_confirm_link
+from cmk.gui.utils.urls import makeuri, makeuri_contextless, make_confirm_link, makeactionuri
+from cmk.gui.utils.escaping import escape_html_permissive
 
 #   .--HTML Output---------------------------------------------------------.
 #   |     _   _ _____ __  __ _        ___        _               _         |
@@ -48,9 +49,9 @@ from cmk.gui.utils.urls import makeuri, makeuri_contextless, make_confirm_link
 
 @cmk.gui.pages.register("logwatch")
 def page_show():
-    site = html.request.var("site")  # optional site hint
-    host_name = html.request.var("host", "")
-    file_name = html.request.get_unicode_input("file", "")
+    site = request.var("site")  # optional site hint
+    host_name = request.var("host", "")
+    file_name = request.get_unicode_input("file", "")
 
     # Fix problem when URL is missing certain illegal characters
     try:
@@ -75,7 +76,7 @@ def show_log_list():
     breadcrumb = make_simple_page_breadcrumb(mega_menu_registry.menu_monitoring(), title)
     html.header(title, breadcrumb, _log_list_page_menu(breadcrumb))
 
-    if html.request.has_var('_ack') and not html.request.var("_do_actions") == _("No"):
+    if request.has_var('_ack') and not request.var("_do_actions") == _("No"):
         do_log_ack(site=None, host_name=None, file_name=None)
         return
 
@@ -165,7 +166,7 @@ def show_host_log_list(site, host_name):
     breadcrumb = _host_log_list_breadcrumb(host_name, title)
     html.header(title, breadcrumb, _host_log_list_page_menu(breadcrumb, site, host_name))
 
-    if html.request.has_var('_ack') and not html.request.var("_do_actions") == _("No"):
+    if request.has_var('_ack') and not request.var("_do_actions") == _("No"):
         do_log_ack(site, host_name, file_name=None)
         return
 
@@ -282,7 +283,7 @@ def show_file(site, host_name, file_name):
     breadcrumb = _show_file_breadcrumb(host_name, title)
     html.header(title, breadcrumb, _show_file_page_menu(breadcrumb, site, host_name, int_filename))
 
-    if html.request.has_var('_ack') and not html.request.var("_do_actions") == _("No"):
+    if request.has_var('_ack') and not request.var("_do_actions") == _("No"):
         do_log_ack(site, host_name, file_name)
         return
 
@@ -290,7 +291,7 @@ def show_file(site, host_name, file_name):
         log_chunks = parse_file(site,
                                 host_name,
                                 int_filename,
-                                hidecontext=html.request.var('_hidecontext', 'no') == 'yes')
+                                hidecontext=request.var('_hidecontext', 'no') == 'yes')
     except Exception as e:
         if config.debug:
             raise
@@ -411,17 +412,17 @@ def _show_file_page_menu(breadcrumb: Breadcrumb, site_id: config.SiteId, host_na
 
 def _extend_display_dropdown(menu: PageMenu) -> None:
     display_dropdown = menu.get_dropdown_by_name("display", make_display_options_dropdown())
-    context_hidden = html.request.var('_hidecontext', 'no') == 'yes'
+    context_hidden = request.var('_hidecontext', 'no') == 'yes'
     display_dropdown.topics.insert(
         0,
         PageMenuTopic(
             title=_("Context"),
             entries=[
                 PageMenuEntry(
-                    title=_("Show context") if context_hidden else _("Hide context"),
-                    icon_name="checkbox",
+                    title=_("Show context"),
+                    icon_name="checkbox" if context_hidden else "checked_checkbox",
                     item=make_simple_link(
-                        html.makeactionuri([
+                        makeactionuri(request, transactions, [
                             ("_show_backlog", "no") if context_hidden else ("_hidecontext", "yes"),
                         ])),
                 ),
@@ -464,7 +465,7 @@ def _page_menu_entry_acknowledge(site: Optional[config.SiteId] = None,
         icon_name="delete",
         item=make_simple_link(
             make_confirm_link(
-                url=html.makeactionuri(urivars),
+                url=makeactionuri(request, transactions, urivars),
                 message=_("Do you really want to acknowledge %s "
                           "by <b>deleting</b> all stored messages?") % ack_msg,
             )),
@@ -499,7 +500,7 @@ def do_log_ack(site, host_name, file_name):
                 logs_to_ack.append((this_site, this_host, file_name, file_display))
 
     ack_msg = _get_ack_msg(host_name, file_name)
-    ack = html.request.var('_ack')
+    ack = request.var('_ack')
 
     if not config.user.may("general.act"):
         html.h1(_('Permission denied'), class_=["error"])
@@ -635,7 +636,7 @@ def parse_file(site, host_name, file_name, hidecontext=False):
         if config.debug:
             raise
         raise MKGeneralException(
-            html.render_text(_("Cannot parse log file %s: %s") % (file_name, e)))
+            escape_html_permissive(_("Cannot parse log file %s: %s") % (file_name, e)))
 
     return log_chunks
 

@@ -74,6 +74,7 @@ REMOVED_CHECK_PLUGIN_MAP = {
     CheckPluginName("datapower_tcp"): CheckPluginName("tcp_conn_stats"),
     CheckPluginName("docker_container_mem"): CheckPluginName("mem_used"),
     CheckPluginName("emc_vplex_if"): CheckPluginName("interfaces"),
+    CheckPluginName("entity_sensors"): CheckPluginName("entity_sensors_temp"),
     CheckPluginName("hp_msa_if"): CheckPluginName("interfaces"),
     CheckPluginName("hr_mem"): CheckPluginName("mem_used"),
     CheckPluginName("if64adm"): CheckPluginName("if64"),
@@ -91,6 +92,8 @@ REMOVED_CHECK_PLUGIN_MAP = {
     CheckPluginName("ucs_bladecenter_if"): CheckPluginName("interfaces"),
     CheckPluginName("vms_if"): CheckPluginName("interfaces"),
     CheckPluginName("winperf_tcp_conn"): CheckPluginName("tcp_conn_stats"),
+    CheckPluginName("cisco_wlc_clients"): CheckPluginName("wlc_clients"),
+    CheckPluginName("aruba_wlc_clients"): CheckPluginName("wlc_clients"),
 }
 
 # List[(old_config_name, new_config_name, replacement_dict{old: new})]
@@ -127,8 +130,10 @@ class UpdateConfig:
             console_handler = log.logger.handlers[0]
             del log.logger.handlers[:]
             logging.getLogger().addHandler(console_handler)
+        self._has_errors = False
 
-    def run(self):
+    def run(self) -> bool:
+        self._has_errors = False
         self._logger.log(VERBOSE, "Initializing application...")
         with application_and_request_context():
             self._initialize_gui_environment()
@@ -145,11 +150,13 @@ class UpdateConfig:
                 try:
                     step_func()
                 except Exception:
+                    self._has_errors = True
                     self._logger.error(" + \"%s\" failed" % title, exc_info=True)
                     if self._arguments.debug:
                         raise
 
         self._logger.log(VERBOSE, "Done")
+        return self._has_errors
 
     def _steps(self):
         return [
@@ -314,7 +321,7 @@ class UpdateConfig:
             # TODO: in case of known exceptions we don't want the transformed values be combined
             #       with old keys. As soon as we can remove the workaround below we should not
             #       handle any ruleset differently
-            if str(check_plugin.check_ruleset_name) in {"if"}:
+            if str(check_plugin.check_ruleset_name) in {"if", "filesystem"}:
                 return new_params
 
             # TODO: some transform_value() implementations (e.g. 'ps') return parameter with
@@ -427,21 +434,25 @@ class UpdateConfig:
         all_rulesets.set(snmp_exclude_sections_ruleset.name, snmp_exclude_sections_ruleset)
 
     def _transform_replaced_wato_rulesets(self, all_rulesets):
-        replacements: Dict[str, cmk.gui.watolib.rulesets.Ruleset] = {}
-        for ruleset_name in all_rulesets.get_rulesets():
+        deprecated_ruleset_names: Set[str] = set()
+        for ruleset_name, ruleset in all_rulesets.get_rulesets().items():
             if ruleset_name not in REMOVED_WATO_RULESETS_MAP:
                 continue
-            new_ruleset = all_rulesets.get(ruleset_name).clone()
-            new_ruleset.set_name(REMOVED_WATO_RULESETS_MAP[ruleset_name])
+
+            new_ruleset = all_rulesets.get(REMOVED_WATO_RULESETS_MAP[ruleset_name])
+
             if not new_ruleset.is_empty():
                 self._logger.log(VERBOSE, "Found deprecated ruleset: %s" % ruleset_name)
-                replacements.setdefault(ruleset_name, new_ruleset)
 
-        for old_ruleset_name, ruleset in replacements.items():
             self._logger.log(VERBOSE,
-                             "Replacing ruleset %s with %s" % (old_ruleset_name, ruleset.name))
-            all_rulesets.set(ruleset.name, ruleset)
-            all_rulesets.delete(old_ruleset_name)
+                             "Replacing ruleset %s with %s" % (ruleset_name, new_ruleset.name))
+            for folder, _folder_index, rule in ruleset.get_rules():
+                new_ruleset.append_rule(folder, rule)
+
+            deprecated_ruleset_names.add(ruleset_name)
+
+        for deprecated_ruleset_name in deprecated_ruleset_names:
+            all_rulesets.delete(deprecated_ruleset_name)
 
     def _transform_wato_rulesets_params(self, all_rulesets):
         num_errors = 0
@@ -459,7 +470,7 @@ class UpdateConfig:
                         rule.value, e)
                     num_errors += 1
 
-        if num_errors:
+        if num_errors and self._arguments.debug:
             raise MKGeneralException("Failed to transform %d rule values" % num_errors)
 
     def _transform_discovery_disabled_services(self, all_rulesets):
@@ -493,6 +504,12 @@ class UpdateConfig:
             ]
 
     def _validate_regexes_in_item_specs(self, all_rulesets):
+        def format_error(msg: str):
+            return "\033[91m {}\033[00m".format(msg)
+
+        def format_warning(msg: str):
+            return "\033[93m {}\033[00m".format(msg)
+
         num_errors = 0
         for ruleset in all_rulesets.get_rulesets().values():
             for folder, index, rule in ruleset.get_rules():
@@ -508,22 +525,29 @@ class UpdateConfig:
                         re.compile(regex)
                     except re.error as e:
                         self._logger.error(
-                            "ERROR: Invalid regular expression in service condition detected: (Ruleset: %s, Folder: %s, "
-                            "Rule nr: %s, Condition: %s, Exception: %s)", ruleset.name,
+                            format_error(
+                                "ERROR: Invalid regular expression in service condition detected: (Ruleset: %s, Folder: %s, "
+                                "Rule nr: %s, Condition: %s, Exception: %s)"), ruleset.name,
                             folder.path(), index, regex, e)
                         num_errors += 1
                         continue
                     if PureWindowsPath(regex).is_absolute() and _MATCH_SINGLE_BACKSLASH.search(
                             regex):
                         self._logger.warn(
-                            "WARN: Service condition in rule looks like an absolute windows path that is not correctly escaped."
-                            " Use double backslash as directory separator in regex expressions, e.g."
-                            " 'C:\\\\Program Files\\\\'"
-                            " (Ruleset: %s, Folder: %s, Rule nr: %s, Condition:%s)", ruleset.name,
-                            folder.path(), index, regex)
+                            format_warning(
+                                "WARN: Service condition in rule looks like an absolute windows path that is not correctly escaped.\n"
+                                " Use double backslash as directory separator in regex expressions, e.g.\n"
+                                " 'C:\\\\Program Files\\\\'\n"
+                                " (Ruleset: %s, Folder: %s, Rule nr: %s, Condition:%s)"),
+                            ruleset.name, folder.path(), index, regex)
 
         if num_errors:
-            raise MKGeneralException("Detected %d errors in service conditions" % num_errors)
+            self._has_errors = True
+            self._logger.error(
+                format_error("Detected %s errors in service conditions.\n "
+                             "You must correct these errors *before* starting checkmk.\n "
+                             "For more information regarding errors in regular expressions see:\n "
+                             "https://docs.checkmk.com/latest/en/regexes.html"), num_errors)
 
     def _initialize_gui_environment(self):
         self._logger.log(VERBOSE, "Loading GUI plugins...")
@@ -933,14 +957,14 @@ def main(args: List[str]) -> int:
     logger.debug("parsed arguments: %s", arguments)
 
     try:
-        UpdateConfig(logger, arguments).run()
+        has_errors = UpdateConfig(logger, arguments).run()
     except Exception:
         if arguments.debug:
             raise
         logger.exception("ERROR: Please repair this and run \"cmk-update-config -v\" "
                          "BEFORE starting the site again.")
         return 1
-    return 0
+    return 1 if has_errors else 0
 
 
 def parse_arguments(args: List[str]) -> argparse.Namespace:

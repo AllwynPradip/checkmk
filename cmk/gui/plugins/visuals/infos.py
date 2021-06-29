@@ -5,7 +5,7 @@
 # conditions defined in the file COPYING, which is part of this source code package.
 
 from cmk.gui.i18n import _
-from cmk.gui.valuespec import (TextUnicode, Integer, MonitoredHostname, MonitoredServiceDescription)
+from cmk.gui.valuespec import TextInput, Integer, MonitoredHostname, MonitoredServiceDescription
 
 from cmk.gui.plugins.visuals import (
     VisualInfo,
@@ -29,7 +29,7 @@ class VisualInfoHost(VisualInfo):
 
     @property
     def single_spec(self):
-        return [('host', MonitoredHostname(title=_('Hostname'),))]
+        return [('host', MonitoredHostname(title=_('Hostname'), strict="True"))]
 
     @property
     def multiple_site_filters(self):
@@ -56,7 +56,8 @@ class VisualInfoService(VisualInfo):
 
     @property
     def single_spec(self):
-        return [('service', MonitoredServiceDescription(title=_('Service Description')))]
+        return [('service',
+                 MonitoredServiceDescription(title=_('Service Description'), strict="True"))]
 
     @property
     def multiple_site_filters(self):
@@ -83,7 +84,7 @@ class VisualInfoHostgroup(VisualInfo):
 
     @property
     def single_spec(self):
-        return [('hostgroup', TextUnicode(title=_('Host Group Name'),))]
+        return [('hostgroup', TextInput(title=_('Host Group Name'),))]
 
     @property
     def single_site(self):
@@ -111,7 +112,7 @@ class VisualInfoServicegroup(VisualInfo):
     @property
     def single_spec(self):
         return [
-            ('servicegroup', TextUnicode(title=_('Service Group Name'),)),
+            ('servicegroup', TextInput(title=_('Service Group Name'),)),
         ]
 
     @property
@@ -201,7 +202,7 @@ class VisualInfoContact(VisualInfo):
     @property
     def single_spec(self):
         return [
-            ('log_contact_name', TextUnicode(title=_('Contact Name'),)),
+            ('log_contact_name', TextInput(title=_('Contact Name'),)),
         ]
 
 
@@ -222,7 +223,7 @@ class VisualInfoCommand(VisualInfo):
     @property
     def single_spec(self):
         return [
-            ('command_name', TextUnicode(title=_('Command Name'),)),
+            ('command_name', TextInput(title=_('Command Name'),)),
         ]
 
 
@@ -243,7 +244,7 @@ class VisualInfoBIAggregation(VisualInfo):
     @property
     def single_spec(self):
         return [
-            ('aggr_name', TextUnicode(title=_('Aggregation Name'),)),
+            ('aggr_name', TextInput(title=_('Aggregation Name'),)),
         ]
 
     @property
@@ -268,7 +269,7 @@ class VisualInfoBIAggregationGroup(VisualInfo):
     @property
     def single_spec(self):
         return [
-            ('aggr_group', TextUnicode(title=_('Aggregation group'),)),
+            ('aggr_group', TextInput(title=_('Aggregation group'),)),
         ]
 
     @property
@@ -355,5 +356,5 @@ class VisualInfoCrash(VisualInfo):
     @property
     def single_spec(self):
         return [
-            ('crash_id', TextUnicode(title=_('Crash ID'),)),
+            ('crash_id', TextInput(title=_('Crash ID'),)),
         ]

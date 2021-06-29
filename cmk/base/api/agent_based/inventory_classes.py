@@ -7,8 +7,6 @@
 """
 import string
 from typing import (
-    Any,
-    Dict,
     get_args,
     List,
     Mapping,
@@ -24,6 +22,7 @@ from cmk.utils.type_defs import (
     ParsedSectionName,
     RuleSetName,
 )
+from cmk.base.api.agent_based.type_defs import ParametersTypeAlias
 
 _ATTR_DICT_KEY_TYPE = str
 
@@ -171,7 +170,7 @@ InventoryPlugin = NamedTuple(
         ("name", InventoryPluginName),
         ("sections", List[ParsedSectionName]),
         ("inventory_function", InventoryFunction),
-        ("inventory_default_parameters", Dict[str, Any]),
+        ("inventory_default_parameters", ParametersTypeAlias),
         ("inventory_ruleset_name", Optional[RuleSetName]),
         ("module", Optional[str]),  # not available for auto migrated plugins.
     ],

@@ -9,9 +9,9 @@ To add a new example (new language, library, etc.), a new Jinja2-Template has to
 be referenced in the result of _build_code_templates.
 
 """
+import functools
 import json
 import re
-import threading
 from typing import Any, Dict, List, NamedTuple, Optional, Type, Union
 
 import jinja2
@@ -28,9 +28,6 @@ from cmk.gui.plugins.openapi.restful_objects.type_defs import (
     OpenAPIParameter,
 )
 
-CODE_TEMPLATES_LOCK = threading.Lock()
-
-# This is
 CODE_TEMPLATE_MACROS = """
 {%- macro comments(comment_format="# ", request_schema_multiple=False) %}
 {%- set cf = comment_format %}
@@ -73,13 +70,16 @@ CODE_TEMPLATE_MACROS = """
 CODE_TEMPLATE_URLLIB = """
 #!/usr/bin/env python3
 import json
+{%- set downloadable = endpoint.content_type == 'application/octet-stream' %}
+{%- if downloadable %}
+import shutil{% endif %}
 {%- if query_params %}
 import urllib.parse{% endif %}
 import urllib.request
 
 HOST_NAME = "{{ hostname }}"
 SITE_NAME = "{{ site }}"
-API_URL = f"http://{HOST_NAME}/{SITE_NAME}/check_mk/api/v0"
+API_URL = f"http://{HOST_NAME}/{SITE_NAME}/check_mk/api/1.0"
 
 USERNAME = "{{ username }}"
 PASSWORD = "{{ password }}"
@@ -98,7 +98,7 @@ request = urllib.request.Request(
     method="{{ request_method | upper }}",
     headers={
         "Authorization": f"Bearer {USERNAME} {PASSWORD}",
-        "Accept": "application/json",
+        "Accept": "{{ endpoint.content_type }}",
         {{- list_params(header_params) }}
     },
     {{- comments(comment_format="    # ", request_schema_multiple=request_schema_multiple) }}
@@ -111,14 +111,27 @@ request = urllib.request.Request(
     {%- endif %}
 )
 response = urllib.request.urlopen(request)
-data = json.loads(response.read())
+if response.status == 200:
+    pprint.pprint(json.loads(response.read()))
+elif response.status == 204:
+    {%- if downloadable %}
+    file_name = response.headers["content-disposition"].split("filename=")[1].strip("\"")
+    with open(file_name, 'wb') as out_file:
+        shutil.copyfileobj(response, out_file)
+    {%- endif %}
+    print("Done")
+else:
+    raise RuntimeError(response.read())
 """
 
 CODE_TEMPLATE_CURL = """
 #!/bin/bash
+
+# NOTE: We recommend all shell users to use the "httpie" examples instead.
+
 HOST_NAME="{{ hostname }}"
 SITE_NAME="{{ site }}"
-API_URL="http://$HOST_NAME/$SITE_NAME/check_mk/api/v0"
+API_URL="http://$HOST_NAME/$SITE_NAME/check_mk/api/1.0"
 
 USERNAME="{{ username }}"
 PASSWORD="{{ password }}"
@@ -133,7 +146,7 @@ out=$(
     --request {{ request_method | upper }} \\
     --write-out "\\nxxx-status_code=%{http_code}\\n" \\
     --header "Authorization: Bearer $USERNAME $PASSWORD" \\
-    --header "Accept: application/json" \\
+    --header "Accept: {{ endpoint.content_type }}" \\
 {%- for header in header_params %}
     --header "{{ header.name }}: {{ header.example }}" \\
 {%- endfor %}
@@ -172,7 +185,7 @@ CODE_TEMPLATE_HTTPIE = """
 #!/bin/bash
 HOST_NAME="{{ hostname }}"
 SITE_NAME="{{ site }}"
-API_URL="http://$HOST_NAME/$SITE_NAME/check_mk/api/v0"
+API_URL="http://$HOST_NAME/$SITE_NAME/check_mk/api/1.0"
 
 USERNAME="{{ username }}"
 PASSWORD="{{ password }}"
@@ -180,15 +193,19 @@ PASSWORD="{{ password }}"
 {%- from '_macros' import comments %}
 {{ comments(comment_format="# ", request_schema_multiple=request_schema_multiple) }}
 http {{ request_method | upper }} "$API_URL{{ request_endpoint | fill_out_parameters }}" \\
+    {%- if endpoint.does_redirects %}
+    --follow \\
+    --all \\
+    {%- endif %}
     "Authorization: Bearer $USERNAME $PASSWORD" \\
-    "Accept: application/json" \\
+    "Accept: {{ endpoint.content_type }}" \\
 {%- for header in header_params %}
     '{{ header.name }}:{{ header.example }}' \\
-{% endfor -%}
+{%- endfor %}
 {%- if query_params %}
  {%- for param in query_params %}
   {%- if param.example is defined and param.example %}
-    {{ param.name }}=="{{ param.example }}" \\
+    {{ param.name }}=='{{ param.example }}' \\
   {%- endif %}
  {%- endfor %}
 {%- endif %}
@@ -197,25 +214,31 @@ http {{ request_method | upper }} "$API_URL{{ request_endpoint | fill_out_parame
     {{ key }}='{{ field | field_value }}' \\
  {%- endfor %}
 {%- endif %}
-    --json
+{%- if endpoint.content_type == 'application/octet-stream' %}
+    --download \\
+{%- endif %}
 
 """
 
 # Beware, correct whitespace handling in this template is a bit tricky.
 CODE_TEMPLATE_REQUESTS = """
 #!/usr/bin/env python3
+import pprint
 import requests
+{%- set downloadable = endpoint.content_type == 'application/octet-stream' %}
+{%- if downloadable %}
+import shutil {%- endif %}
 
 HOST_NAME = "{{ hostname }}"
 SITE_NAME = "{{ site }}"
-API_URL = f"http://{HOST_NAME}/{SITE_NAME}/check_mk/api/v0"
+API_URL = f"http://{HOST_NAME}/{SITE_NAME}/check_mk/api/1.0"
 
 USERNAME = "{{ username }}"
 PASSWORD = "{{ password }}"
 
 session = requests.session()
 session.headers['Authorization'] = f"Bearer {USERNAME} {PASSWORD}"
-session.headers['Accept'] = 'application/json'
+session.headers['Accept'] = '{{ endpoint.content_type }}'
 {%- set method = request_method | lower %}
 
 {%- from '_macros' import show_params, comments %}
@@ -232,12 +255,22 @@ resp = session.{{ method }}(
             to_python |
             indent(skip_lines=1, spaces=4) }},
     {%- endif %}
+    {%- if endpoint.does_redirects %}
+    allow_redirects=True,
+    {%- endif %}
 )
-data = resp.json()
-if resp.ok:
-    print(data)
+if resp.status_code == 200:
+    pprint.pprint(resp.json())
+elif resp.status_code == 204:
+    {%- if downloadable %}
+    file_name = resp.headers["content-disposition"].split("filename=")[1].strip("\"")
+    with open(file_name, 'wb') as out_file:
+        resp.raw.decode_content = True
+        shutil.copyfileobj(resp.raw, out_file)
+    {%- endif %}
+    print("Done")
 else:
-    raise RuntimeError(repr(data))
+    raise RuntimeError(pprint.pformat(resp.json()))
 """
 
 CodeExample = NamedTuple("CodeExample", [('lang', str), ('label', str), ('template', str)])
@@ -246,8 +279,8 @@ CodeExample = NamedTuple("CodeExample", [('lang', str), ('label', str), ('templa
 CODE_EXAMPLES: List[CodeExample] = [
     CodeExample(lang='python', label='requests', template=CODE_TEMPLATE_REQUESTS),
     CodeExample(lang='python', label='urllib', template=CODE_TEMPLATE_URLLIB),
-    CodeExample(lang='bash', label='curl', template=CODE_TEMPLATE_CURL),
     CodeExample(lang='bash', label='httpie', template=CODE_TEMPLATE_HTTPIE),
+    CodeExample(lang='bash', label='curl', template=CODE_TEMPLATE_CURL),
 ]
 
 # The examples will appear in the order they are put in above, as starting from Python 3.7, dicts
@@ -357,10 +390,34 @@ def _transform_params(param_list):
     }
 
 
-def code_samples(endpoint, header_params, path_params, query_params) -> List[CodeSample]:
+def code_samples(
+    endpoint,
+    header_params,
+    path_params,
+    query_params,
+) -> List[CodeSample]:
     """Create a list of rendered code sample Objects
 
-    These are not specified by OpenAPI but are specific to ReDoc."""
+    These are not specified by OpenAPI but are specific to ReDoc.
+
+    Examples:
+
+        >>> class Endpoint:
+        ...     path = 'foo'
+        ...     method = 'get'
+        ...     content_type = 'application/json'
+        ...     request_schema = _get_schema('CreateHost')
+        ...     does_redirects = False
+
+        >>> _endpoint = Endpoint()
+        >>> import os
+        >>> from unittest import mock
+        >>> with mock.patch.dict(os.environ, {"OMD_SITE": "heute"}):
+        ...     samples = code_samples(_endpoint, [], [], [])
+
+        >>> assert len(samples)
+
+    """
     env = _jinja_environment()
 
     return [{
@@ -448,11 +505,20 @@ def _schema_is_multiple(schema: Optional[Union[str, Type[Schema]]]) -> bool:
     return bool(getattr(_schema, 'type_schemas', None))
 
 
+@functools.lru_cache()
 def _jinja_environment() -> jinja2.Environment:
     """Create a map with code templates, ready to render.
 
     We don't want to build all this stuff at the module-level as it is only needed when
     re-generating the SPEC file.
+
+    >>> class Endpoint:
+    ...     path = 'foo'
+    ...     method = 'get'
+    ...     content_type = 'application/json'
+    ...     request_schema = _get_schema('CreateHost')
+
+    >>> endpoint = Endpoint()
 
     >>> env = _jinja_environment()
     >>> result = env.get_template('curl').render(
@@ -463,9 +529,10 @@ def _jinja_environment() -> jinja2.Environment:
     ...     path_params=[],
     ...     query_params=[],
     ...     header_params=[],
-    ...     request_endpoint='foo',
-    ...     request_method='get',
-    ...     request_schema=_get_schema('CreateHost'),
+    ...     endpoint=endpoint,
+    ...     request_endpoint=endpoint.path,
+    ...     request_method=endpoint.method,
+    ...     request_schema=_get_schema(endpoint.request_schema),
     ...     request_schema_multiple=_schema_is_multiple('CreateHost'),
     ... )
     >>> assert '&' not in result, result

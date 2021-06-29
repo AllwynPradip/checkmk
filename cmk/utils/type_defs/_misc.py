@@ -11,12 +11,12 @@ from dataclasses import asdict, dataclass
 from typing import (
     Any,
     Dict,
-    Final,
     List,
-    Literal,
+    Mapping,
     NamedTuple,
     NewType,
     Optional,
+    Sequence,
     Set,
     Tuple,
     TypedDict,
@@ -34,17 +34,6 @@ TimeperiodName = str
 AgentTargetVersion = Union[None, str, Tuple[str, str], Tuple[str, Dict[str, str]]]
 
 AgentRawData = NewType("AgentRawData", bytes)
-# Note that the inner List[str] to AgentRawDataSection
-# is only **artificially** different from AgentRawData and
-# obtained approximatively with `raw_data.decode("utf-8").split()`!
-#
-# Moreover, the type is not useful.
-#
-# What would be useful is a Mapping[SectionName, AgentRawData],
-# analogous to SNMPRawData = Mapping[SectionName, SNMPRawDataSection],
-# that would generalize to `Mapping[SectionName, TRawDataContent]` or
-# `Mapping[SectionName, TRawData]` depending on which name we keep.
-AgentRawDataSection = List[List[str]]
 
 RulesetName = str
 RuleValue = Any  # TODO: Improve this type
@@ -53,14 +42,38 @@ Ruleset = List[RuleSpec]  # TODO: Improve this type
 CheckPluginNameStr = str
 ActiveCheckPluginName = str
 Item = Optional[str]
-TagValue = str
 Labels = Dict[str, str]
 LabelSources = Dict[str, str]
+
 TagID = str
 TaggroupID = str
-Tags = Dict[TagID, TagValue]
-TagList = Set[TagValue]
-TagGroups = Dict[TagID, TaggroupID]
+TaggroupIDToTagID = Mapping[TaggroupID, TagID]
+TagIDToTaggroupID = Mapping[TagID, TaggroupID]
+TagIDs = Set[TagID]
+TagConditionNE = TypedDict(
+    'TagConditionNE',
+    {
+        '$ne': Optional[TagID],
+    },
+)
+TagConditionOR = TypedDict(
+    'TagConditionOR',
+    {
+        '$or': Sequence[Optional[TagID]],
+    },
+)
+TagConditionNOR = TypedDict(
+    'TagConditionNOR',
+    {
+        '$nor': Sequence[Optional[TagID]],
+    },
+)
+TagCondition = Union[Optional[TagID], TagConditionNE, TagConditionOR, TagConditionNOR]
+# Here, we have data structures such as
+# {'ip-v4': {'$ne': 'ip-v4'}, 'snmp_ds': {'$nor': ['no-snmp', 'snmp-v1']}, 'taggroup_02': None, 'aux_tag_01': 'aux_tag_01', 'address_family': 'ip-v4-only'}
+TaggroupIDToTagCondition = Mapping[TaggroupID, TagCondition]
+TagsOfHosts = Dict[HostName, TaggroupIDToTagID]
+
 HostNameConditions = Union[None, Dict[str, List[Union[Dict[str, str], str]]],
                            List[Union[Dict[str, str], str]]]
 ServiceNameConditions = Union[None, Dict[str, List[Union[Dict[str, str], str]]],
@@ -85,6 +98,8 @@ LegacyCheckParameters = Union[None, Dict, Tuple, List, str]
 
 SetAutochecksTable = Dict[Tuple[str, Item], Tuple[ServiceName, LegacyCheckParameters, Labels,
                                                   List[HostName]]]
+
+SetAutochecksTablePre20 = Dict[Tuple[str, Item], Tuple[Dict[str, Any], Labels]]
 
 
 @dataclass
@@ -118,16 +133,12 @@ class AutomationDiscoveryResponse:
         }
 
     @classmethod
-    def deserialize(cls, serialized: Dict[str, Any]) -> "AutomationDiscoveryResponse":
+    def deserialize(cls, serialized: Mapping[str, Any]) -> "AutomationDiscoveryResponse":
         return cls(results={k: DiscoveryResult(**v) for k, v in serialized["results"].items()})
 
 
 UserId = NewType("UserId", str)
 EventRule = Dict[str, Any]  # TODO Improve this
-
-LATEST_SERIAL: Final[Literal["latest"]] = "latest"
-ConfigSerial = NewType("ConfigSerial", str)
-OptionalConfigSerial = Union[ConfigSerial, Literal["latest"]]
 
 # This def is used to keep the API-exposed object in sync with our
 # implementation.

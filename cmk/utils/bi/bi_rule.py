@@ -29,6 +29,7 @@ from cmk.utils.bi.bi_lib import (
     create_nested_schema_for_class,
     ABCWithSchema,
     ABCBISearcher,
+    ActionArgument,
 )
 
 from cmk.utils.bi.bi_rule_interface import (
@@ -106,7 +107,7 @@ class BIRule(ABCBIRule, ABCWithSchema):
     def num_nodes(self) -> int:
         return len(self.nodes)
 
-    def compile(self, extern_arguments: List[str],
+    def compile(self, extern_arguments: ActionArgument,
                 bi_searcher: ABCBISearcher) -> List[ABCBICompiledNode]:
         if self.computation_options.disabled:
             return []
@@ -176,12 +177,20 @@ class BIRuleSchema(Schema):
     class Meta:
         ordered = True
 
-    id = ReqString(default="", example="rule1")
-    nodes = ReqList(fields.Nested(BINodeGeneratorSchema), default=[], example=[])
-    params = create_nested_schema_for_class(BIParams,
-                                            example_config=[{
-                                                "arguments": ["foo", "bar"],
-                                            }])
+    id = ReqString(
+        default="",
+        example="rule1",
+        description="TODO: Hier muß Andreas noch etwas reinschreiben!",
+    )
+    nodes = ReqList(
+        fields.Nested(BINodeGeneratorSchema),
+        default=[],
+        example=[],
+        description="TODO: Hier muß Andreas noch etwas reinschreiben!",
+    )
+    params = create_nested_schema_for_class(BIParams, example_config={
+        "arguments": ["foo", "bar"],
+    })
     node_visualization = create_nested_schema(BINodeVisLayoutStyleSchema,
                                               default_schema=BINodeVisBlockStyleSchema)
     properties = create_nested_schema_for_class(BIRuleProperties)

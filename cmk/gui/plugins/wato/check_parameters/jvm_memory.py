@@ -4,12 +4,19 @@
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+from typing import (
+    Iterable,
+    Mapping,
+    Tuple as TupleType,
+    Union,
+)
+
 from cmk.gui.i18n import _
 from cmk.gui.valuespec import (
     Dictionary,
     Filesize,
     Percentage,
-    TextAscii,
+    TextInput,
     Transform,
     Tuple,
 )
@@ -21,15 +28,17 @@ from cmk.gui.plugins.wato import (
 )
 
 
-def _item_spec_jvm_memory():
-    return TextAscii(
+def _item_spec_jvm_memory() -> TextInput:
+    return TextInput(
         title=_("Name of the virtual machine"),
         help=_("The name of the application server"),
         allow_empty=False,
     )
 
 
-def _transform_legacy_parameters_jvm_memory(params):
+def _transform_legacy_parameters_jvm_memory(
+    params: Union[TupleType[float, float], Mapping[str, TupleType[float, float]]]
+) -> Mapping[str, TupleType[float, float]]:
     # These old parameters only applied to the depricated jolokia_metrics.mem service
     # NOT to jolokia_jvm_memory(.pools).
     # However, absolute values were lower levels for *free* memory,
@@ -37,19 +46,19 @@ def _transform_legacy_parameters_jvm_memory(params):
     if isinstance(params, tuple) and isinstance(params[0], float):
         return {"perc_total": params}
 
-    new_params = {}
-    for key, newkey in (
-        ("totalheap", "perc_total"),
-        ("heap", "perc_heap"),
-        ("nonheap", "perc_nonheap"),
-    ):
-        levels = params.get(key)
-        if isinstance(levels, tuple) and isinstance(levels[0], float):
-            new_params[newkey] = levels
-    return new_params
+    if new_params_from_legacy := {
+            new_key: levels for old_key, new_key in (
+                ("totalheap", "perc_total"),
+                ("heap", "perc_heap"),
+                ("nonheap", "perc_nonheap"),
+            ) if isinstance(levels := params.get(old_key), tuple) and isinstance(levels[0], float)
+    }:
+        return new_params_from_legacy
+
+    return params
 
 
-def _get_memory_level_elements(mem_type):
+def _get_memory_level_elements(mem_type) -> Iterable[TupleType[str, Tuple]]:
     return [
         ("perc_%s" % mem_type,
          Tuple(
@@ -76,7 +85,7 @@ def _get_memory_level_elements(mem_type):
     ]
 
 
-def _parameter_valuespec_jvm_memory():
+def _parameter_valuespec_jvm_memory() -> Transform:
     return Transform(Dictionary(
         help=(_("This rule allows to set the warn and crit levels of the heap / "
                 "non-heap and total memory area usage on web application servers.") + " " +
@@ -99,15 +108,15 @@ rulespec_registry.register(
     ))
 
 
-def _item_spec_jvm_memory_pools():
-    return TextAscii(
+def _item_spec_jvm_memory_pools() -> TextInput:
+    return TextInput(
         title=_("Name of the memory pool"),
         help=_("The name of the memory pool in the format 'INSTANCE Memory Pool POOLNAME'"),
         allow_empty=False,
     )
 
 
-def _parameter_valuespec_jvm_memory_pools():
+def _parameter_valuespec_jvm_memory_pools() -> Dictionary:
     return Dictionary(help=(_("This rule allows to set the warn and crit levels of the memory"
                               " pools on web application servers.") + " " +
                             _("Other keywords for this rule: %s") % "Tomcat, Jolokia, JMX"),

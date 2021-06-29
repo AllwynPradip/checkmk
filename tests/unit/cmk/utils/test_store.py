@@ -9,11 +9,14 @@ import threading
 import queue
 import os
 import stat
+from multiprocessing.pool import ThreadPool
+from typing import List
+
 import errno
 from pathlib import Path
 
 from six import ensure_binary
-import pytest  # type: ignore[import]
+import pytest
 from testlib import import_module, wait_until
 
 import cmk.utils.store as store
@@ -328,7 +331,7 @@ def test_release_lock_already_closed(locked_file, path_type):
     store.aquire_lock(path)
     assert store.have_lock(path) is True
 
-    os.close(store._acquired_locks[str(path)])
+    os.close(store._get_lock(str(path)))
 
     store.release_lock(path)
     assert store.have_lock(path) is False
@@ -365,7 +368,7 @@ def test_release_all_locks_already_closed(locked_file, path_type):
     store.aquire_lock(path)
     assert store.have_lock(path) is True
 
-    os.close(store._acquired_locks[str(path)])
+    os.close(store._get_lock(str(path)))
 
     store.release_all_locks()
     assert store.have_lock(path) is False
@@ -481,6 +484,94 @@ def _wait_for_waiting_lock():
 
 
 @pytest.mark.parametrize("path_type", [str, Path])
+def test_blocking_context_manager_from_multiple_threads(locked_file, path_type):
+    path = path_type(locked_file)
+
+    acquired = []
+
+    def acquire(n):
+        with store.locked(path):
+            acquired.append(1)
+            assert len(acquired) == 1
+            acquired.pop()
+
+    pool = ThreadPool(20)
+    pool.map(acquire, range(100))
+    pool.close()
+    pool.join()
+
+
+@pytest.mark.parametrize("path_type", [str, Path])
+def test_blocking_lock_from_multiple_threads(locked_file, path_type):
+    path = path_type(locked_file)
+
+    debug = False
+    acquired = []
+    saw_someone_wait: List[int] = []
+
+    def acquire(n):
+        assert not store.have_lock(path)
+        if debug:
+            print(f"{n}: Trying lock\n")
+        store.aquire_lock(path, blocking=True)
+        assert store.have_lock(path)
+
+        # We check to see if the other threads are actually waiting.
+        if not saw_someone_wait:
+            _wait_for_waiting_lock()
+            saw_someone_wait.append(1)
+
+        if debug:
+            print(f"{n}: Got lock\n")
+
+        acquired.append(1)
+        # This part is guarded by the lock, so we should never have more than one entry in here,
+        # even if multiple threads try to append at the same time
+        assert len(acquired) == 1
+
+        acquired.pop()
+        store.release_lock(path)
+        assert not store.have_lock(path)
+        if debug:
+            print(f"{n}: Released lock\n")
+
+    # We try to append 100 ints to `acquired` in 20 threads simultaneously. As it is guarded by
+    # the lock, we only ever can have one entry in the list at the same time.
+    pool = ThreadPool(20)
+    pool.map(acquire, range(100))
+    pool.close()
+    pool.join()
+
+    # After all the threads have finished, the list should be empty again.
+    assert len(acquired) == 0
+
+
+@pytest.mark.parametrize("path_type", [str, Path])
+def test_non_blocking_lock_from_multiple_threads(locked_file, path_type):
+    path = path_type(locked_file)
+
+    acquired = []
+
+    # Only one thread will ever be able to acquire this lock.
+    def acquire(_):
+        try:
+            store.aquire_lock(path, blocking=False)
+            acquired.append(1)
+            assert store.have_lock(path)
+            store.release_lock(path)
+            assert not store.have_lock(path)
+        except IOError:
+            assert not store.have_lock(path)
+
+    pool = ThreadPool(2)
+    pool.map(acquire, range(20))
+    pool.close()
+    pool.join()
+
+    assert len(acquired) > 1, "No thread got any lock."
+
+
+@pytest.mark.parametrize("path_type", [str, Path])
 def test_blocking_lock_while_other_holds_the_lock(locked_file, path_type, t1, t2, monkeypatch):
     assert t1.store != t2.store
 
@@ -493,23 +584,14 @@ def test_blocking_lock_while_other_holds_the_lock(locked_file, path_type, t1, t2
         # Take lock with t1
         t1.lock()
 
-        assert t1.store.have_lock(path) is True
-        assert t2.store.have_lock(path) is False
-
         # Now request the lock in t2, but don't wait for the successful locking. Only wait until we
         # start waiting for the lock.
         t2.lock_nowait()
         _wait_for_waiting_lock()
-
-        assert t1.store.have_lock(path) is True
-        assert t2.store.have_lock(path) is False
     finally:
         t1.unlock()
 
     t2.join_jobs()
-
-    assert t1.store.have_lock(path) is False
-    assert t2.store.have_lock(path) is True
 
 
 @pytest.mark.parametrize("path_type", [str, Path])
@@ -531,11 +613,9 @@ def test_non_blocking_locking_while_already_locked(locked_file, path_type, t1):
 
     # Now take lock with t1.store
     t1.lock()
-    assert t1.store.have_lock(path) is True
 
     # And now try to get the lock (which should not be possible)
     assert store.try_aquire_lock(path) is False
-    assert t1.store.have_lock(path) is True
     assert store.have_lock(path) is False
 
 
@@ -557,10 +637,167 @@ def test_non_blocking_decorated_locking_while_already_locked(locked_file, path_t
 
     # Take lock with t1.store
     t1.lock()
-    assert t1.store.have_lock(path) is True
 
     # And now try to get the lock (which should not be possible)
     with store.try_locked(path) as result:
         assert result is False
         assert store.have_lock(path) is False
     assert store.have_lock(path) is False
+
+
+@pytest.mark.parametrize("text, storage_format", [
+    ("standard", store.StorageFormat.STANDARD),
+    ("raw", store.StorageFormat.RAW),
+])
+def test_storage_format(text, storage_format):
+    assert store.StorageFormat(text) == storage_format
+    assert str(storage_format) == text
+    assert store.StorageFormat.from_str(text) == storage_format
+
+
+@pytest.mark.parametrize("storage_format, expected_extension", [
+    (store.StorageFormat.STANDARD, ".mk"),
+    (store.StorageFormat.RAW, ".cfg"),
+])
+def test_storage_format_extension(storage_format, expected_extension):
+    assert storage_format.extension() == expected_extension
+
+
+def test_storage_format_other():
+    assert store.StorageFormat("standard") != store.StorageFormat.RAW
+    with pytest.raises(KeyError):
+        store.StorageFormat.from_str("bad")
+
+
+@pytest.mark.parametrize("storage_format, expected_file", [
+    (store.StorageFormat.STANDARD, "hosts.mk"),
+    (store.StorageFormat.RAW, "hosts.cfg"),
+])
+def test_storage_host_file(storage_format, expected_file):
+    assert storage_format.hosts_file() == expected_file
+
+
+@pytest.mark.parametrize("file_path, valid_for_standard, valid_for_raw", [
+    ("/wato/the/aaa/hosts.mk", True, False),
+    ("wato/the/aaa/hosts.mk", False, False),
+    ("/wato/the/aaa/hosts.m", False, False),
+    ("/wato/the/aaa/hosts.cfg", False, True),
+    ("wato/the/aaa/hosts.cfg", False, False),
+    ("/wato/the/aaa/hosts.c", False, False),
+])
+def test_storage_is_hosts_config(file_path, valid_for_standard, valid_for_raw):
+    assert store.StorageFormat.STANDARD.is_hosts_config(file_path) == valid_for_standard
+    assert store.StorageFormat.RAW.is_hosts_config(file_path) == valid_for_raw
+
+
+_raw_storage_loader_test_data = """{
+    'all_hosts': ['0699z0imsnpsl01', '0699z0imsnpsl02'],
+    'host_tags': {
+        '0699z0imsnpsl01': {
+            'site': 'heute',
+            'address_family': 'ip-v4-only',
+            'ip-v4': 'ip-v4',
+            'agent': 'cmk-agent',
+            'tcp': 'tcp',
+            'piggyback': 'auto-piggyback',
+            'snmp_ds': 'no-snmp',
+            'criticality': 'prod',
+            'networking': 'lan'
+        },
+        '0699z0imsnpsl02': {
+            'site': 'heute',
+            'address_family': 'ip-v4-only',
+            'ip-v4': 'ip-v4',
+            'agent': 'cmk-agent',
+            'tcp': 'tcp',
+            'piggyback': 'auto-piggyback',
+            'snmp_ds': 'no-snmp',
+            'criticality': 'prod',
+            'networking': 'lan'
+        }
+    },
+    'host_labels': {
+        '0699z0imsnpsl01': {
+            'hw': 'test1'
+        },
+        '0699z0imsnpsl02': {
+            'hw': 'test2'
+        }
+    },
+    'attributes': {
+        'ipaddresses': {
+            '0699z0imsnpsl01': '10.211.162.80',
+            '0699z0imsnpsl02': '10.211.162.81'
+        },
+    },
+    'extra_host_conf': {
+        'alias': [(u'699 Radius Server 02', ['0699z0imsnpsl02']),
+                  (u'699 Radius Server 01', ['0699z0imsnpsl01'])],
+        '_aldi_country_id': [(u'699', ['0699z0imsnpsl02']), (u'699', ['0699z0imsnpsl01'])]
+    },
+    'explicit_host_conf': {
+        'alias': {
+            '0699z0imsnpsl01': '699 Radius Server 01',
+            '0699z0imsnpsl02': '699 Radius Server 02'
+        },
+    },
+    'contact_groups': {},
+    'host_attributes': {
+        '0699z0imsnpsl01': {
+            'alias': '699 Radius Server 01',
+            'ipaddress': '10.211.162.80',
+            'meta_data': {
+                'created_at': 1619089977.0,
+                'created_by': 'cmkadmin',
+                'updated_at': 1619094577.9326406
+            },
+            'labels': {
+                'hw': 'test1'
+            },
+            'tag_agent': 'cmk-agent',
+            'tag_snmp_ds': 'no-snmp',
+            'tag_criticality': 'prod'
+        },
+        '0699z0imsnpsl02': {
+            'alias': '699 Radius Server 02',
+            'ipaddress': '10.211.162.81',
+            'meta_data': {
+                'created_at': 1619089977.0,
+                'created_by': 'cmkadmin',
+                'updated_at': 1619094577.9345043
+            },
+            'labels': {
+                'hw': 'test2'
+            },
+            'tag_agent': 'cmk-agent',
+            'tag_snmp_ds': 'no-snmp',
+            'tag_criticality': 'prod'
+        }
+    },
+}
+"""
+
+
+@pytest.fixture
+def loader():
+    loader = store.RawStorageLoader()
+    loader._data = _raw_storage_loader_test_data
+    loader.parse()
+    loader.apply({})
+    return loader
+
+
+def test_raw_storage_loader(loader):
+    hosts = loader._all_hosts()
+    assert hosts == ['0699z0imsnpsl01', '0699z0imsnpsl02']
+    ips = loader._attributes()["ipaddresses"]
+    host_conf_alias = loader._explicit_host_conf()["alias"]
+    for h in hosts:
+        assert isinstance(loader._host_tags()[h], dict)
+        assert isinstance(loader._host_labels()[h], dict)
+        assert isinstance(loader._host_attributes()[h], dict)
+        assert isinstance(ips[h], str)
+        assert isinstance(host_conf_alias[h], str)
+
+    assert isinstance(loader._extra_host_conf()['alias'], list)
+    assert isinstance(loader._extra_host_conf()['_aldi_country_id'], list)

@@ -37,6 +37,7 @@ RUN apt-get update \
     build-essential \
     chrpath \
     curl \
+    default-jdk \
     devscripts \
     dnsutils \
     dpatch \
@@ -113,9 +114,9 @@ RUN /opt/install-cmk-dependencies.sh
 RUN /opt/install-docker.sh
 RUN /opt/install-make-dist-deps.sh
 RUN /opt/install-clang.sh
-RUN /opt/install-iwyu.sh
-RUN /opt/install-cppcheck.sh
-RUN /opt/install-clang-tidy.sh
+# HACK: Every released version of cppcheck does NOT build with g++-11 because of a
+# missing #include, so we hackily specify a version after the fix in 8d6828847bd0.
+RUN /opt/install-cppcheck.sh --cppcheck-version=main
 
 # Ensure all our build containers have the jenkins user (with same uid/gid). The non privileged
 # jobs will be executed as this user in the container

@@ -9,7 +9,7 @@ import argparse
 import sys
 import io
 from pathlib import Path
-import pytest  # type: ignore[import]
+import pytest
 
 from testlib.base import Scenario
 
@@ -48,10 +48,15 @@ def test_update_config_init():
     update_config.UpdateConfig(cmk.utils.log.logger, argparse.Namespace())
 
 
+def mock_run():
+    sys.stdout.write("XYZ\n")
+    return 0
+
+
 def test_main(monkeypatch):
     buf = io.StringIO()
     monkeypatch.setattr(sys, "stdout", buf)
-    monkeypatch.setattr(update_config.UpdateConfig, "run", lambda self: sys.stdout.write("XYZ\n"))
+    monkeypatch.setattr(update_config.UpdateConfig, "run", lambda self: mock_run())
     assert update_config.main([]) == 0
     assert "XYZ" in buf.getvalue()
 
@@ -102,6 +107,39 @@ def test__transform_wato_rulesets_params(
 
     assert len(ruleset.get_rules()[0]) == 3
     assert ruleset.get_rules()[0][2].value == transformed_param_value
+
+
+@pytest.mark.parametrize('ruleset_name, param_value, new_ruleset_name, transformed_param_value', [
+    ('non_inline_snmp_hosts', True, 'snmp_backend_hosts', 'classic'),
+    ('non_inline_snmp_hosts', False, 'snmp_backend_hosts', 'inline'),
+])
+def test__transform_replaced_wato_rulesets_and_params(
+    ruleset_name,
+    param_value,
+    new_ruleset_name,
+    transformed_param_value,
+):
+    all_rulesets = RulesetCollection()
+    # checkmk: all_rulesets are loaded via
+    # all_rulesets = cmk.gui.watolib.rulesets.AllRulesets()
+    all_rulesets.set_rulesets({
+        ruleset_name: _instantiate_ruleset(ruleset_name, param_value),
+        new_ruleset_name: Ruleset(new_ruleset_name, {}),
+    })
+
+    uc = update_config.UpdateConfig(cmk.utils.log.logger, argparse.Namespace())
+
+    uc._transform_replaced_wato_rulesets(all_rulesets)
+    uc._transform_wato_rulesets_params(all_rulesets)
+
+    assert not all_rulesets.exists(ruleset_name)
+
+    rules = all_rulesets.get(new_ruleset_name).get_rules()
+    assert len(rules) == 1
+
+    rule = rules[0]
+    assert len(rule) == 3
+    assert rule[2].value == transformed_param_value
 
 
 def _instantiate_ruleset(ruleset_name, param_value):

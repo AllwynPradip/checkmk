@@ -4,7 +4,7 @@
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-import pytest  # type: ignore[import]
+import pytest
 
 import cmk.utils.version as cmk_version
 
@@ -63,6 +63,7 @@ def test_registered_automation_commands():
         'service-discovery-job',
         'checkmk-remote-automation-start',
         'checkmk-remote-automation-get-status',
+        'discovered-host-label-sync',
     ]
 
     if not cmk_version.is_raw_edition():
@@ -111,6 +112,7 @@ def test_registered_configvars():
         'inventory_check_autotrigger',
         'inventory_check_interval',
         'inventory_check_severity',
+        'log_logon_failures',
         'lock_on_logon_failures',
         'log_level',
         'log_levels',
@@ -187,7 +189,6 @@ def test_registered_configvars():
         'wato_hide_hosttags',
         'wato_hide_varnames',
         'wato_icon_categories',
-        'wato_legacy_eval',
         'wato_max_snapshots',
         'wato_pprint_config',
         'wato_upload_insecure_snapshots',

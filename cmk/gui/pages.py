@@ -5,15 +5,17 @@
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import abc
-import json
-import inspect
 import http.client as http_client
+import inspect
+import json
 from typing import Any, Callable, Dict, Mapping, Optional, Type
 
 import cmk.utils.plugin_registry
-from cmk.gui.globals import html, g
-import cmk.gui.config as config
 from cmk.utils.exceptions import MKException
+
+import cmk.gui.config as config
+from cmk.gui.exceptions import MKMissingDataError
+from cmk.gui.globals import g, html, request, response
 from cmk.gui.log import logger
 
 PageHandlerFunc = Callable[[], None]
@@ -62,8 +64,8 @@ class AjaxPage(Page, metaclass=abc.ABCMeta):
         """Override this method to set mode specific attributes based on the
         given HTTP variables."""
 
-    def webapi_request(self) -> Dict[str, str]:
-        return html.get_request()
+    def webapi_request(self) -> Dict[str, Any]:
+        return request.get_request()
 
     @abc.abstractmethod
     def page(self) -> AjaxPageResult:
@@ -77,10 +79,10 @@ class AjaxPage(Page, metaclass=abc.ABCMeta):
             # FIXME: These methods write to the response themselves. This needs to be refactored.
             method()
         except MKException as e:
-            html.response.status_code = http_client.BAD_REQUEST
-            html.write(str(e))
+            response.status_code = http_client.BAD_REQUEST
+            html.write_text(str(e))
         except Exception as e:
-            html.response.status_code = http_client.INTERNAL_SERVER_ERROR
+            response.status_code = http_client.INTERNAL_SERVER_ERROR
             if config.debug:
                 raise
             logger.exception("error calling AJAX page handler")
@@ -88,18 +90,20 @@ class AjaxPage(Page, metaclass=abc.ABCMeta):
                 plain_error=True,
                 show_crash_link=getattr(g, "may_see_crash_reports", False),
             )
-            html.write(str(e))
+            html.write_text(str(e))
 
     def handle_page(self) -> None:
         """The page handler, called by the page registry"""
         # FIXME: cyclical link between crash_reporting.py and pages.py
         from cmk.gui.crash_reporting import handle_exception_as_gui_crash_report
-        html.set_output_format("json")
+        response.set_content_type("application/json")
         try:
             action_response = self.page()
-            response = {"result_code": 0, "result": action_response}
+            resp = {"result_code": 0, "result": action_response, "severity": "success"}
+        except MKMissingDataError as e:
+            resp = {"result_code": 1, "result": str(e), "severity": "success"}
         except MKException as e:
-            response = {"result_code": 1, "result": "%s" % e}
+            resp = {"result_code": 1, "result": str(e), "severity": "error"}
 
         except Exception as e:
             if config.debug:
@@ -109,9 +113,9 @@ class AjaxPage(Page, metaclass=abc.ABCMeta):
                 plain_error=True,
                 show_crash_link=getattr(g, "may_see_crash_reports", False),
             )
-            response = {"result_code": 1, "result": "%s" % e}
+            resp = {"result_code": 1, "result": str(e), "severity": "error"}
 
-        html.write(json.dumps(response))
+        response.set_data(json.dumps(resp))
 
 
 class PageRegistry(cmk.utils.plugin_registry.Registry[Type[Page]]):

@@ -10,8 +10,7 @@ from cmk.gui.valuespec import (
     IPv4Address,
     ListOf,
     MonitoringState,
-    TextAscii,
-    TextUnicode,
+    TextInput,
     Tuple,
 )
 
@@ -35,7 +34,7 @@ def _parameter_valuespec_vpn_tunnel():
                              "The configured value must match a tunnel reported by the monitored "
                              "device."),
                      ),
-                     TextUnicode(
+                     TextInput(
                          title=_("Tunnel Alias"),
                          help=_(
                              "You can configure an individual alias here for the tunnel matching "
@@ -64,7 +63,7 @@ rulespec_registry.register(
     CheckParameterRulespecWithItem(
         check_group_name="vpn_tunnel",
         group=RulespecGroupCheckParametersNetworking,
-        item_spec=lambda: TextAscii(title=_("IP-Address of Tunnel Endpoint")),
+        item_spec=lambda: TextInput(title=_("IP-Address of Tunnel Endpoint")),
         match_type="dict",
         parameter_valuespec=_parameter_valuespec_vpn_tunnel,
         title=lambda: _("VPN Tunnel"),

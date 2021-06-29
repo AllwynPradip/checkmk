@@ -17,7 +17,7 @@ import cmk.utils.version as cmk_version
 import cmk.utils.store as store
 
 import cmk.gui.pages
-import cmk.gui.escaping as escaping
+import cmk.gui.utils.escaping as escaping
 from cmk.gui.log import logger
 import cmk.gui.utils as utils
 import cmk.gui.config as config
@@ -26,7 +26,7 @@ import cmk.gui.watolib.read_only
 import cmk.gui.i18n
 from cmk.gui.watolib.activate_changes import update_config_generation
 from cmk.gui.i18n import _, _l
-from cmk.gui.globals import html
+from cmk.gui.globals import request, response
 from cmk.gui.exceptions import (
     MKUserError,
     MKAuthException,
@@ -79,30 +79,32 @@ permission_registry.register(
 Formatter = Callable[[Dict[str, Any]], str]
 
 _FORMATTERS: Dict[str, Tuple[Formatter, Formatter]] = {
-    "json":
-        (json.dumps,
-         lambda response: json.dumps(response, sort_keys=True, indent=4, separators=(',', ': '))),
+    "json": (json.dumps,
+             lambda resp: json.dumps(resp, sort_keys=True, indent=4, separators=(',', ': '))),
     "python": (repr, pprint.pformat),
-    "xml":
-        (dicttoxml.dicttoxml,
-         lambda response: xml.dom.minidom.parseString(dicttoxml.dicttoxml(response)).toprettyxml()),
+    "xml": (dicttoxml.dicttoxml,
+            lambda resp: xml.dom.minidom.parseString(dicttoxml.dicttoxml(resp)).toprettyxml()),
 }
 
 
 @cmk.gui.pages.register("webapi")
 def page_api():
     try:
-        pretty_print = False
-        if not html.request.has_var("output_format"):
-            html.set_output_format("json")
-        if html.output_format not in _FORMATTERS:
-            html.set_output_format("python")
+        if not request.has_var("output_format"):
+            response.set_content_type("application/json")
+            output_format = "json"
+        else:
+            output_format = request.get_ascii_input_mandatory("output_format", "json").lower()
+
+        if output_format not in _FORMATTERS:
+            response.set_content_type("text/plain")
             raise MKUserError(
                 None, "Only %s are supported as output formats" %
                 " and ".join('"%s"' % f for f in _FORMATTERS))
 
         # TODO: Add some kind of helper for boolean-valued variables?
-        pretty_print_var = html.request.get_str_input_mandatory("pretty_print", "no").lower()
+        pretty_print = False
+        pretty_print_var = request.get_str_input_mandatory("pretty_print", "no").lower()
         if pretty_print_var not in ("yes", "no"):
             raise MKUserError(None, 'pretty_print must be "yes" or "no"')
         pretty_print = pretty_print_var == "yes"
@@ -111,27 +113,27 @@ def page_api():
         _check_permissions(api_call)
         watolib.init_wato_datastructures()  # Initialize host and site attributes
         request_object = _get_request(api_call)
-        _check_formats(api_call, request_object)
+        _check_formats(output_format, api_call, request_object)
         _check_request_keys(api_call, request_object)
-        response = _execute_action(api_call, request_object)
+        resp = _execute_action(api_call, request_object)
 
     except MKAuthException as e:
-        response = {
+        resp = {
             "result_code": 1,
             "result": _("Authorization Error. Insufficent permissions for '%s'") % e
         }
     except MKException as e:
-        response = {"result_code": 1, "result": _("Checkmk exception: %s") % e}
+        resp = {"result_code": 1, "result": _("Checkmk exception: %s") % e}
     except Exception:
         if config.debug:
             raise
         logger.exception("error handling web API call")
-        response = {
+        resp = {
             "result_code": 1,
             "result": _("Unhandled exception: %s") % traceback.format_exc(),
         }
 
-    html.write(_FORMATTERS[html.output_format][1 if pretty_print else 0](response))
+    response.set_data(_FORMATTERS[output_format][1 if pretty_print else 0](resp))
 
 
 # TODO: If the registered API calls were instance of a real class, all the code
@@ -139,7 +141,7 @@ def page_api():
 
 
 def _get_api_call():
-    action = html.request.var('action')
+    action = request.var('action')
     for cls in api_call_collection_registry.values():
         api_call = cls().get_api_calls().get(action)
         if api_call:
@@ -161,19 +163,19 @@ def _check_permissions(api_call):
 
 def _get_request(api_call):
     if api_call.get("dont_eval_request"):
-        req = html.request.var("request")
+        req = request.var("request")
         return {} if req is None else req
-    return html.get_request(exclude_vars=["action", "pretty_print"])
+    return request.get_request(exclude_vars=["action", "pretty_print"])
 
 
-def _check_formats(api_call, request_object):
+def _check_formats(output_format, api_call, request_object):
     required_input_format = api_call.get("required_input_format")
     if required_input_format and required_input_format != request_object["request_format"]:
         raise MKUserError(
             None, "This API call requires a %s-encoded request parameter" % required_input_format)
 
     required_output_format = api_call.get("required_output_format")
-    if required_output_format and required_output_format != html.output_format:
+    if required_output_format and required_output_format != output_format:
         raise MKUserError(
             None, "This API call requires the parameter output_format=%s" % required_output_format)
 

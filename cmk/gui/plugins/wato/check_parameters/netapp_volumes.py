@@ -15,7 +15,7 @@ from cmk.gui.valuespec import (
     ListChoice,
     Optional,
     Percentage,
-    TextAscii,
+    TextInput,
     Transform,
     Tuple,
 )
@@ -41,7 +41,7 @@ def _parameter_valuespec_netapp_volumes():
              default_value=(80.0, 90.0),
              match=match_dual_level_type,
              elements=[
-                 get_free_used_dynamic_valuespec("used", "volume"),
+                 get_free_used_dynamic_valuespec("used", "volume", maxvalue=None),
                  Transform(
                      get_free_used_dynamic_valuespec("free", "volume", default_value=(20.0, 10.0)),
                      forth=transform_filesystem_free,
@@ -192,7 +192,7 @@ rulespec_registry.register(
     CheckParameterRulespecWithItem(
         check_group_name="netapp_volumes",
         group=RulespecGroupCheckParametersStorage,
-        item_spec=lambda: TextAscii(title=_("Volume name")),
+        item_spec=lambda: TextInput(title=_("Volume name")),
         match_type="dict",
         parameter_valuespec=_parameter_valuespec_netapp_volumes,
         title=lambda: _("NetApp Volumes"),

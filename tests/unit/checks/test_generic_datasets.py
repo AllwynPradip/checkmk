@@ -21,9 +21,9 @@ required variables manually (as in ''veritas_vcs_*.py''), or create a
 regression test dataset as described in ''checks/generictests/regression.py''
 """
 from importlib import import_module
-import pytest  # type: ignore[import]
+import pytest
 
-from testlib import on_time  # type: ignore[import]
+from testlib import on_time
 import generictests
 
 pytestmark = pytest.mark.checks

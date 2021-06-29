@@ -10,12 +10,12 @@ from typing import TYPE_CHECKING, Optional, Tuple, Union, List, Any, Dict
 
 from livestatus import SiteId
 
-from cmk.utils.type_defs import Labels, LabelSources, TagGroups, TagID, TagValue
+from cmk.utils.type_defs import Labels, LabelSources, TagID, TaggroupID, TaggroupIDToTagID
 from cmk.gui.type_defs import HTTPVariables
 
-import cmk.gui.escaping as escaping
+import cmk.gui.utils.escaping as escaping
 from cmk.gui.i18n import _
-from cmk.gui.globals import html, request
+from cmk.gui.globals import html, request, theme
 from cmk.gui.utils.html import HTML
 from cmk.gui.utils.urls import makeuri, makeuri_contextless
 
@@ -34,9 +34,9 @@ if TYPE_CHECKING:
 # There is common code with cmk/notification_plugins/utils.py:format_plugin_output(). Please check
 # whether or not that function needs to be changed too
 # TODO(lm): Find a common place to unify this functionality.
-def format_plugin_output(output: CellContent,
+def format_plugin_output(output: str,
                          row: 'Optional[Row]' = None,
-                         shall_escape: bool = True) -> str:
+                         shall_escape: bool = True) -> HTML:
     assert not isinstance(output, dict)
     ok_marker = '<b class="stmark state0">OK</b>'
     warn_marker = '<b class="stmark state1">WARN</b>'
@@ -84,7 +84,7 @@ def format_plugin_output(output: CellContent,
         if output.endswith(" &lt;/A&gt;"):
             output = output[:-11]
 
-    return output
+    return HTML(output)
 
 
 def get_host_list_links(site: SiteId, hosts: List[Union[str]]) -> List[str]:
@@ -96,8 +96,8 @@ def get_host_list_links(site: SiteId, hosts: List[Union[str]]) -> List[str]:
             ("host", host),
         ]
 
-        if html.request.var("display_options"):
-            args.append(("display_options", html.request.var("display_options")))
+        if request.var("display_options"):
+            args.append(("display_options", request.var("display_options")))
 
         url = makeuri_contextless(request, args, filename="view.py")
         link = str(html.render_a(host, href=url))
@@ -113,19 +113,19 @@ def query_limit_exceeded_warn(limit: Optional[int], user_config: 'LoggedInUser')
     """Compare query reply against limits, warn in the GUI about incompleteness"""
     text = HTML(_("Your query produced more than %d results. ") % limit)
 
-    if html.request.get_ascii_input(
-            "limit", "soft") == "soft" and user_config.may("general.ignore_soft_limit"):
+    if request.get_ascii_input("limit",
+                               "soft") == "soft" and user_config.may("general.ignore_soft_limit"):
         text += html.render_a(_('Repeat query and allow more results.'),
                               target="_self",
                               href=makeuri(request, [("limit", "hard")]))
-    elif html.request.get_ascii_input("limit") == "hard" and user_config.may(
+    elif request.get_ascii_input("limit") == "hard" and user_config.may(
             "general.ignore_hard_limit"):
         text += html.render_a(_('Repeat query without limit.'),
                               target="_self",
                               href=makeuri(request, [("limit", "none")]))
 
-    text += " " + _(
-        "<b>Note:</b> the shown results are incomplete and do not reflect the sort order.")
+    text += escaping.escape_html_permissive(
+        " " + _("<b>Note:</b> the shown results are incomplete and do not reflect the sort order."))
     html.show_warning(text)
 
 
@@ -146,7 +146,7 @@ def render_labels(labels: Labels, object_type: str, with_links: bool,
                                         label_sources=label_sources)
 
 
-def render_tag_groups(tag_groups: TagGroups, object_type: str, with_links: bool) -> HTML:
+def render_tag_groups(tag_groups: TaggroupIDToTagID, object_type: str, with_links: bool) -> HTML:
     return _render_tag_groups_or_labels(tag_groups,
                                         object_type,
                                         with_links,
@@ -154,38 +154,62 @@ def render_tag_groups(tag_groups: TagGroups, object_type: str, with_links: bool)
                                         label_sources={})
 
 
-def _render_tag_groups_or_labels(entries: Union[TagGroups,
-                                                Labels], object_type: str, with_links: bool,
-                                 label_type: str, label_sources: LabelSources) -> HTML:
+def _render_tag_groups_or_labels(
+    entries: Union[TaggroupIDToTagID, Labels],
+    object_type: str,
+    with_links: bool,
+    label_type: str,
+    label_sources: LabelSources,
+) -> HTML:
     elements = [
-        _render_tag_group(tg_id, tag, object_type, with_links, label_type,
-                          label_sources.get(tg_id, "unspecified"))
-        for tg_id, tag in sorted(entries.items())
+        _render_tag_group(
+            tag_group_id_or_label_key,
+            tag_id_or_label_value,
+            object_type,
+            with_links,
+            label_type,
+            label_sources.get(tag_group_id_or_label_key, "unspecified"),
+        ) for tag_group_id_or_label_key, tag_id_or_label_value in sorted(entries.items())
     ]
     return html.render_tags(HTML("").join(elements),
                             class_=["tagify", label_type, "display"],
                             readonly="true")
 
 
-def _render_tag_group(tg_id: Union[TagID, str], tag: Union[TagValue, str], object_type: str,
-                      with_link: bool, label_type: str, label_source: str) -> HTML:
-    span = html.render_tag(html.render_div(
-        html.render_span("%s:%s" % (tg_id, tag), class_=["tagify__tag-text"])),
-                           class_=["tagify--noAnim", label_source])
+def _render_tag_group(
+    tag_group_id_or_label_key: Union[TaggroupID, str],
+    tag_id_or_label_value: Union[TagID, str],
+    object_type: str,
+    with_link: bool,
+    label_type: str,
+    label_source: str,
+) -> HTML:
+    span = html.render_tag(
+        html.render_div(
+            html.render_span(
+                "%s:%s" % (
+                    tag_group_id_or_label_key,
+                    tag_id_or_label_value,
+                ),
+                class_=["tagify__tag-text"],
+            )),
+        class_=["tagify--noAnim", label_source],
+    )
     if not with_link:
         return span
 
     if label_type == "tag_group":
         type_filter_vars: HTTPVariables = [
-            ("%s_tag_0_grp" % object_type, tg_id),
+            ("%s_tag_0_grp" % object_type, tag_group_id_or_label_key),
             ("%s_tag_0_op" % object_type, "is"),
-            ("%s_tag_0_val" % object_type, tag),
+            ("%s_tag_0_val" % object_type, tag_id_or_label_value),
         ]
     elif label_type == "label":
         type_filter_vars = [
-            ("%s_label" % object_type, json.dumps([{
-                "value": "%s:%s" % (tg_id, tag)
-            }])),
+            ("%s_label" % object_type,
+             json.dumps([{
+                 "value": "%s:%s" % (tag_group_id_or_label_key, tag_id_or_label_value)
+             }])),
         ]
 
     else:
@@ -203,7 +227,7 @@ def _render_tag_group(tg_id: Union[TagID, str], tag: Union[TagValue, str], objec
 
 def get_themed_perfometer_bg_color() -> str:
     """Return the theme specific background color for perfometer rendering"""
-    if html.get_theme() == "modern-dark":
+    if theme.get() == "modern-dark":
         return "#bdbdbd"
     # else (classic and modern theme)
     return "#ffffff"

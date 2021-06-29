@@ -23,29 +23,28 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 import cmk.utils
 import cmk.utils.plugin_registry
 import cmk.utils.render
-import cmk.utils.version as cmk_version
 
 import cmk.gui.i18n
 import cmk.gui.pages
 import cmk.gui.utils as utils
 from cmk.gui.exceptions import MKGeneralException, MKInternalError, MKUserError
-from cmk.gui.globals import html
+from cmk.gui.globals import request
 from cmk.gui.i18n import _
 from cmk.gui.log import logger
 from cmk.gui.plugins.metrics.html_render import (
     host_service_graph_dashlet_cmk,
     host_service_graph_popup_cmk,
 )
+from cmk.gui.type_defs import PerfometerSpec
 # Needed for legacy (pre 1.6) plugins and for cross-module imports (e.g. in dashboards plugin)
 from cmk.gui.plugins.metrics.utils import (  # noqa: F401 # pylint: disable=unused-import
     check_metrics, darken_color, evaluate, G, GB, generic_graph_template, get_graph_range,
     get_graph_templates, get_palette_color_by_index, graph_info, hsv_to_hexrgb, indexed_color, K,
     KB, LegacyPerfometer, m, M, MAX_CORES, MB, metric_info, P, parse_color, parse_color_into_hexrgb,
-    parse_perf_data, PB, Perfometer, perfometer_info, perfvar_translation, render_color,
-    render_color_icon, replace_expressions, scalar_colors, scale_symbols, T, TB, translate_metrics,
+    parse_perf_data, PB, perfometer_info, perfvar_translation, render_color, render_color_icon,
+    replace_expressions, scalar_colors, scale_symbols, T, TB, translate_metrics,
     translated_metrics_from_row, TranslatedMetrics, unit_info,
 )
-from cmk.gui.utils.popups import MethodAjax
 from cmk.gui.view_utils import get_themed_perfometer_bg_color
 
 PerfometerExpression = Union[str, int, float]
@@ -93,7 +92,6 @@ def fixup_unit_info() -> None:
 
 def fixup_perfometer_info() -> None:
     _convert_legacy_tuple_perfometers(perfometer_info)
-    _precalculate_some_perfometer_caches(perfometer_info)
 
 
 # During implementation of the metric system the perfometers were first defined using
@@ -102,7 +100,7 @@ def fixup_perfometer_info() -> None:
 # All shipped perfometers have been converted to the dict format with 1.5.0i3.
 # TODO: Remove this one day.
 def _convert_legacy_tuple_perfometers(
-        perfometers: List[Union[LegacyPerfometer, Perfometer]]) -> None:
+        perfometers: List[Union[LegacyPerfometer, PerfometerSpec]]) -> None:
     for index, perfometer in reversed(list(enumerate(perfometers))):
         if isinstance(perfometer, dict):
             continue
@@ -138,24 +136,41 @@ def _convert_legacy_tuple_perfometers(
             perfometers.pop(index)
 
 
-def _precalculate_some_perfometer_caches(
-        perfometers: List[Union[LegacyPerfometer, Perfometer]]) -> None:
-    for perfometer in perfometers:
-        if not isinstance(perfometer, dict):
-            raise MKGeneralException(_("Legacy performeter encountered: %r") % perfometer)
+def _lookup_required_expressions(
+        perfometer: Union[LegacyPerfometer, PerfometerSpec]) -> List[PerfometerExpression]:
 
-        # Precalculate the list of metric expressions of the perfometers
-        required_expressions = _perfometer_expressions(perfometer)
+    if not isinstance(perfometer, dict):
+        raise MKGeneralException(_("Legacy performeter encountered: %r") % perfometer)
 
-        # And also precalculate the trivial metric names that can later be used to filter
-        # perfometers without the need to evaluate the expressions.
-        required_trivial_metric_names = _required_trivial_metric_names(required_expressions)
+    try:
+        return perfometer["_required"]
+    except KeyError:
+        pass
 
-        perfometer["_required"] = required_expressions
-        perfometer["_required_names"] = required_trivial_metric_names
+    # calculate the list of metric expressions of the perfometers
+    return perfometer.setdefault("_required", _perfometer_expressions(perfometer))
 
 
-def _perfometer_expressions(perfometer: Perfometer) -> List[PerfometerExpression]:
+def _lookup_required_names(
+        perfometer: Union[LegacyPerfometer, PerfometerSpec]) -> Optional[RequiredMetricNames]:
+
+    if not isinstance(perfometer, dict):
+        raise MKGeneralException(_("Legacy performeter encountered: %r") % perfometer)
+
+    try:
+        return perfometer["_required_names"]
+    except KeyError:
+        pass
+
+    # calculate the trivial metric names that can later be used to filter
+    # perfometers without the need to evaluate the expressions.
+    return perfometer.setdefault(
+        "_required_names",
+        _required_trivial_metric_names(_lookup_required_expressions(perfometer)),
+    )
+
+
+def _perfometer_expressions(perfometer: PerfometerSpec) -> List[PerfometerExpression]:
     """Returns all metric expressions of a perfometer
     This is used for checking which perfometer can be displayed for a given service later.
     """
@@ -265,7 +280,8 @@ def translate_perf_data(perf_data_string: str,
 
 
 class Perfometers:
-    def get_matching_perfometers(self, translated_metrics: TranslatedMetrics) -> List[Perfometer]:
+    def get_matching_perfometers(self,
+                                 translated_metrics: TranslatedMetrics) -> List[PerfometerSpec]:
         perfometers = []
         for perfometer in perfometer_info:
             if not isinstance(perfometer, dict):
@@ -274,16 +290,16 @@ class Perfometers:
                 perfometers.append(perfometer)
         return perfometers
 
-    def _perfometer_possible(self, perfometer: Perfometer,
+    def _perfometer_possible(self, perfometer: PerfometerSpec,
                              translated_metrics: TranslatedMetrics) -> bool:
         if not translated_metrics:
             return False
 
-        if self._skip_perfometer_by_trivial_metrics(perfometer["_required_names"],
-                                                    translated_metrics):
+        required_names = _lookup_required_names(perfometer)
+        if self._skip_perfometer_by_trivial_metrics(required_names, translated_metrics):
             return False
 
-        for req in perfometer["_required"]:
+        for req in _lookup_required_expressions(perfometer):
             try:
                 evaluate(req, translated_metrics)
             except Exception:
@@ -302,8 +318,11 @@ class Perfometers:
 
         return True
 
-    def _skip_perfometer_by_trivial_metrics(self, required_metric_names: RequiredMetricNames,
-                                            translated_metrics: TranslatedMetrics) -> bool:
+    def _skip_perfometer_by_trivial_metrics(
+        self,
+        required_metric_names: Optional[RequiredMetricNames],
+        translated_metrics: TranslatedMetrics,
+    ) -> bool:
         """Whether or not a perfometer can be skipped by simple metric name matching instead of expression evaluation
 
         Performance optimization: Try to reduce the amount of perfometers to evaluate by
@@ -346,7 +365,7 @@ class MetricometerRenderer(metaclass=abc.ABCMeta):
     def type_name(cls) -> str:
         raise NotImplementedError()
 
-    def __init__(self, perfometer: Perfometer, translated_metrics: TranslatedMetrics) -> None:
+    def __init__(self, perfometer: PerfometerSpec, translated_metrics: TranslatedMetrics) -> None:
         super(MetricometerRenderer, self).__init__()
         self._perfometer = perfometer
         self._translated_metrics = translated_metrics
@@ -396,7 +415,8 @@ class MetricometerRendererRegistry(cmk.utils.plugin_registry.Registry[Type[Metri
     def plugin_name(self, instance):
         return instance.type_name()
 
-    def get_renderer(self, perfometer, translated_metrics):
+    def get_renderer(self, perfometer: PerfometerSpec,
+                     translated_metrics: TranslatedMetrics) -> MetricometerRenderer:
         subclass = self[perfometer["type"]]
         return subclass(perfometer, translated_metrics)
 
@@ -410,7 +430,7 @@ class MetricometerRendererLogarithmic(MetricometerRenderer):
     def type_name(cls) -> str:
         return "logarithmic"
 
-    def __init__(self, perfometer: Perfometer, translated_metrics: TranslatedMetrics) -> None:
+    def __init__(self, perfometer: PerfometerSpec, translated_metrics: TranslatedMetrics) -> None:
         super(MetricometerRendererLogarithmic, self).__init__(perfometer, translated_metrics)
 
         if self._perfometer is not None and "metric" not in self._perfometer:
@@ -446,10 +466,7 @@ class MetricometerRendererLogarithmic(MetricometerRenderer):
             half_value = float(half_value)
             h = math.log(half_value, base)  # value to be displayed at 50%
             pos = 50 + 10.0 * (math.log(value, base) - h)
-            if pos < 2:
-                pos = 2
-            if pos > 98:
-                pos = 98
+            pos = min(max(2, pos), 98)
 
         return [(pos, color), (100 - pos, get_themed_perfometer_bg_color())]
 
@@ -613,9 +630,9 @@ class MetricometerRendererDual(MetricometerRenderer):
 # This page is called for the popup of the graph icon of hosts/services.
 @cmk.gui.pages.register("host_service_graph_popup")
 def page_host_service_graph_popup() -> None:
-    site_id = html.request.var('site')
-    host_name = html.request.var('host_name')
-    service_description = html.request.get_unicode_input('service')
+    site_id = request.var('site')
+    host_name = request.var('host_name')
+    service_description = request.get_unicode_input('service')
     host_service_graph_popup_cmk(site_id, host_name, service_description)
 
 
@@ -634,56 +651,14 @@ def page_host_service_graph_popup() -> None:
 
 @cmk.gui.pages.register("graph_dashlet")
 def page_graph_dashlet() -> None:
-    spec = html.request.var("spec")
+    spec = request.var("spec")
     if not spec:
         raise MKUserError("spec", _("Missing spec parameter"))
-    graph_identification = json.loads(html.request.get_str_input_mandatory("spec"))
+    graph_identification = json.loads(request.get_str_input_mandatory("spec"))
 
-    render = html.request.var("render")
+    render = request.var("render")
     if not render:
         raise MKUserError("render", _("Missing render parameter"))
-    custom_graph_render_options = json.loads(html.request.get_str_input_mandatory("render"))
+    custom_graph_render_options = json.loads(request.get_str_input_mandatory("render"))
 
     host_service_graph_dashlet_cmk(graph_identification, custom_graph_render_options)
-
-
-#.
-#   .--Metrics Table-------------------------------------------------------.
-#   |      __  __      _        _            _____     _     _             |
-#   |     |  \/  | ___| |_ _ __(_) ___ ___  |_   _|_ _| |__ | | ___        |
-#   |     | |\/| |/ _ \ __| '__| |/ __/ __|   | |/ _` | '_ \| |/ _ \       |
-#   |     | |  | |  __/ |_| |  | | (__\__ \   | | (_| | |_) | |  __/       |
-#   |     |_|  |_|\___|\__|_|  |_|\___|___/   |_|\__,_|_.__/|_|\___|       |
-#   |                                                                      |
-#   +----------------------------------------------------------------------+
-#   |  Renders a simple table with all metrics of a host or service        |
-#   '----------------------------------------------------------------------'
-
-
-def render_metrics_table(translated_metrics: TranslatedMetrics, host_name: str,
-                         service_description: str) -> str:
-    # TODO: Don't paste together strings by hand, use our HTML utilities.
-    output = "<table class=metricstable>"
-    for metric_name, metric in sorted(translated_metrics.items(), key=lambda x: x[1]["title"]):
-        output += "<tr>"
-        output += "<td class=color>%s</td>" % render_color_icon(metric["color"])
-        output += "<td>%s:</td>" % metric["title"]
-        output += "<td class=value>%s</td>" % metric["unit"]["render"](metric["value"])
-        if not cmk_version.is_raw_edition():
-            output += "<td>"
-            output += str(
-                html.render_popup_trigger(
-                    html.render_icon("menu",
-                                     title=_("Add this metric to dedicated graph"),
-                                     cssclass="iconbutton"),
-                    ident="add_metric_to_graph_" + host_name + ";" + str(service_description),
-                    method=MethodAjax(endpoint="add_metric_to_graph",
-                                      url_vars=[
-                                          ("host", host_name),
-                                          ("service", service_description),
-                                          ("metric", metric_name),
-                                      ])))
-            output += "</td>"
-        output += "</tr>"
-    output += "</table>"
-    return output

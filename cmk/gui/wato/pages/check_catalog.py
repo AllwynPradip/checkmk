@@ -214,7 +214,7 @@ class ModeCheckPluginTopic(WatoMode):
         return self.mode_url(topic=self._topic)
 
     def _from_vars(self):
-        self._topic = html.request.get_ascii_input_mandatory("topic", "")
+        self._topic = request.get_ascii_input_mandatory("topic", "")
         if not re.match("^[a-zA-Z0-9_./]+$", self._topic):
             raise MKUserError("topic", _("Invalid topic"))
 
@@ -323,10 +323,8 @@ def _render_manpage_list(titles, manpage_list, path_comp, heading):
                     ("back", makeuri(request, [])),
                 ],
             )
-            table.cell(_("Type of Check"),
-                       "<a href='%s'>%s</a>" % (url, entry["title"]),
-                       css="title")
-            table.cell(_("Plugin Name"), "<tt>%s</tt>" % entry["name"], css="name")
+            table.cell(_("Type of Check"), html.render_a(entry["title"], href=url), css="title")
+            table.cell(_("Plugin Name"), html.render_tt(entry["name"]), css="name")
             table.cell(_("Agents"),
                        ", ".join(map(translate, sorted(entry["agents"]))),
                        css="agents")
@@ -404,12 +402,12 @@ class ModeCheckManPage(WatoMode):
     def breadcrumb(self) -> Breadcrumb:
         # To be able to calculate the breadcrumb with ModeCheckPluginTopic as parent, we need to
         # ensure that the topic is available.
-        with html.stashed_vars():
-            html.request.set_var("topic", self._manpage["header"]["catalog"])
+        with request.stashed_vars():
+            request.set_var("topic", self._manpage["header"]["catalog"])
             return super().breadcrumb()
 
     def _from_vars(self):
-        self._check_type = html.request.get_ascii_input_mandatory("check_type", "")
+        self._check_type = request.get_ascii_input_mandatory("check_type", "")
 
         builtin_check_types = ['check-mk', "check-mk-inventory"]
         if not re.match("^[a-zA-Z0-9_.]+$", self._check_type) and \
@@ -519,6 +517,12 @@ class ModeCheckManPage(WatoMode):
             if check_ruleset_name is not None:
                 self._show_ruleset("checkgroup_parameters:%s" % check_ruleset_name)
 
+            cluster = self._manpage["header"].get("cluster")
+            if cluster:
+                html.open_tr()
+                html.th(_("Cluster behaviour"))
+                html.td(self._manpage_text(cluster))
+                html.close_tr()
         else:
             self._show_ruleset("active_checks:%s" % self._check_type[6:])
 
@@ -536,12 +540,11 @@ class ModeCheckManPage(WatoMode):
 
         rulespec = rulespec_registry[varname]
         url = makeuri_contextless(request, [("mode", "edit_ruleset"), ("varname", varname)])
-        param_ruleset = html.render_a(rulespec.title, url)
         html.open_tr()
         html.th(_("Parameter rule set"))
         html.open_td()
         html.icon_button(url, _("Edit parameter rule set for this check type"), "check_parameters")
-        html.write(param_ruleset)
+        html.a(rulespec.title, url)
         html.close_td()
         html.close_tr()
         html.open_tr()

@@ -130,19 +130,20 @@ class CapTestYamlFixture : public ::testing::Test {
 public:
     static constexpr std::string_view name() { return files::kInstallYmlFileA; }
     void SetUp() override {
-        fs::create_directories(temp_fs_.root() / dirs::kInstall);
-        fs::create_directories(temp_fs_.data() / dirs::kUserInstallDir);
+        temp_fs_ = tst::TempCfgFs::Create();
+        fs::create_directories(temp_fs_->root() / dirs::kInstall);
+        fs::create_directories(temp_fs_->data() / dirs::kUserInstallDir);
     }
 
     fs::path yml_source() const {
-        return temp_fs_.root() / dirs::kInstall / name();
+        return temp_fs_->root() / dirs::kInstall / name();
     }
     fs::path yml_target() const {
-        return temp_fs_.data() / dirs::kInstall / name();
+        return temp_fs_->data() / dirs::kInstall / name();
     }
 
 private:
-    tst::TempCfgFs temp_fs_;
+    tst::TempCfgFs::ptr temp_fs_;
 };
 
 TEST_F(CapTestYamlFixture, Uninstall) {
@@ -181,8 +182,8 @@ TEST_F(CapTestYamlFixture, Install) {
 }
 
 TEST_F(CapTestYamlFixture, ReInstall) {
-    auto yml_base = tst::MakePathToConfigTestFiles(tst::G_SolutionPath) /
-                    "check_mk.wato.install.yml";
+    auto yml_base =
+        tst::MakePathToConfigTestFiles() / "check_mk.wato.install.yml";
     ASSERT_TRUE(fs::exists(yml_base));
 
     auto yml_bakery = GetBakeryFile();
@@ -194,7 +195,7 @@ TEST_F(CapTestYamlFixture, ReInstall) {
     EXPECT_FALSE(fs::exists(yml_bakery)) << "must be absent";
     EXPECT_FALSE(fs::exists(yml_target())) << "must be absent";
 
-    // target presented: everнthing is removed
+    // target presented: everything is removed
     // fs::copy_file(yml_base, yml_source());
     tst::CreateWorkFile(yml_target(), "brr1");
     tst::CreateWorkFile(yml_bakery, "brr2");
@@ -275,7 +276,7 @@ TEST(CapTest, InstallCap) {
 }
 
 TEST(CapTest, Check) {
-    tst::TempCfgFs temp_fs;
+    auto temp_fs{tst::TempCfgFs::Create()};
     std::string name = "a/b.txt";
     auto out = ProcessPluginPath(name);
     fs::path expected_path = cma::cfg::GetUserDir() + L"\\a\\b.txt";
@@ -284,8 +285,8 @@ TEST(CapTest, Check) {
 
 TEST(CapTest, IsAllowedToKill) {
     using namespace cma::cfg;
-    tst::TempCfgFs temp_fs;
-    ASSERT_TRUE(temp_fs.loadConfig(tst::GetFabricYml()));
+    auto temp_fs{tst::TempCfgFs::Create()};
+    ASSERT_TRUE(temp_fs->loadConfig(tst::GetFabricYml()));
 
     EXPECT_FALSE(IsAllowedToKill(L"smss_log.exe"));
     EXPECT_TRUE(IsAllowedToKill(L"cMk-upDate-agent.exe"));
@@ -361,6 +362,7 @@ TEST(CapTest, StoreFileAgressive) {
 class CapTestProcessFixture : public ::testing::Test {
 public:
     void SetUp() override {
+        temp_fs_ = tst::TempCfgFs::Create();
         names_[0] = GetUserPluginsDir() + L"\\windows_if.ps1";
         names_[1] = GetUserPluginsDir() + L"\\mk_inventory.vbs";
     }
@@ -369,21 +371,20 @@ public:
 
     void makeFilesInPlugins() {
         fs::create_directories(GetUserPluginsDir());
-        ASSERT_TRUE(temp_fs_.createDataFile(
+        ASSERT_TRUE(temp_fs_->createDataFile(
             fs::path{"plugins"} / "windows_if.ps1", "1"));
-        ASSERT_TRUE(temp_fs_.createDataFile(
+        ASSERT_TRUE(temp_fs_->createDataFile(
             fs::path{"plugins"} / "mk_inventory.vbs", "1"));
     }
 
 private:
     std::array<std::wstring, 2> names_;
 
-    tst::TempCfgFs temp_fs_;
+    tst::TempCfgFs::ptr temp_fs_;
 };
 
 TEST_F(CapTestProcessFixture, ValidFile) {
-    auto cap =
-        tst::MakePathToCapTestFiles(tst::G_SolutionPath) / "plugins.test.cap";
+    auto cap = tst::MakePathToCapTestFiles() / "plugins.test.cap";
 
     std::vector<std::wstring> files;
     EXPECT_TRUE(Process(cap.u8string(), ProcMode::list, files));
@@ -395,8 +396,7 @@ TEST_F(CapTestProcessFixture, ValidFile) {
 }
 
 TEST_F(CapTestProcessFixture, EmptyFile) {
-    auto cap = tst::MakePathToCapTestFiles(tst::G_SolutionPath) /
-               "plugins_null.test.cap";
+    auto cap = tst::MakePathToCapTestFiles() / "plugins_null.test.cap";
 
     std::vector<std::wstring> files;
     auto ret = Process(cap.u8string(), ProcMode::list, files);
@@ -406,8 +406,7 @@ TEST_F(CapTestProcessFixture, EmptyFile) {
 
 TEST_F(CapTestProcessFixture, Install) {
     fs::create_directories(GetUserPluginsDir());
-    auto cap =
-        tst::MakePathToCapTestFiles(tst::G_SolutionPath) / "plugins.test.cap";
+    auto cap = tst::MakePathToCapTestFiles() / "plugins.test.cap";
 
     std::vector<std::wstring> files;
     EXPECT_TRUE(Process(cap.u8string(), ProcMode::install, files));
@@ -419,8 +418,7 @@ TEST_F(CapTestProcessFixture, Install) {
 }
 
 TEST_F(CapTestProcessFixture, Remove) {
-    auto cap =
-        tst::MakePathToCapTestFiles(tst::G_SolutionPath) / "plugins.test.cap";
+    auto cap = tst::MakePathToCapTestFiles() / "plugins.test.cap";
 
     makeFilesInPlugins();
 
@@ -447,8 +445,7 @@ TEST_F(CapTestProcessFixture, BadFiles) {
     };
 
     for (auto const& test : data) {
-        auto bad_cap =
-            tst::MakePathToCapTestFiles(tst::G_SolutionPath) / test.first;
+        auto bad_cap = tst::MakePathToCapTestFiles() / test.first;
         std::vector<std::wstring> results;
         EXPECT_FALSE(Process(bad_cap.u8string(), ProcMode::list, results));
         ASSERT_EQ(results.size(), test.second)
@@ -458,7 +455,7 @@ TEST_F(CapTestProcessFixture, BadFiles) {
 }
 
 TEST(CapTest, GetExampleYmlNames) {
-    tst::TempCfgFs temp_fs;
+    auto temp_fs{tst::TempCfgFs::Create()};
     auto expected_example_yml = fs::path{GetUserDir()} / files::kUserYmlFile;
     expected_example_yml.replace_extension("example.yml");
     auto expected_source_yml =

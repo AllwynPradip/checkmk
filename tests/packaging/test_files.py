@@ -8,7 +8,7 @@ import os
 import subprocess
 import re
 import logging
-import pytest  # type: ignore[import]
+import pytest
 
 from cmk.utils.misc import is_daily_build_version
 
@@ -18,13 +18,11 @@ LOGGER = logging.getLogger()
 def _get_omd_version(cmk_version, package_path):
     # Extract the files edition
     edition_short = _edition_short_from_pkg_path(package_path)
-    demo_suffix = ".demo" if _is_demo(package_path) else ""
-    return "%s.%s%s" % (cmk_version, edition_short, demo_suffix)
+    return "%s.%s" % (cmk_version, edition_short)
 
 
 def _is_demo(package_path):
-    # Is this a demo package?
-    return ".demo" in os.path.basename(package_path)
+    return "cfe" == _edition_short_from_pkg_path(package_path)
 
 
 def _edition_short_from_pkg_path(package_path):
@@ -35,6 +33,8 @@ def _edition_short_from_pkg_path(package_path):
         return "cee"
     if file_name.startswith("check-mk-managed-"):
         return "cme"
+    if file_name.startswith("check-mk-free-"):
+        return "cfe"
     raise NotImplementedError("Could not get edition from package path: %s" % package_path)
 
 
@@ -129,15 +129,15 @@ def test_files_not_in_version_path(package_path, cmk_version):
             "/usr/share/man/$",
             "/usr/share/man/man8/$",
             "/usr/share/doc/$",
-            "/usr/share/doc/check-mk-(raw|enterprise|managed)-.*/$",
-            "/usr/share/doc/check-mk-(raw|enterprise|managed)-.*/changelog.gz$",
-            "/usr/share/doc/check-mk-(raw|enterprise|managed)-.*/COPYING.gz$",
-            "/usr/share/doc/check-mk-(raw|enterprise|managed)-.*/TEAM$",
-            "/usr/share/doc/check-mk-(raw|enterprise|managed)-.*/copyright$",
-            "/usr/share/doc/check-mk-(raw|enterprise|managed)-.*/README.md$",
+            "/usr/share/doc/check-mk-(raw|free|enterprise|managed)-.*/$",
+            "/usr/share/doc/check-mk-(raw|free|enterprise|managed)-.*/changelog.gz$",
+            "/usr/share/doc/check-mk-(raw|free|enterprise|managed)-.*/COPYING.gz$",
+            "/usr/share/doc/check-mk-(raw|free|enterprise|managed)-.*/TEAM$",
+            "/usr/share/doc/check-mk-(raw|free|enterprise|managed)-.*/copyright$",
+            "/usr/share/doc/check-mk-(raw|free|enterprise|managed)-.*/README.md$",
             "/etc/$",
             "/etc/init.d/$",
-            "/etc/init.d/check-mk-(raw|enterprise|managed)-.*$",
+            "/etc/init.d/check-mk-(raw|free|enterprise|managed)-.*$",
         ] + version_allowed_patterns
 
         paths = []
@@ -222,22 +222,6 @@ def test_src_not_contains_enterprise_sources(package_path):
 
     assert enterprise_files == []
     assert managed_files == []
-
-
-def test_src_windows_agent_has_correct_version(package_path, cmk_version):
-    if not package_path.endswith(".tar.gz"):
-        pytest.skip("%s is not a source package" % os.path.basename(package_path))
-
-    if is_daily_build_version(cmk_version):
-        pytest.skip("Do not test daily builds")
-
-    prefix = os.path.basename(package_path).replace(".tar.gz", "")
-    for file_path in [
-            prefix + "/agents/windows/check_mk_agent.exe",
-            prefix + "/agents/windows/check_mk_agent-64.exe",
-    ]:
-        exe_bytes = subprocess.check_output(["tar", "-xvOf", package_path, file_path])
-        assert cmk_version.encode("ascii") in exe_bytes
 
 
 def test_demo_modifications(package_path, cmk_version):

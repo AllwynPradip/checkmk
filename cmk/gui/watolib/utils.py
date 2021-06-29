@@ -8,7 +8,6 @@ import ast
 import re
 import pprint
 import base64
-import pickle
 from typing import Any, Union, List
 
 from six import ensure_binary, ensure_str
@@ -23,9 +22,9 @@ import cmk.utils.rulesets.tuple_rulesets
 
 import cmk.gui.config as config
 from cmk.gui.background_job import BackgroundJobAlreadyRunning
-from cmk.gui.globals import html
 from cmk.gui.i18n import _
 from cmk.gui.exceptions import MKGeneralException
+from cmk.gui.utils.escaping import escape_html_permissive
 
 # TODO: Clean up all call sites in the GUI and only use them in WATO config file loading code
 ALL_HOSTS = cmk.utils.rulesets.tuple_rulesets.ALL_HOSTS
@@ -66,12 +65,9 @@ def convert_cgroups_from_tuple(value):
     if isinstance(value, dict):
         if "use_for_services" in value:
             return value
-
-        new_value = {
-            "use_for_services": False,
-        }
-        new_value.update(value)
-        return value
+        new_value = value.copy()
+        new_value.update({"use_for_services": False})
+        return new_value
 
     return {
         "groups": value[1],
@@ -97,17 +93,15 @@ def format_config_value(value: Any) -> str:
 
 
 def mk_repr(x: Any) -> bytes:
-    r = pickle.dumps(x) if config.wato_legacy_eval else ensure_binary(repr(x))
-    return base64.b64encode(r)
+    return base64.b64encode(ensure_binary(repr(x)))
 
 
-# TODO: Deprecate this legacy format with 1.4.0 or later?!
 def mk_eval(s: Union[bytes, str]) -> Any:
     try:
-        d = base64.b64decode(s)
-        return pickle.loads(d) if config.wato_legacy_eval else ast.literal_eval(ensure_str(d))
+        return ast.literal_eval(ensure_str(base64.b64decode(s)))
     except Exception:
-        raise MKGeneralException(_('Unable to parse provided data: %s') % html.render_text(repr(s)))
+        raise MKGeneralException(
+            _('Unable to parse provided data: %s') % escape_html_permissive(repr(s)))
 
 
 def has_agent_bakery():

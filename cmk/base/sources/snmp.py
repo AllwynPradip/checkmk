@@ -7,6 +7,7 @@
 from pathlib import Path
 from typing import Dict, Optional, Set
 
+from cmk.utils.exceptions import OnError
 from cmk.utils.type_defs import HostAddress, HostName, SectionName, SourceType
 
 from cmk.snmplib.type_defs import BackendSNMPTree, SNMPDetectSpec, SNMPRawData, SNMPRawDataSection
@@ -23,7 +24,7 @@ from cmk.core_helpers.snmp import (
     SNMPPluginStoreItem,
     SNMPSummarizer,
 )
-from cmk.core_helpers.type_defs import Mode, NO_SELECTION, SectionNameCollection
+from cmk.core_helpers.type_defs import NO_SELECTION, SectionNameCollection
 
 import cmk.base.api.agent_based.register as agent_based_register
 import cmk.base.check_table as check_table
@@ -59,7 +60,6 @@ class SNMPSource(Source[SNMPRawData, SNMPHostSections]):
         hostname: HostName,
         ipaddress: HostAddress,
         *,
-        mode: Mode,
         source_type: SourceType,
         selected_sections: SectionNameCollection,
         id_: str,
@@ -67,12 +67,11 @@ class SNMPSource(Source[SNMPRawData, SNMPHostSections]):
         cache_dir: Optional[Path] = None,
         persisted_section_dir: Optional[Path] = None,
         title: str,
-        on_scan_error: str,
+        on_scan_error: OnError,
     ):
         super().__init__(
             hostname,
             ipaddress,
-            mode=mode,
             source_type=source_type,
             fetcher_type=FetcherType.SNMP,
             description=SNMPSource._make_description(source_type, hostname, ipaddress, title=title),
@@ -99,15 +98,13 @@ class SNMPSource(Source[SNMPRawData, SNMPHostSections]):
         hostname: HostName,
         ipaddress: HostAddress,
         *,
-        mode: Mode,
         selected_sections: SectionNameCollection,
-        on_scan_error: str,
+        on_scan_error: OnError,
         force_cache_refresh: bool,
     ) -> "SNMPSource":
         return cls(
             hostname,
             ipaddress,
-            mode=mode,
             source_type=SourceType.HOST,
             selected_sections=selected_sections,
             id_="snmp",
@@ -122,15 +119,13 @@ class SNMPSource(Source[SNMPRawData, SNMPHostSections]):
         hostname: HostName,
         ipaddress: HostAddress,
         *,
-        mode: Mode,
         selected_sections: SectionNameCollection,
-        on_scan_error: str,
+        on_scan_error: OnError,
         force_cache_refresh: bool,
     ) -> "SNMPSource":
         return cls(
             hostname,
             ipaddress,
-            mode=mode,
             source_type=SourceType.MANAGEMENT,
             selected_sections=selected_sections,
             id_="mgmt_snmp",
@@ -141,7 +136,8 @@ class SNMPSource(Source[SNMPRawData, SNMPHostSections]):
 
     def _make_file_cache(self) -> SNMPFileCache:
         return SNMPFileCacheFactory(
-            path=self.file_cache_path,
+            self.hostname,
+            base_path=self.file_cache_base_path,
             simulation=config.simulation_mode,
             max_age=self.file_cache_max_age,
         ).make(force_cache_refresh=self._force_cache_refresh)
@@ -181,6 +177,7 @@ class SNMPSource(Source[SNMPRawData, SNMPHostSections]):
             name: SectionMeta(
                 checking=name in checking_sections,
                 disabled=name in disabled_sections,
+                redetect=name in checking_sections and self._needs_redetection(name),
                 fetch_interval=self.host_config.snmp_fetch_interval(name),
             ) for name in (checking_sections | disabled_sections)
         }
@@ -223,6 +220,11 @@ class SNMPSource(Source[SNMPRawData, SNMPHostSections]):
             s for s in checking_sections
             if agent_based_register.is_registered_snmp_section_plugin(s)
         }
+
+    @staticmethod
+    def _needs_redetection(section_name: SectionName) -> bool:
+        section = agent_based_register.get_section_plugin(section_name)
+        return len(agent_based_register.get_section_producers(section.parsed_section_name)) > 1
 
     @staticmethod
     def _make_description(

@@ -4,7 +4,7 @@
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-import pytest  # type: ignore[import]
+import pytest
 from testlib import on_time
 from cmk.utils.type_defs import CheckPluginName
 
@@ -17,6 +17,7 @@ from cmk.base.plugins.agent_based.agent_based_api.v1 import (
     IgnoreResults,
 )
 import cmk.base.plugins.agent_based.oracle_asm_diskgroup as oracle_asm_diskgroup
+
 NOW_SIMULATED = 581792400, "UTC"
 
 ITEM = "DISK_GROUP"
@@ -240,10 +241,8 @@ def test_discovery(section, expected):
     ])
 def test_check(value_store_patch, section, params, expected):
     with on_time(*NOW_SIMULATED):
-        with value_store.context(CheckPluginName("oracle_asm_diskgroup"), None):
-            yielded_results = list(
-                oracle_asm_diskgroup.check_oracle_asm_diskgroup(ITEM, params, section))
-            assert yielded_results == expected
+        assert expected == list(
+            oracle_asm_diskgroup.check_oracle_asm_diskgroup(ITEM, params, section))
 
 
 @pytest.mark.parametrize("section, params, expected", [

@@ -5,8 +5,10 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+
 INSTALL_PREFIX=""
-CLANG_VERSION=10
+CLANG_VERSION=""
 TARGET_DIR=/opt
 
 failure() {
@@ -47,6 +49,21 @@ done
 
 if [[ $# -ne 0 ]]; then
     failure "superfluous arguments:" "$@"
+fi
+
+if [ -z "$CLANG_VERSION" ]; then
+    cd "${SCRIPT_DIR}"
+    while true; do
+        if [ -e defines.make ]; then
+            CLANG_VERSION=$(make -f defines.make print-CLANG_VERSION)
+            break
+        elif [ $PWD == / ]; then
+            echo "could not determine Clang version" >&2
+            exit 1
+        else
+            cd ..
+        fi
+    done
 fi
 
 # The tag/version numbering scheme is a big mess...
@@ -127,12 +144,9 @@ else
     cd $(dirname ${IWYU_PATH})
     rm -f iwyu
     ln --symbolic --force $(basename ${IWYU_PATH}) iwyu
-fi
 
-set_symlinks() {
+    # Hack for our containers
     echo "Set symlink"
     mkdir -p "${TARGET_DIR}/bin"
     ln -sf "${IWYU_PATH}/bin/"* "${TARGET_DIR}/bin"
-}
-
-set_symlinks
+fi

@@ -5,10 +5,11 @@
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import cmk.gui.config as config
-from cmk.gui.globals import html, request, display_options
+from cmk.gui.globals import request, response, display_options
 from cmk.gui.i18n import _
 from cmk.gui.plugins.views.icons import Icon, icon_and_action_registry
-from cmk.gui.utils.urls import makeuri, makeuri_contextless
+from cmk.gui.utils.urls import makeuri, makeuri_contextless, urlencode
+from cmk.gui.utils.mobile import is_mobile
 
 
 @icon_and_action_registry.register
@@ -29,7 +30,7 @@ class WatoIcon(Icon):
             return config.user.may("wato.use") and \
                 (config.user.may("wato.seeall") or config.user.may("wato.hosts"))
 
-        if not may_see_hosts() or html.mobile:
+        if not may_see_hosts() or is_mobile(request, response):
             return None
 
         wato_folder = _wato_folder_from_filename(row["host_filename"])
@@ -48,7 +49,7 @@ class WatoIcon(Icon):
 
         if display_options.enabled(display_options.X):
             url = "wato.py?folder=%s&host=%s" % \
-                (html.urlencode(folder), html.urlencode(hostname))
+                (urlencode(folder), urlencode(hostname))
             if where == "inventory":
                 url += "&mode=inventory"
                 help_txt = _("Edit services")
@@ -128,8 +129,8 @@ def _paint_download_host_info(what, row, tags, host_custom_vars, ty):
 
         # When the download icon is part of the host/service action menu, then
         # the _back_url set in paint_action_menu() needs to be used. Otherwise
-        # makeuri(request, []) (not html.requested_uri()) is the right choice.
-        back_url = html.get_url_input("_back_url", makeuri(request, []))
+        # makeuri(request, []) (not request.requested_uri()) is the right choice.
+        back_url = request.get_url_input("_back_url", makeuri(request, []))
         if back_url:
             params.append(("back_url", back_url))
 

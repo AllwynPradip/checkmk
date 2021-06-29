@@ -6,8 +6,9 @@
 
 from typing import List, Tuple, Union, Optional
 from cmk.gui.utils.html import HTML
-from cmk.gui.globals import html
+from cmk.gui.globals import html, request, response, transactions
 from cmk.gui.i18n import _
+from cmk.gui.utils.mobile import is_mobile
 
 
 def confirm_with_preview(msg: Union[str, HTML],
@@ -26,13 +27,14 @@ def confirm_with_preview(msg: Union[str, HTML],
     is used during rendering a normal page, for example when deleting a dashlet from a dashboard. In
     such cases, the transid must be added by the confirm dialog.
     """
-    if html.request.var("_do_actions") == _("Cancel"):
+    if request.var("_do_actions") == _("Cancel"):
         # User has pressed "Cancel", now invalidate the unused transid
-        html.check_transaction()
+        transactions.check_transaction()
         return None  # None --> "Cancel"
 
-    if not any(html.request.has_var(varname) for _title, varname in confirm_options):
-        if html.mobile:
+    if not any(request.has_var(varname) for _title, varname in confirm_options):
+        mobile = is_mobile(request, response)
+        if mobile:
             html.open_center()
         html.open_div(class_="really")
         html.write_text(msg)
@@ -43,10 +45,10 @@ def confirm_with_preview(msg: Union[str, HTML],
         html.button("_do_actions", _("Cancel"))
         html.end_form()
         html.close_div()
-        if html.mobile:
+        if mobile:
             html.close_center()
 
         return False  # False --> "Dialog shown, no answer yet"
 
     # Now check the transaction. True: "Yes", None --> Browser reload of "yes" page
-    return True if html.check_transaction() else None
+    return True if transactions.check_transaction() else None

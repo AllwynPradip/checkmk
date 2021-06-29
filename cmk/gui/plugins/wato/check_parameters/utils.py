@@ -5,7 +5,7 @@
 # conditions defined in the file COPYING, which is part of this source code package.
 """Module to hold shared code for check parameter module internals"""
 
-from typing import List, Tuple as _Tuple
+from typing import List, Tuple as _Tuple, Union
 from cmk.gui.i18n import _
 from cmk.gui.exceptions import MKUserError
 from cmk.gui.valuespec import (
@@ -19,9 +19,8 @@ from cmk.gui.valuespec import (
     Float,
     Integer,
     ListOf,
-    Optional,
     Percentage,
-    TextAscii,
+    TextInput,
     Transform,
     Tuple,
     ValueSpec,
@@ -46,7 +45,13 @@ def match_dual_level_type(value):
     return 0
 
 
-def get_free_used_dynamic_valuespec(what, name, default_value=(80.0, 90.0)):
+def get_free_used_dynamic_valuespec(
+        what,
+        name,
+        default_value=(80.0, 90.0),
+        *,
+        maxvalue: Union[None, int, float] = 101.0,
+):
     if what == "used":
         title = _("used space")
         course = _("above")
@@ -62,11 +67,13 @@ def get_free_used_dynamic_valuespec(what, name, default_value=(80.0, 90.0)):
                       title=_("Warning if %s") % course,
                       unit="%",
                       minvalue=0.0 if what == "used" else 0.0001,
+                      maxvalue=maxvalue,
                   ),
                   Percentage(
                       title=_("Critical if %s") % course,
                       unit="%",
                       minvalue=0.0 if what == "used" else 0.0001,
+                      maxvalue=maxvalue,
                   ),
               ]),
         Tuple(title=_("Absolute %s") % title,
@@ -260,14 +267,20 @@ fs_magic_elements = [
            ]))
 ]
 
+TREND_RANGE_DEFAULT = 24
+
+
+def _transform_trend_range_not_none(params):
+    return TREND_RANGE_DEFAULT if params is None else params
+
+
 size_trend_elements = [
     ("trend_range",
-     Optional(Integer(title=_("Time Range for trend computation"),
-                      default_value=24,
-                      minvalue=1,
-                      unit=_("hours")),
-              title=_("Trend computation"),
-              label=_("Enable trend computation"))),
+     Transform(Integer(title=_("Time Range for trend computation"),
+                       default_value=TREND_RANGE_DEFAULT,
+                       minvalue=1,
+                       unit=_("hours")),
+               forth=_transform_trend_range_not_none)),
     ("trend_mb",
      Tuple(title=_("Levels on trends in MB per time range"),
            elements=[
@@ -321,14 +334,32 @@ filesystem_elements: List[_Tuple[str, ValueSpec]] = fs_levels_elements \
                     + size_trend_elements
 
 
+def _transform_discovered_filesystem_params(params):
+    include_volume_name = params.pop("include_volume_name", None)
+    if include_volume_name is True:
+        params["item_appearance"] = "volume_name_and_mountpoint"
+    elif include_volume_name is False:
+        params["item_appearance"] = "mountpoint"
+    return params
+
+
 def vs_filesystem(extra_elements=None):
     if extra_elements is None:
         extra_elements = []
-    return Dictionary(
-        help=_("This ruleset allows to set parameters for space and inodes usage"),
-        elements=filesystem_elements + extra_elements,
-        hidden_keys=["flex_levels"],
-        ignored_keys=["patterns", "include_volume_name"],
+    return Transform(
+        Dictionary(
+            help=_("This ruleset allows to set parameters for space and inodes usage"),
+            elements=filesystem_elements + extra_elements,
+            hidden_keys=["flex_levels"],
+            ignored_keys=[
+                "patterns",
+                "include_volume_name",
+                "item_appearance",
+                "grouping_behaviour",
+                "mountpoint_for_block_devices",
+            ],
+        ),
+        forth=_transform_discovered_filesystem_params,
     )
 
 
@@ -360,16 +391,16 @@ def vs_interface_traffic():
                              ])
 
 
-def mssql_item_spec_instance_tablespace() -> TextAscii:
-    return TextAscii(
+def mssql_item_spec_instance_tablespace() -> TextInput:
+    return TextInput(
         title=_("Instance & tablespace name"),
         help=_("The MSSQL instance name and the tablespace name separated by a space."),
         allow_empty=False,
     )
 
 
-def mssql_item_spec_instance_database_file() -> TextAscii:
-    return TextAscii(
+def mssql_item_spec_instance_database_file() -> TextInput:
+    return TextInput(
         title=_("Instance, database & file name"),
         help=_("A combination of the instance, database and (logical) file name."),
         allow_empty=False,

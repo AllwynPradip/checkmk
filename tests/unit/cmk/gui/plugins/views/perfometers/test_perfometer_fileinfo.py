@@ -4,7 +4,7 @@
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-import pytest  # type: ignore[import]
+import pytest
 
 from cmk.gui.htmllib import HTML
 from cmk.gui.plugins.views.perfometers.check_mk import (
@@ -41,4 +41,4 @@ from cmk.gui.plugins.views.perfometers.check_mk import (
     ),
 ])
 def test_perfometer_fileinfo_groups(perf_data, expected_result, module_wide_request_context):
-    assert perfometer_fileinfo_groups('', '', perf_data) == expected_result
+    assert perfometer_fileinfo_groups({}, '', perf_data) == expected_result

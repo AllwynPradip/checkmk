@@ -24,7 +24,8 @@ from cmk.utils.object_diff import make_object_diff
 import cmk.gui.utils
 from cmk.gui.utils.urls import makeuri_contextless
 from cmk.gui.globals import request
-from cmk.gui import config, escaping
+from cmk.gui import config
+from cmk.gui.utils import escaping
 from cmk.gui.config import SiteId
 from cmk.gui.i18n import _
 from cmk.gui.htmllib import HTML
@@ -91,18 +92,20 @@ class ABCAppendStore(Generic[_VT], metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     @staticmethod
-    def _serialize(raw: _VT) -> Any:
+    @abc.abstractmethod
+    def _serialize(entry: _VT) -> object:
         """Prepare _VT objects for serialization
 
         Override this to execute some logic before repr()"""
-        return raw
+        raise NotImplementedError()
 
     @staticmethod
-    def _deserialize(raw: Any) -> _VT:
+    @abc.abstractmethod
+    def _deserialize(raw: object) -> _VT:
         """Create _VT objects from serialized data
 
         Override this to execute some logic after literal_eval() to produce _VT objects"""
-        return raw
+        raise NotImplementedError()
 
     def __init__(self, path: Path) -> None:
         self._path = path
@@ -191,7 +194,7 @@ class AuditLogStore(ABCAppendStore["AuditLogStore.Entry"]):
         return _wato_var_dir() / "log" / "wato_audit.log"
 
     @staticmethod
-    def _serialize(entry: "AuditLogStore.Entry") -> Dict:
+    def _serialize(entry: "AuditLogStore.Entry") -> object:
         raw = entry._asdict()
         raw["text"] = (("html", str(entry.text)) if isinstance(entry.text, HTML) else
                        ("str", entry.text))
@@ -199,7 +202,10 @@ class AuditLogStore(ABCAppendStore["AuditLogStore.Entry"]):
         return raw
 
     @staticmethod
-    def _deserialize(raw: Dict) -> "AuditLogStore.Entry":
+    def _deserialize(raw: object) -> "AuditLogStore.Entry":
+        if not isinstance(raw, dict):
+            raise ValueError("expected a dictionary")
+        # TODO: Parse raw's entries, too, below we have our traditional 'wishful typing'... :-P
         raw["text"] = (HTML(raw["text"][1]) if raw["text"][0] == "html" else raw["text"][1])
         raw["object_ref"] = ObjectRef.deserialize(raw["object_ref"]) if raw["object_ref"] else None
         return AuditLogStore.Entry(**raw)
@@ -351,13 +357,16 @@ class SiteChanges(ABCAppendStore[ChangeSpec]):
         return _wato_var_dir() / ("replication_changes_%s.mk" % args[0])
 
     @staticmethod
-    def _serialize(entry: Dict) -> Dict:
+    def _serialize(entry: ChangeSpec) -> object:
         raw = entry.copy()
         raw["object"] = raw["object"].serialize() if raw["object"] else None
         return raw
 
     @staticmethod
-    def _deserialize(raw: Dict) -> Dict:
+    def _deserialize(raw: object) -> ChangeSpec:
+        if not isinstance(raw, dict):
+            raise ValueError("expected a dictionary")
+        # TODO: Parse raw's entries, too, below we have our traditional 'wishful typing'... :-P
         if isinstance(raw["object"], tuple):
             # Migrate the pre 2.0 change entries (Two element tuple: ("Folder/Host", "ident"))
             type_name, ident = raw["object"]

@@ -12,6 +12,7 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 from enum import Enum, unique
 
 import livestatus
+import json
 
 import cmk.utils.plugin_registry
 from cmk.utils.exceptions import (
@@ -27,7 +28,7 @@ from cmk.gui.main_menu import mega_menu_registry
 from cmk.gui.plugins.wato import main_module_registry
 from cmk.gui.log import logger
 from cmk.gui.i18n import _
-from cmk.gui.globals import html, request
+from cmk.gui.globals import html, request, output_funnel
 from cmk.gui.exceptions import HTTPRedirect, MKUserError
 from cmk.gui.plugins.sidebar import SidebarSnapin, snapin_registry, PageHandlers
 from cmk.gui.type_defs import (
@@ -74,6 +75,7 @@ class LivestatusResult:
     url: str
     row: Row
     display_text: str
+    context: str = ""
 
 
 @unique
@@ -464,12 +466,12 @@ class LivestatusQuicksearchConductor(ABCQuicksearchConductor):
 
             for shortname, text in element.text_tokens:
                 if shortname in ["h", "al"] and text not in element.display_text:
-                    element.display_text += " <b>%s</b>" % text
+                    element.context = text
                     break
             else:
-                element.display_text += " <b>%s</b>" % hostname
+                element.context = hostname
 
-        return [SearchResult(title=e.display_text, url=e.url) for e in elements]
+        return [SearchResult(title=e.display_text, url=e.url, context=e.context) for e in elements]
 
     def _element_texts_unique(self, elements: List[LivestatusResult]) -> bool:
         used_texts: Set[str] = set()
@@ -698,7 +700,7 @@ class QuicksearchSnapin(SidebarSnapin):
 
     def _ajax_search(self) -> None:
         """Generate the search result list"""
-        query = _maybe_strip(html.request.get_unicode_input('q'))
+        query = _maybe_strip(request.get_unicode_input('q'))
         if not query:
             return
 
@@ -720,7 +722,7 @@ class QuicksearchSnapin(SidebarSnapin):
 
     def _page_search_open(self) -> None:
         """Generate the URL to the view that is opened when confirming the search field"""
-        query = _maybe_strip(html.request.var('q'))
+        query = _maybe_strip(request.var('q'))
         if not query:
             return
 
@@ -742,7 +744,10 @@ class QuicksearchResultRenderer:
                 html.div(match_topic, class_="topic")
 
             for result in sorted(results, key=lambda x: x.title):
-                html.a(result.title, id="result_%s" % query, href=result.url, target="main")
+                html.open_a(id_="result_%s" % query, href=result.url, target="main")
+                html.write_text(result.title +
+                                (" %s" % html.render_b(result.context) if result.context else ""))
+                html.close_a()
 
 
 #   .--Quicksearch Plugins-------------------------------------------------.
@@ -1294,16 +1299,16 @@ class MenuSearchResultsRenderer:
         return self._render_results(results)
 
     def _render_error(self, error: MKException) -> str:
-        with html.plugged():
+        with output_funnel.plugged():
             html.open_div(class_="error")
             html.write_text(f"{error}")
             html.close_div()
-            error_as_html = html.drain()
+            error_as_html = output_funnel.drain()
         return error_as_html
 
     def _get_icon_mapping(
         self,
-        default_icon: Icon = "topic_overview",
+        default_icons: Tuple[Icon, Icon],
     ) -> Dict[str, Tuple[Icon, Icon]]:
         # {topic: (Icon(Topic): green, Icon(Item): colorful)}
         mapping: Dict[str, Tuple[Icon, Icon]] = {}
@@ -1312,40 +1317,47 @@ class MenuSearchResultsRenderer:
                 mega_menu_registry.menu_monitoring(),
         ]:
             mapping[menu.title] = (
-                menu.icon + "_active" if isinstance(menu.icon, str) else default_icon,
-                menu.icon if menu.icon else default_icon,
+                menu.icon + "_active" if isinstance(menu.icon, str) else default_icons[0],
+                menu.icon if menu.icon else default_icons[1],
             )
 
             for topic in menu.topics():
                 mapping[topic.title] = (
-                    topic.icon if topic.icon else default_icon,
-                    topic.icon if topic.icon else default_icon,
+                    topic.icon if topic.icon else default_icons[0],
+                    topic.icon if topic.icon else default_icons[1],
                 )
                 for item in topic.items:
                     mapping[item.title] = (
-                        topic.icon if topic.icon else default_icon,
-                        item.icon if item.icon else default_icon,
+                        topic.icon if topic.icon else default_icons[0],
+                        item.icon if item.icon else default_icons[1],
                     )
         for module_class in main_module_registry.values():
             module = module_class()
             if module.title not in mapping:
                 mapping[module.title] = (
                     module.topic.icon_name
-                    if module.topic and module.topic.icon_name else default_icon,
-                    module.icon if module.icon else default_icon,
+                    if module.topic and module.topic.icon_name else default_icons[0],
+                    module.icon if module.icon else default_icons[1],
                 )
         return mapping
 
     def _render_results(
         self,
         results: SearchResultsByTopic,
-        default_icon: Icon = "topic_overview",
     ) -> str:
-        with html.plugged():
-            icon_mapping = self._get_icon_mapping(default_icon)
+        with output_funnel.plugged():
+            default_icons = ("main_" + self.search_type + "_active", "main_" + self.search_type)
+            icon_mapping = self._get_icon_mapping(default_icons)
+
             for topic, search_results in results:
-                html.open_div(id_=topic, class_="topic")
-                icons = icon_mapping.get(topic, (default_icon, default_icon))
+                max_num_displayed_results_exceeded = len(
+                    list(search_results)) >= self._max_num_displayed_results
+
+                icons = icon_mapping.get(topic, default_icons)
+                html.open_div(
+                    id_=topic,
+                    class_=["topic", "extendable" if max_num_displayed_results_exceeded else ""],
+                )
                 self._render_topic(topic, icons)
                 html.open_ul()
                 for count, result in enumerate(list(search_results)):
@@ -1353,22 +1365,36 @@ class MenuSearchResultsRenderer:
                         result,
                         hidden=count >= self._max_num_displayed_results,
                     )
+
                 # TODO: Remove this as soon as the index search does limit its search results
-                if len(list(search_results)) >= self._max_num_displayed_results:
-                    html.input(name="show_all_results",
-                               value=_("Show all results"),
-                               type_="button",
-                               onclick=f"cmk.search.on_click_show_all_results('{topic}');",
-                               class_="button")
+                if max_num_displayed_results_exceeded:
+                    html.open_li(class_="show_all_items")
+                    html.open_a(
+                        href="",
+                        onclick=
+                        f"cmk.search.on_click_show_all_results({json.dumps(topic)}, 'popup_menu_{self.search_type}');",
+                    )
+                    html.write_text(_("Show all results"))
+                    html.close_a()
+                    html.close_li()
+
                 html.close_ul()
                 html.close_div()
-            html.div(None, class_=["topic", "sentinel"])
-            html_text = html.drain()
+            html_text = output_funnel.drain()
         return html_text
 
     def _render_topic(self, topic: str, icons: Tuple[Icon, Icon]):
         html.open_h2()
         html.div(class_="spacer", content="")
+
+        html.open_a(
+            class_="show_all_topics",
+            href="",
+            onclick=f"cmk.search.on_click_show_all_topics({json.dumps(topic)})",
+        )
+        html.icon(icon="collapse_arrow", title=_("Show all topics"))
+        html.close_a()
+
         if not config.user.get_attribute("icons_per_item"):
             html.icon(icons[0])
         else:
@@ -1377,13 +1403,19 @@ class MenuSearchResultsRenderer:
         html.close_h2()
 
     def _render_result(self, result, hidden=False):
-        html.open_li(class_="hidden" if hidden else "")
+        html.open_li(
+            class_="hidden" if hidden else "",
+            **{"data-extended": "false" if hidden else ""},
+        )
         html.open_a(
             href=result.url,
             target="main",
-            onclick=f"cmk.popup_menu.close_popup(); cmk.search.on_click_reset('{self.search_type}');"
+            onclick=
+            f"cmk.popup_menu.close_popup(); cmk.search.on_click_reset('{self.search_type}');",
+            title=result.title + (" %s" % result.context if result.context else ""),
         )
-        html.write_text(result.title)
+        html.write_text(result.title +
+                        (" %s" % html.render_b(result.context) if result.context else ""))
         html.close_a()
         html.close_li()
 
@@ -1423,7 +1455,7 @@ class MonitoringSearch(ABCMegaMenuSearch):
 @page_registry.register_page("ajax_search_monitoring")
 class PageSearchMonitoring(AjaxPage):
     def page(self):
-        query = html.request.get_unicode_input_mandatory("q")
+        query = request.get_unicode_input_mandatory("q")
         return MenuSearchResultsRenderer("monitoring").render(query)
 
 
@@ -1454,14 +1486,14 @@ class SetupSearch(ABCMegaMenuSearch):
 @page_registry.register_page("ajax_search_setup")
 class PageSearchSetup(AjaxPage):
     def page(self):
-        query = html.request.get_unicode_input_mandatory("q")
+        query = request.get_unicode_input_mandatory("q")
         try:
             return MenuSearchResultsRenderer("setup").render(query)
         except IndexNotFoundException:
-            with html.plugged():
+            with output_funnel.plugged():
                 html.open_div(class_="topic")
                 html.open_ul()
                 html.write_text(_("Currently indexing, please try again shortly."))
                 html.close_ul()
                 html.close_div()
-                return html.drain()
+                return output_funnel.drain()

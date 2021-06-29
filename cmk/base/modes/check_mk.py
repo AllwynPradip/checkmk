@@ -50,7 +50,7 @@ from cmk.utils.type_defs import (
     HostName,
     InventoryPluginName,
     SectionName,
-    TagValue,
+    TagID,
 )
 
 import cmk.snmplib.snmp_modes as snmp_modes
@@ -120,7 +120,8 @@ _verbosity = 0
 
 
 def option_cache() -> None:
-    cmk.core_helpers.cache.set_cache_opts(use_caches=True)
+    cmk.core_helpers.cache.FileCacheFactory.maybe = True
+    cmk.core_helpers.cache.FileCacheFactory.use_outdated = True
 
 
 modes.register_general_option(
@@ -300,7 +301,7 @@ def mode_list_tag(args: List[str]) -> None:
         out.output("\n")
 
 
-def _list_all_hosts_with_tags(tags: List[TagValue]) -> List[HostName]:
+def _list_all_hosts_with_tags(tags: List[TagID]) -> List[HostName]:
     config_cache = config.get_config_cache()
     hosts = []
 
@@ -420,19 +421,15 @@ def mode_dump_agent(hostname: HostName) -> None:
         output = []
         # Show errors of problematic data sources
         has_errors = False
-        mode = FetchMode.CHECKING
-        for source in sources.make_sources(
-                host_config,
-                ipaddress,
-                mode=mode,
-        ):
-            source.file_cache_max_age = config.check_max_cachefile_age
+        for source in sources.make_sources(host_config, ipaddress):
+            source.file_cache_max_age = config.max_cachefile_age()
             if not isinstance(source, sources.agent.AgentSource):
                 continue
 
-            raw_data = source.fetch()
+            mode = FetchMode.CHECKING
+            raw_data = source.fetch(mode)
             host_sections = source.parse(raw_data, selection=NO_SELECTION)
-            source_state, source_output = source.summarize(host_sections)
+            source_state, source_output = source.summarize(host_sections, mode=mode)
             if source_state != 0:
                 console.error(
                     "ERROR [%s]: %s\n",
@@ -1384,7 +1381,7 @@ modes.register(
 
 
 def mode_check_discovery(hostname: HostName) -> int:
-    return discovery.check_discovery(hostname, ipaddress=None)
+    return discovery.active_check_discovery(hostname, ipaddress=None)
 
 
 modes.register(
@@ -1541,15 +1538,14 @@ _DiscoveryOptions = TypedDict(
 
 def mode_discover(options: _DiscoveryOptions, args: List[str]) -> None:
     hostnames = modes.parse_hostname_list(args)
+    cmk.core_helpers.cache.FileCacheFactory.maybe = True
     if not hostnames:
         # In case of discovery without host restriction, use the cache file
         # by default. Otherwise Checkmk would have to connect to ALL hosts.
-        # This will make Checkmk only contact hosts in case the cache is not
-        # new enough.
-        cmk.core_helpers.cache.FileCacheFactory.reset_maybe()
+        cmk.core_helpers.cache.FileCacheFactory.use_outdated = True
 
     selected_sections, run_plugin_names = _extract_plugin_selection(options, CheckPluginName)
-    discovery.do_discovery(
+    discovery.commandline_discovery(
         set(hostnames),
         selected_sections=selected_sections,
         run_plugin_names=run_plugin_names,
@@ -1650,7 +1646,7 @@ def mode_check(options: _CheckingOptions, args: List[str]) -> None:
         ipaddress = args[1]
 
     selected_sections, run_plugin_names = _extract_plugin_selection(options, CheckPluginName)
-    return checking.do_check(
+    checking.commandline_checking(
         hostname,
         ipaddress,
         selected_sections=selected_sections,
@@ -1736,14 +1732,15 @@ def mode_inventory(options: _InventoryOptions, args: List[str]) -> None:
     else:
         # No hosts specified: do all hosts and force caching
         hostnames = sorted(config_cache.all_active_hosts())
-        cmk.core_helpers.cache.FileCacheFactory.reset_maybe()
+        cmk.core_helpers.cache.FileCacheFactory.maybe = (
+            not cmk.core_helpers.cache.FileCacheFactory.disabled)
         console.verbose("Doing HW/SW inventory on all hosts\n")
 
     if "force" in options:
         sources.agent.AgentSource.use_outdated_persisted_sections = True
 
     selected_sections, run_plugin_names = _extract_plugin_selection(options, InventoryPluginName)
-    inventory.do_inv(
+    inventory.commandline_inventory(
         hostnames,
         selected_sections=selected_sections,
         run_plugin_names=run_plugin_names,
@@ -1786,7 +1783,7 @@ modes.register(
 
 
 def mode_inventory_as_check(options: Dict, hostname: HostName) -> int:
-    return inventory.do_inv_check(hostname, options)
+    return inventory.active_check_inventory(hostname, options)
 
 
 modes.register(

@@ -3,7 +3,6 @@
 # Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
-
 import time
 
 import cmk.utils.tags
@@ -12,7 +11,8 @@ import cmk.gui.watolib as watolib
 import cmk.gui.hooks as hooks
 import cmk.gui.userdb as userdb
 from cmk.gui.i18n import _
-from cmk.gui.globals import g, html
+from cmk.gui.globals import html
+from cmk.gui.utils.urls import urlencode_vars
 
 from cmk.gui.htmllib import HTML
 from cmk.gui.valuespec import (
@@ -32,11 +32,12 @@ from cmk.gui.valuespec import (
     Alternative,
     FixedValue,
     AbsoluteDate,
-    TextUnicode,
+    TextInput,
     SetupSiteChoice,
     ID,
     Transform,
     Labels,
+    ValueSpecText,
 )
 from cmk.gui.exceptions import MKUserError
 
@@ -320,8 +321,8 @@ class HostAttributeParents(ABCHostAttributeValueSpec):
 
     def paint(self, value, hostname):
         parts = [
-            html.render_a(hn, "wato.py?" + html.urlencode_vars([("mode", "edit_host"),
-                                                                ("host", hn)])) for hn in value
+            html.render_a(hn, "wato.py?" + urlencode_vars([("mode", "edit_host"), ("host", hn)]))
+            for hn in value
         ]
         return "", HTML(", ").join(parts)
 
@@ -348,6 +349,18 @@ def validate_host_parents(host):
 
 
 hooks.register_builtin('validate-host', validate_host_parents)
+
+
+@hooks.request_memoize()
+def _get_criticality_choices():
+    """Returns the current configuration of the tag_group criticality"""
+    tags = cmk.utils.tags.TagConfig()
+    tags.parse_config(watolib.TagConfigFile().load_for_reading())
+    criticality_group = tags.get_tag_group("criticality")
+    if not criticality_group:
+        return []
+
+    return criticality_group.get_tag_choices()
 
 
 @host_attribute_registry.register
@@ -469,24 +482,9 @@ class HostAttributeNetworkScan(ABCHostAttributeValueSpec):
         return [(user_id, "%s (%s)" % (user_id, user.get("alias", user_id)))
                 for user_id, user in userdb.load_users(lock=False).items()]
 
-    def _get_criticality_choices(self):
-        """Returns the current configuration of the tag_group criticality"""
-        if 'criticality_choices' in g:
-            return g.criticality_choices
-
-        tags = cmk.utils.tags.TagConfig()
-        tags.parse_config(watolib.TagConfigFile().load_for_reading())
-        criticality_group = tags.get_tag_group("criticality")
-        if not criticality_group:
-            g.criticality_choices = []
-            return []
-
-        g.criticality_choices = criticality_group.get_tag_choices()
-        return g.criticality_choices
-
     def _optional_tag_criticality_element(self):
         """This element is optional. The user may have deleted the tag group criticality"""
-        choices = self._get_criticality_choices()
+        choices = _get_criticality_choices()
         if not choices:
             return []
 
@@ -626,7 +624,7 @@ class HostAttributeNetworkScanResult(ABCHostAttributeValueSpec):
                         ],
                     ),
                 ),
-                ("output", TextUnicode(title=_("Output"),)),
+                ("output", TextInput(title=_("Output"),)),
             ],
             title=_("Last Scan Result"),
             optional_keys=[],
@@ -644,7 +642,7 @@ class HostAttributeManagementAddress(ABCHostAttributeValueSpec):
 
     @classmethod
     def sort_index(cls):
-        return 110
+        return 120
 
     def show_in_table(self):
         return False
@@ -672,7 +670,7 @@ class HostAttributeManagementProtocol(ABCHostAttributeValueSpec):
 
     @classmethod
     def sort_index(cls):
-        return 120
+        return 110
 
     def show_in_table(self):
         return False
@@ -843,8 +841,8 @@ class HostAttributeLockedBy(ABCHostAttributeValueSpec):
 
 
 class LockedByValuespec(Tuple):
-    def __init__(self):
-        super(LockedByValuespec, self).__init__(
+    def __init__(self) -> None:
+        super().__init__(
             orientation="horizontal",
             title_br=False,
             elements=[
@@ -857,10 +855,10 @@ class LockedByValuespec(Tuple):
                    "Dynamic Configuration."),
         )
 
-    def value_to_text(self, value):
+    def value_to_text(self, value) -> ValueSpecText:
         if not value or not value[1] or not value[2]:
             return _("Not locked")
-        return super(LockedByValuespec, self).value_to_text(value)
+        return super().value_to_text(value)
 
 
 @host_attribute_registry.register
@@ -966,12 +964,12 @@ class HostAttributeMetaData(ABCHostAttributeValueSpec):
                                 None,
                                 totext=_("Someone before 1.6"),
                             ),
-                            TextUnicode(
+                            TextInput(
                                 title=_("Created by"),
                                 default_value="unknown",
                             ),
                         ],
-                        default_value=config.user.id,
+                        default_value=lambda: config.user.id,
                     ),
                 ),
             ],
@@ -994,9 +992,6 @@ class HostAttributeLabels(ABCHostAttributeValueSpec):
     @classmethod
     def sort_index(cls):
         return 190
-
-    def is_show_more(self) -> bool:
-        return True
 
     def help(self):
         return _("With the help of labels you can flexibly group your hosts in "

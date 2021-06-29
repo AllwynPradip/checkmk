@@ -8,6 +8,9 @@ functionality is the locked file opening realized with the File() context
 manager."""
 
 import ast
+import enum
+import functools
+import threading
 from contextlib import contextmanager
 import errno
 import fcntl
@@ -16,7 +19,7 @@ import os
 from pathlib import Path
 import pprint
 import tempfile
-from typing import Any, Union, Dict, Iterator, Optional, AnyStr, cast
+from typing import Any, Union, Dict, Iterator, Optional, AnyStr, cast, List, Tuple
 
 from six import ensure_binary
 
@@ -41,6 +44,10 @@ logger = logging.getLogger("cmk.store")
 #   '----------------------------------------------------------------------'
 
 
+class MKConfigLockTimeout(MKTimeout):
+    """Special exception to signalize timeout waiting for the global configuration lock"""
+
+
 def configuration_lockfile() -> str:
     return default_config_dir + "/multisite.mk"
 
@@ -48,7 +55,15 @@ def configuration_lockfile() -> str:
 @contextmanager
 def lock_checkmk_configuration() -> Iterator[None]:
     path = configuration_lockfile()
-    aquire_lock(path)
+    try:
+        aquire_lock(path)
+    except MKTimeout as e:
+        raise MKConfigLockTimeout(
+            _("Couldn't lock the Checkmk configuration. Another "
+              "process is running that holds this lock. In order for you to be "
+              "able to perform the desired action, you have to wait until the "
+              "other process has finished. Please try again later.")) from e
+
     try:
         yield
     finally:
@@ -355,7 +370,80 @@ def _save_data_to_file(path: Union[Path, str], content: bytes, mode: int = 0o660
 #   | wait forever.                                                        |
 #   '----------------------------------------------------------------------'
 
-_acquired_locks: Dict[str, int] = {}
+LockDict = Dict[str, int]
+
+# This will hold our path to file descriptor dicts.
+_locks = threading.local()
+
+
+def with_lock_dict(func):
+    """Decorator to make access to global locking dict thread-safe.
+
+    Only the thread which acquired the lock should see the file descriptor in the locking
+    dictionary. In order to do this, the locking dictionary(*) is now an attribute on a
+    threading.local() object, which has to be created at runtime. This decorator handles
+    the creation of these dicts.
+
+    (*) The dict is a mapping from path-name to file descriptor.
+
+    Additionally, this decorator passes the locking dictionary as the first parameter to the
+    functions, which manipulate the locking dictionary.
+    """
+    @functools.wraps(func)
+    def wrapper(*args):
+        if not hasattr(_locks, 'acquired_locks'):
+            _locks.acquired_locks = {}
+        return func(*args, locks=_locks.acquired_locks)
+
+    return wrapper
+
+
+@with_lock_dict
+def _set_lock(
+    name: str,
+    fd: int,
+    locks: LockDict,
+) -> None:
+    locks[name] = fd
+
+
+@with_lock_dict
+def _get_lock(
+    name: str,
+    locks: LockDict,
+) -> Optional[int]:
+    return locks.get(name)
+
+
+@with_lock_dict
+def _del_lock(
+    name: str,
+    locks: LockDict,
+) -> None:
+    locks.pop(name, None)
+
+
+@with_lock_dict
+def _del_all_locks(locks: LockDict) -> None:
+    locks.clear()
+
+
+@with_lock_dict
+def _get_lock_keys(locks: LockDict) -> List[str]:
+    return list(locks.keys())
+
+
+@with_lock_dict
+def _get_lock_map(locks: LockDict) -> Dict[str, int]:
+    return locks
+
+
+@with_lock_dict
+def _has_lock(
+    name: str,
+    locks: LockDict,
+) -> bool:
+    return name in locks
 
 
 @contextmanager
@@ -374,9 +462,9 @@ def aquire_lock(path: Union[Path, str], blocking: bool = True) -> None:
     if have_lock(path):
         return  # No recursive locking
 
-    logger.debug("Try aquire lock on %s", path)
+    logger.debug("Trying to acquire lock on %s", path)
 
-    # Create file (and base dir) for locking if not existant yet
+    # Create file (and base dir) for locking if not existent yet
     makedirs(path.parent, mode=0o770)
 
     fd = os.open(str(path), os.O_RDONLY | os.O_CREAT, 0o660)
@@ -400,7 +488,7 @@ def aquire_lock(path: Union[Path, str], blocking: bool = True) -> None:
         os.close(fd)
         fd = fd_new
 
-    _acquired_locks[str(path)] = fd
+    _set_lock(str(path), fd)
     logger.debug("Got lock on %s", path)
 
 
@@ -429,7 +517,8 @@ def release_lock(path: Union[Path, str]) -> None:
     if not have_lock(path):
         return  # no unlocking needed
     logger.debug("Releasing lock on %s", path)
-    fd = _acquired_locks.get(str(path))
+
+    fd = _get_lock(str(path))
     if fd is None:
         return
     try:
@@ -437,23 +526,20 @@ def release_lock(path: Union[Path, str]) -> None:
     except OSError as e:
         if e.errno != errno.EBADF:  # Bad file number
             raise
-    _acquired_locks.pop(str(path), None)
+    _del_lock(str(path))
     logger.debug("Released lock on %s", path)
 
 
 def have_lock(path: Union[str, Path]) -> bool:
-    if isinstance(path, Path):
-        path = str(path)
-
-    return path in _acquired_locks
+    return _has_lock(str(path))
 
 
 def release_all_locks() -> None:
     logger.debug("Releasing all locks")
-    logger.debug("_acquired_locks: %r", _acquired_locks)
-    for path in list(_acquired_locks.keys()):
+    logger.debug("Acquired locks: %r", _get_lock_map())
+    for path in _get_lock_keys():
         release_lock(path)
-    _acquired_locks.clear()
+    _del_all_locks()
 
 
 @contextmanager
@@ -471,3 +557,73 @@ def cleanup_locks() -> Iterator[None]:
         except Exception:
             logger.exception("Error while releasing locks after block.")
             raise
+
+
+class RawStorageLoader:
+    """This is POC class: minimal working functionality. OOP and more clear API is planned"""
+    __slots__ = ['_data', '_loaded']
+
+    def __init__(self) -> None:
+        self._data: str = ""
+        self._loaded: Dict[str, Any] = {}
+
+    def read(self, filename: Path) -> None:
+        with filename.open() as f:
+            self._data = f.read()
+
+    def parse(self) -> None:
+        to_run = "loaded.update(" + self._data + ")"
+
+        exec(to_run, {'__builtins__': None}, {"loaded": self._loaded})
+
+    def apply(self, variables: Dict[str, Any]) -> bool:
+        """Stub"""
+        isinstance(variables, dict)
+        return True
+
+    def _all_hosts(self) -> List[str]:
+        return self._loaded.get("all_hosts", [])
+
+    def _host_tags(self) -> Dict[str, Any]:
+        return self._loaded.get("host_tags", {})
+
+    def _host_labels(self) -> Dict[str, Any]:
+        return self._loaded.get("host_labels", {})
+
+    def _attributes(self) -> Dict[str, Dict[str, Any]]:
+        return self._loaded.get("attributes", {})
+
+    def _host_attributes(self) -> Dict[str, Any]:
+        return self._loaded.get("host_attributes", {})
+
+    def _explicit_host_conf(self) -> Dict[str, Dict[str, Any]]:
+        return self._loaded.get("explicit_host_conf", {})
+
+    def _extra_host_conf(self) -> Dict[str, List[Tuple[str, List[str]]]]:
+        return self._loaded.get("extra_host_conf", {})
+
+
+class StorageFormat(enum.Enum):
+    STANDARD = "standard"
+    RAW = "raw"
+
+    def __str__(self) -> str:
+        return str(self.value)
+
+    @classmethod
+    def from_str(cls, value: str) -> 'StorageFormat':
+        return cls[value.upper()]
+
+    def extension(self) -> str:
+        # This typing error is a false positive.  There are tests to demonstrate that.
+        return {  # type: ignore[return-value]
+            StorageFormat.STANDARD: ".mk",
+            StorageFormat.RAW: ".cfg",
+        }[self]
+
+    def hosts_file(self) -> str:
+        return "hosts" + self.extension()
+
+    def is_hosts_config(self, filename: str) -> bool:
+        """Unified method to determine that the file is hosts config."""
+        return filename.startswith("/wato/") and filename.endswith("/" + self.hosts_file())

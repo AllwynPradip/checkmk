@@ -17,7 +17,6 @@ TAROPTS            := --owner=root --group=root --exclude=.svn --exclude=*~ \
 		      --exclude=__pycache__ --exclude=*.pyc
 # We could add clang's -Wshorten-64-to-32 and g++'c/clang's -Wsign-conversion here.
 CXX_FLAGS          := -g -O3 -Wall -Wextra
-CLANG_VERSION      := 10
 CLANG_FORMAT       := clang-format-$(CLANG_VERSION)
 SCAN_BUILD         := scan-build-$(CLANG_VERSION)
 export CPPCHECK    := cppcheck
@@ -79,8 +78,8 @@ LOCK_PATH := .venv.lock
 .PHONY: all analyze build check check-binaries check-permissions check-version \
         clean compile-neb-cmc compile-neb-cmc-docker cppcheck dist documentation \
         documentation-quick format format-c format-python format-shell format-js \
-        GTAGS headers help install iwyu mrproper mrclean optimize-images packages \
-        setup setversion tidy version am--refresh skel openapi openapi-doc
+        GTAGS headers help install iwyu mrproper mrclean optimize-images \
+        packages setup setversion tidy version am--refresh skel openapi openapi-doc
 
 
 help:
@@ -223,11 +222,9 @@ $(DISTNAME).tar.gz: omd/packages/mk-livestatus/mk-livestatus-$(VERSION).tar.gz .
 		mk-job* \
 		waitmax \
 		windows/cfg_examples \
-		windows/check_mk_agent-64.exe \
-		windows/check_mk_agent.exe \
 		windows/check_mk_agent.msi \
-		windows/python-3.8.zip \
-		windows/python-3.4.zip \
+		windows/python-3.8.cab \
+		windows/python-3.4.cab \
 		windows/check_mk.user.yml \
 		windows/CONTENTS \
 		windows/mrpe \
@@ -264,7 +261,7 @@ omd/packages/mk-livestatus/mk-livestatus-$(VERSION).tar.gz:
 	rm -rf mk-livestatus-$(VERSION)
 	mkdir -p mk-livestatus-$(VERSION)
 	tar cf -  $(TAROPTS) -C livestatus $$(cd livestatus ; echo $(LIVESTATUS_SOURCES) ) | tar xf - -C mk-livestatus-$(VERSION)
-	cp -a configure.ac m4 mk-livestatus-$(VERSION)
+	cp -a configure.ac defines.make m4 mk-livestatus-$(VERSION)
 	cd mk-livestatus-$(VERSION) && \
 	    autoreconf --install --include=m4 && \
 	    rm -rf autom4te.cache && \
@@ -341,6 +338,7 @@ optimize-images:
 .INTERMEDIATE: .ran-npm
 node_modules/.bin/webpack: .ran-npm
 node_modules/.bin/redoc-cli: .ran-npm
+node_modules/.bin/prettier: .ran-npm
 .ran-npm: package.json package-lock.json
 	@echo "npm version: $$(npm --version)"
 	@echo "node version: $$(node --version)"
@@ -355,7 +353,7 @@ node_modules/.bin/redoc-cli: .ran-npm
 	    echo "Installing from public registry" ; \
         fi ; \
 	npm install --audit=false --unsafe-perm $$REGISTRY
-	touch node_modules/.bin/webpack node_modules/.bin/redoc-cli
+	touch node_modules/.bin/webpack node_modules/.bin/redoc-cli node_modules/.bin/prettier
 
 # NOTE 1: Match anything patterns % cannot be used in intermediates. Therefore, we
 # list all targets separately.
@@ -416,15 +414,15 @@ setup:
 	    autoconf \
 	    bear \
 	    build-essential \
-	    clang-10 \
-	    clang-format-10 \
-	    clang-tidy-10 \
-	    clang-tools-10 \
-	    clangd-10 \
+	    clang-$(CLANG_VERSION) \
+	    clang-format-$(CLANG_VERSION) \
+	    clang-tidy-$(CLANG_VERSION) \
+	    clang-tools-$(CLANG_VERSION) \
+	    clangd-$(CLANG_VERSION) \
+	    lld-$(CLANG_VERSION) \
+	    lldb-$(CLANG_VERSION) \
+	    libclang-$(CLANG_VERSION)-dev \
 	    curl \
-	    libclang-10-dev \
-	    libclang-common-10-dev \
-	    libclang1-10 \
 	    libjpeg-dev \
 	    doxygen \
 	    figlet \
@@ -592,6 +590,9 @@ documentation-quick: config.h
 ifeq ($(ENTERPRISE),yes)
 	$(MAKE) -C enterprise/core/src documentation-quick
 endif
+
+sw-documentation-docker:
+	scripts/run-in-docker.sh scripts/run-pipenv run make -C doc/documentation html
 
 # TODO: pipenv and make don't really cooperate nicely: Locking alone already
 # creates a virtual environment with setuptools/pip/wheel. This could lead to a

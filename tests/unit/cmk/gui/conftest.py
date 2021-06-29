@@ -13,30 +13,27 @@ import threading
 import urllib.parse
 from http.cookiejar import CookieJar
 from pathlib import Path
-from typing import Any, NamedTuple, Literal
+from typing import Any, NamedTuple, Literal, Optional, Dict
 from functools import lru_cache
 
-import pytest  # type: ignore[import]
+import pytest
 import webtest  # type: ignore[import]
 from mock import MagicMock
-from werkzeug.test import create_environ
 
-from testlib.utils import DummyApplication
+from cmk.gui import watolib
 
 import cmk.utils.log
 import cmk.utils.paths as paths
 
 import cmk.gui.config as config
-import cmk.gui.htmllib as htmllib
 import cmk.gui.login as login
-from cmk.gui.display_options import DisplayOptions
-from cmk.gui.globals import AppContext, RequestContext
-from cmk.gui.http import Request
 from cmk.gui.utils import get_random_string
 from cmk.gui.watolib import search, hosts_and_folders
 from cmk.gui.watolib.users import delete_users, edit_users
 from cmk.gui.wsgi import make_app
 import cmk.gui.watolib.activate_changes as activate_changes
+from cmk.gui.utils.json import patch_json
+from cmk.gui.utils.script_helpers import application_and_request_context
 
 SPEC_LOCK = threading.Lock()
 
@@ -56,9 +53,7 @@ HTTPMethod = Literal[
 @pytest.fixture(scope='function')
 def register_builtin_html():
     """This fixture registers a global htmllib.html() instance just like the regular GUI"""
-    environ = create_environ()
-    with AppContext(DummyApplication(environ, None)), \
-            RequestContext(htmllib.html(Request(environ)), display_options=DisplayOptions()):
+    with application_and_request_context():
         yield
 
 
@@ -67,9 +62,7 @@ def module_wide_request_context():
     # This one is kind of an hack because some other test-fixtures touch the user object AFTER the
     # request context has already ended. If we increase our scope this won't matter, but it is of
     # course wrong. These other fixtures have to be fixed.
-    environ = create_environ()
-    with AppContext(DummyApplication(environ, None)), \
-            RequestContext(htmllib.html(Request(environ)), display_options=DisplayOptions()):
+    with application_and_request_context():
         yield
 
 
@@ -87,6 +80,7 @@ def load_plugins(register_builtin_html, monkeypatch, tmp_path):
     config_dir = tmp_path / "var/check_mk/web"
     config_dir.mkdir(parents=True)
     monkeypatch.setattr(config, "config_dir", "%s" % config_dir)
+    monkeypatch.setattr(config, "roles", {'user': {}, 'admin': {}, 'guest': {}})
     modules.load_all_plugins()
 
 
@@ -148,6 +142,12 @@ def _create_and_destroy_user(automation=False, role="user"):
 
     # User directories are not deleted by WATO by default. Clean it up here!
     shutil.rmtree(str(profile_path))
+
+
+@pytest.fixture(scope='function', name="patch_json", autouse=True)
+def fixture_patch_json():
+    with patch_json(json):
+        yield
 
 
 @pytest.fixture(scope='function')
@@ -245,7 +245,7 @@ def with_automation_user(register_builtin_html, load_config):
         yield user
 
 
-def get_link(resp, rel):
+def get_link(resp, rel: str):
     for link in resp.get('links', []):
         if link['rel'].startswith(rel):
             return link
@@ -281,6 +281,7 @@ class WebTestAppForCMK(webtest.TestApp):
         self.password = password
 
     def call_method(self, method: HTTPMethod, url, *args, **kw) -> webtest.TestResponse:
+        print(method, url, args, kw)
         return getattr(self, method.lower())(url, *args, **kw)
 
     def has_link(self, resp: webtest.TestResponse, rel) -> bool:
@@ -292,12 +293,23 @@ class WebTestAppForCMK(webtest.TestApp):
         except KeyError:
             return False
 
-    def follow_link(self, resp: webtest.TestResponse, rel, base='', **kw) -> webtest.TestResponse:
+    def follow_link(
+        self,
+        resp: webtest.TestResponse,
+        rel,
+        json_data: Optional[Dict[str, Any]] = None,
+        **kw,
+    ) -> webtest.TestResponse:
         """Follow a link description as defined in a restful-objects entity"""
-        rel = _expand_rel(rel)
+        params = dict(kw)
         if resp.status.startswith("2") and resp.content_type.endswith("json"):
-            link = get_link(resp.json, rel)
-            resp = self.call_method(link.get('method', 'GET').lower(), link['href'], **kw)
+            if json_data is None:
+                json_data = resp.json
+            link = get_link(json_data, _expand_rel(rel))
+            if 'body_params' in link and link['body_params']:
+                params['params'] = json.dumps(link['body_params'])
+                params['content_type'] = 'application/json'
+            resp = self.call_method(link['method'], link['href'], **params)
         return resp
 
     def api_request(self, action, request, output_format='json', **kw):
@@ -376,10 +388,21 @@ def logged_in_wsgi_app(wsgi_app, with_user):
 
 
 @pytest.fixture(scope='function')
+def with_groups(module_wide_request_context, with_user_login, suppress_automation_calls):
+    watolib.add_group('windows', 'host', {'alias': 'windows'})
+    watolib.add_group('routers', 'service', {'alias': 'routers'})
+    watolib.add_group('admins', 'contact', {'alias': 'admins'})
+    yield
+    watolib.delete_group('windows', 'host')
+    watolib.delete_group('routers', 'service')
+    watolib.delete_group('admins', 'contact')
+
+
+@pytest.fixture(scope='function')
 def with_host(module_wide_request_context, with_user_login, suppress_automation_calls):
     hostnames = ["heute", "example.com"]
     hosts_and_folders.CREFolder.root_folder().create_hosts([
-        (hostname, {}, []) for hostname in hostnames
+        (hostname, {}, None) for hostname in hostnames
     ])
     yield hostnames
     hosts_and_folders.CREFolder.root_folder().delete_hosts(hostnames)

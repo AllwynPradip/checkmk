@@ -5,6 +5,7 @@
 # conditions defined in the file COPYING, which is part of this source code package.
 
 from typing import Dict as _Dict, List as _List, Optional as _Optional
+from cmk.utils.type_defs import TagsOfHosts
 
 # This file contains the defaults settings for almost all configuration
 # variables that can be overridden in main.mk. Some configuration
@@ -128,7 +129,8 @@ service_dependency_template = 'check_mk'
 generate_hostconf = True
 generate_dummy_commands = True
 dummy_check_commandline = 'echo "ERROR - you did an active check on this service - please disable active checks" && exit 1'
-nagios_illegal_chars = '`;~!$%^&*|\'"<>?,()=\t'  # Tab is an illegal character for CMC
+nagios_illegal_chars = '`;~!$%^&*|\'"<>?,='
+cmc_illegal_chars = '\t'  # Tab is an illegal character for CMC
 
 # Data to be defined in main.mk
 tag_config: _Dict[str, _List] = {
@@ -149,7 +151,7 @@ special_agents: _Dict = {}
 custom_checks: _List = []
 all_hosts: _List = []
 # store host tag config per host
-host_tags: _Dict = {}
+host_tags: TagsOfHosts = {}
 # store explicit host labels per host
 host_labels: _Dict = {}
 # Assign labels via ruleset to hosts
@@ -275,3 +277,5 @@ status_data_inventory: _List = []
 legacy_checks: _List = []
 
 logwatch_rules: _List = []
+
+config_storage_format = "standard"  # new in 2.1. Possible also: "raw"

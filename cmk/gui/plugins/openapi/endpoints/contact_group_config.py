@@ -10,6 +10,15 @@ Every contact group represents a responsibility for a specific area in the IT la
 
 You can find an introduction to user management including contact groups in the
 [Checkmk guide](https://docs.checkmk.com/latest/en/wato_user.html).
+
+### Relations
+
+A contact group object can have the following relations present in `links`:
+
+ * `self` - The contact group itself.
+ * `urn:org.restfulobject/rels:update` - An endpoint to change this contact group.
+ * `urn:org.restfulobject/rels:delete` - An endpoint to delete this contact group.
+
 """
 from cmk.gui import watolib
 from cmk.gui.http import Response
@@ -17,10 +26,12 @@ from cmk.gui.plugins.openapi.endpoints.utils import (
     serve_group,
     serialize_group,
     serialize_group_list,
-    load_groups,
+    prepare_groups,
     fetch_group,
     fetch_specific_groups,
     update_groups,
+    update_customer_info,
+    updated_group_details,
 )
 from cmk.gui.plugins.openapi.restful_objects import (
     constructors,
@@ -30,6 +41,7 @@ from cmk.gui.plugins.openapi.restful_objects import (
 )
 from cmk.gui.plugins.openapi.restful_objects.parameters import NAME_FIELD
 from cmk.gui.watolib.groups import edit_group, add_group, load_contact_group_information
+from cmk.utils import version
 
 
 @Endpoint(constructors.collection_href('contact_group_config'),
@@ -42,8 +54,10 @@ def create(params):
     """Create a contact group"""
     body = params['body']
     name = body['name']
-    alias = body.get('alias')
-    add_group(name, 'contact', {'alias': alias})
+    group_details = {"alias": body.get("alias")}
+    if version.is_managed_edition():
+        group_details = update_customer_info(group_details, body["customer"])
+    add_group(name, 'contact', group_details)
     group = fetch_group(name, "contact")
     return serve_group(group, serialize_group('contact_group_config'))
 
@@ -57,11 +71,11 @@ def bulk_create(params):
     """Bulk create host groups"""
     body = params['body']
     entries = body['entries']
-    contact_group_details = load_groups("contact", entries)
+    contact_group_details = prepare_groups("contact", entries)
 
     contact_group_names = []
-    for group_name, group_alias in contact_group_details.items():
-        add_group(group_name, 'contact', {'alias': group_alias})
+    for group_name, group_details in contact_group_details.items():
+        add_group(group_name, 'contact', group_details)
         contact_group_names.append(group_name)
 
     contact_groups = fetch_specific_groups(contact_group_names, "contact")
@@ -104,15 +118,13 @@ def show(params):
 def delete(params):
     """Delete a contact group"""
     name = params['name']
-    group = fetch_group(name, "contact")
-    constructors.require_etag(constructors.etag_of_dict(group))
     watolib.delete_group(name, 'contact')
     return Response(status=204)
 
 
 @Endpoint(constructors.domain_type_action_href('contact_group_config', 'bulk-delete'),
           '.../delete',
-          method='delete',
+          method='post',
           request_schema=request_schemas.BulkDeleteContactGroup,
           output_empty=True)
 def bulk_delete(params):
@@ -137,13 +149,13 @@ def bulk_delete(params):
           path_params=[NAME_FIELD],
           response_schema=response_schemas.ContactGroup,
           etag='both',
-          request_schema=request_schemas.InputContactGroup)
+          request_schema=request_schemas.UpdateGroup)
 def update(params):
     """Update a contact group"""
     name = params['name']
     group = fetch_group(name, "contact")
     constructors.require_etag(constructors.etag_of_dict(group))
-    edit_group(name, 'contact', params['body'])
+    edit_group(name, 'contact', updated_group_details(name, 'contact', params['body']))
     group = fetch_group(name, "contact")
     return serve_group(group, serialize_group('contact_group_config'))
 
@@ -154,7 +166,12 @@ def update(params):
           request_schema=request_schemas.BulkUpdateContactGroup,
           response_schema=response_schemas.DomainObjectCollection)
 def bulk_update(params):
-    """Bulk update contact groups"""
+    """Bulk update contact groups
+
+    Please be aware that when doing bulk updates, it is not possible to prevent the
+    [Updating Values]("lost update problem"), which is normally prevented by the ETag locking
+    mechanism. Use at your own risk.
+    """
     body = params['body']
     entries = body['entries']
     updated_contact_groups = update_groups("contact", entries)

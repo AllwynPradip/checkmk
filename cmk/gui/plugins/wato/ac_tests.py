@@ -23,7 +23,7 @@ import cmk.gui.watolib as watolib
 import cmk.gui.config as config
 import cmk.gui.plugins.userdb.htpasswd
 from cmk.gui.i18n import _
-from cmk.gui.globals import html
+from cmk.gui.globals import request
 from cmk.gui.exceptions import MKGeneralException
 from cmk.gui.watolib.sites import SiteManagementFactory
 from cmk.gui.watolib.global_settings import rulebased_notifications_enabled
@@ -352,7 +352,7 @@ class ACTestHTTPSecured(ACTest):
         return True
 
     def execute(self) -> Iterator[ACResult]:
-        if html.request.is_ssl_request:
+        if request.is_ssl_request:
             yield ACResultOK(_("Site is using HTTPS"))
         else:
             yield ACResultWARN(_("Site is using plain HTTP. Consider enabling HTTPS."))
@@ -712,7 +712,7 @@ class ACTestCheckMKFetcherUsage(ACTest):
             "<p>Possible actions:<ul>"
             "<li>Check whether or not you can decrease check timeouts</li>"
             "<li>Check which checks / plugins are <a href=\"view.py?view_name=service_check_durations\">consuming most helper process time</a></li>"
-            "<li>Increase the <a href=\"wato.py?mode=edit_configvar&varname=cmc_cmk_helpers\">number of Checkmk helpers</a></li>"
+            "<li>Increase the <a href=\"wato.py?mode=edit_configvar&varname=cmc_fetcher_helpers\">number of Checkmk fetchers</a></li>"
             "</ul>"
             "</p>"
             "<p>But you need to be careful that you don't configure too many Checkmk "

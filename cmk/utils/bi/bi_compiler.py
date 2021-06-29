@@ -4,10 +4,9 @@
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-import os
+import pickle
 import time
 import cmk
-import marshal
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -84,10 +83,11 @@ class BICompiler:
             if path_object.is_dir():
                 continue
             aggr_id = path_object.name
-            if aggr_id in self._compiled_aggregations:
+            if aggr_id.endswith(".new") or aggr_id in self._compiled_aggregations:
                 continue
+
             self._logger.debug("Loading cached aggregation results %s" % aggr_id)
-            aggr_data = self._marshal_load_data(str(path_object))
+            aggr_data = self._load_data(str(path_object))
             self._compiled_aggregations[aggr_id] = BIAggregation.create_trees_from_schema(aggr_data)
 
     def _check_compilation_status(self) -> None:
@@ -120,16 +120,15 @@ class BICompiler:
                 result = aggr.serialize()
                 self._logger.debug("Schema dump %s took config took %f (%d branches)" %
                                    (aggr_id, time.time() - start, len(aggr.branches)))
-                self._marshal_save_data(self._path_compiled_aggregations.joinpath(aggr_id), result)
+                self._save_data(self._path_compiled_aggregations.joinpath(aggr_id), result)
 
             self._generate_part_of_aggregation_lookup(self._compiled_aggregations)
 
         known_sites = {kv[0]: kv[1] for kv in current_configstatus.get("known_sites", set())}
         self._cleanup_vanished_aggregations()
         self._bi_structure_fetcher.cleanup_orphaned_files(known_sites)
-
-        self._path_compilation_timestamp.write_text(
-            str(current_configstatus["configfile_timestamp"]))
+        store.save_text_to_file(str(self._path_compilation_timestamp),
+                                str(current_configstatus["configfile_timestamp"]))
 
     def _cleanup_vanished_aggregations(self):
         valid_aggregations = list(self._compiled_aggregations.keys())
@@ -233,17 +232,11 @@ class BICompiler:
 
         return latest_timestamp
 
-    def _marshal_save_data(self, filepath, data) -> None:
-        with open(filepath, "wb") as f:
-            marshal.dump(data, f)
-            os.fsync(f.fileno())
+    def _save_data(self, filepath: Path, data) -> None:
+        store.save_bytes_to_file(filepath, pickle.dumps(data))
 
-    def _marshal_load_data(self, filepath) -> Dict:
-        try:
-            with open(filepath, "rb") as f:
-                return marshal.load(f)
-        except ValueError:
-            return {}
+    def _load_data(self, filepath) -> Dict:
+        return pickle.loads(store.load_bytes_from_file(filepath))
 
     def _get_redis_client(self) -> 'RedisDecoded':
         if self._redis_client is None:

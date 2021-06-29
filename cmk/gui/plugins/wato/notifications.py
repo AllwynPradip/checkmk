@@ -10,7 +10,7 @@ import cmk.utils.version as cmk_version
 import cmk.gui.mkeventd as mkeventd
 import cmk.gui.config as config
 from cmk.gui.i18n import _
-from cmk.gui.globals import html
+from cmk.gui.globals import request
 
 from cmk.gui.valuespec import (
     Age,
@@ -28,8 +28,7 @@ from cmk.gui.valuespec import (
     ListOfStrings,
     Password,
     TextAreaUnicode,
-    TextAscii,
-    TextUnicode,
+    TextInput,
     Transform,
     Tuple,
 )
@@ -85,12 +84,11 @@ def _vs_add_common_mail_elements(elements):
                          size=40,
                          allow_empty=False,
                      )),
-                     ("display_name",
-                      TextUnicode(
-                          title=_("Display name"),
-                          size=40,
-                          allow_empty=False,
-                      )),
+                     ("display_name", TextInput(
+                         title=_("Display name"),
+                         size=40,
+                         allow_empty=False,
+                     )),
                  ],
                  help=_("The email address and visible name used in the From header "
                         "of notifications messages. If no email address is specified "
@@ -110,12 +108,11 @@ def _vs_add_common_mail_elements(elements):
                          size=40,
                          allow_empty=False,
                      )),
-                     ("display_name",
-                      TextUnicode(
-                          title=_("Display name"),
-                          size=40,
-                          allow_empty=False,
-                      )),
+                     ("display_name", TextInput(
+                         title=_("Display name"),
+                         size=40,
+                         allow_empty=False,
+                     )),
                  ],
                  required_keys=["address"],
                  help=_("The email address and visible name used in the Reply-To header "
@@ -124,7 +121,7 @@ def _vs_add_common_mail_elements(elements):
              forth=lambda x: x if isinstance(x, dict) else {'address': x},
          )),
         ("host_subject",
-         TextUnicode(
+         TextInput(
              title=_("Subject for host notifications"),
              help=_("Here you are allowed to use all macros that are defined in the "
                     "notification context."),
@@ -132,7 +129,7 @@ def _vs_add_common_mail_elements(elements):
              size=64,
          )),
         ("service_subject",
-         TextUnicode(
+         TextInput(
              title=_("Subject for service notifications"),
              help=_("Here you are allowed to use all macros that are defined in the "
                     "notification context."),
@@ -185,7 +182,7 @@ def _get_url_prefix_specs(default_choice, default_value=DEF_VALUE):
             ("automatic_http", _("Automatic HTTP")),
             ("automatic_https", _("Automatic HTTPs")),
             ("manual", _("Specify URL prefix"),
-             TextAscii(
+             TextInput(
                  regex="^(http|https)://.*/check_mk/$",
                  regex_error=_("The URL must begin with <tt>http</tt> or "
                                "<tt>https</tt> and end with <tt>/check_mk/</tt>."),
@@ -244,7 +241,7 @@ class NotificationParameterMail(NotificationParameter):
              _get_url_prefix_specs(
                  "http://" + socket.gethostname() + "/" +
                  (config.omd_site() and config.omd_site() + "/" or "") + "check_mk/",
-                 html.request.is_ssl_request and "automatic_https" or "automatic_http")),
+                 request.is_ssl_request and "automatic_https" or "automatic_http")),
             ("no_floating_graphs",
              FixedValue(
                  True,
@@ -290,6 +287,12 @@ class NotificationParameterMail(NotificationParameter):
         return elements
 
 
+def _slack_add_proxy(value):
+    # introduced with 2.0.0p4 werk #12857
+    value.setdefault("proxy_url", ('no_proxy', None))
+    return value
+
+
 @notification_parameter_registry.register
 class NotificationParameterSlack(NotificationParameter):
     @property
@@ -298,30 +301,41 @@ class NotificationParameterSlack(NotificationParameter):
 
     @property
     def spec(self):
-        return Dictionary(
-            title=_("Create notification with the following parameters"),
-            optional_keys=["url_prefix"],
-            elements=[
-                ("webhook_url",
-                 CascadingDropdown(
-                     title=_("Webhook-URL"),
-                     help=
-                     _("Webhook URL. Setup Slack Webhook " +
-                       "<a href=\"https://my.slack.com/services/new/incoming-webhook/\" target=\"_blank\">here</a>"
-                       "<br />For Mattermost follow the documentation "
-                       "<a href=\"https://docs.mattermost.com/developer/webhooks-incoming.html\" target=\"_blank\">here</a>"
-                       "<br />This URL can also be collected from the Password Store from Check_MK."
-                      ),
-                     choices=[("webhook_url", _("Webhook URL"), HTTPUrl(size=80,
-                                                                        allow_empty=False)),
-                              ("store", _("URL from password store"),
-                               DropdownChoice(
-                                   sorted=True,
-                                   choices=passwordstore_choices,
-                               ))],
-                 )),
-                ("url_prefix", _get_url_prefix_specs(local_site_url)),
-            ],
+        return Transform(
+            Dictionary(
+                title=_("Create notification with the following parameters"),
+                optional_keys=["ignore_ssl", "url_prefix", "proxy_url"],
+                elements=[
+                    ("webhook_url",
+                     CascadingDropdown(
+                         title=_("Webhook-URL"),
+                         help=
+                         _("Webhook URL. Setup Slack Webhook " +
+                           "<a href=\"https://my.slack.com/services/new/incoming-webhook/\" target=\"_blank\">here</a>"
+                           "<br />For Mattermost follow the documentation "
+                           "<a href=\"https://docs.mattermost.com/developer/webhooks-incoming.html\" target=\"_blank\">here</a>"
+                           "<br />This URL can also be collected from the Password Store from Checkmk."
+                          ),
+                         choices=[("webhook_url", _("Webhook URL"),
+                                   HTTPUrl(size=80, allow_empty=False)),
+                                  ("store", _("URL from password store"),
+                                   DropdownChoice(
+                                       sorted=True,
+                                       choices=passwordstore_choices,
+                                   ))],
+                     )),
+                    ("ignore_ssl",
+                     FixedValue(
+                         True,
+                         title=_("Disable SSL certificate verification"),
+                         totext=_("Disable SSL certificate verification"),
+                         help=_("Ignore unverified HTTPS request warnings. Use with caution."),
+                     )),
+                    ("url_prefix", _get_url_prefix_specs(local_site_url)),
+                    ("proxy_url", HTTPProxyReference()),
+                ],
+            ),
+            forth=_slack_add_proxy,
         )
 
 
@@ -335,7 +349,7 @@ class NotificationParameterCiscoWebexTeams(NotificationParameter):
     def spec(self):
         return Dictionary(
             title=_("Create notification with the following parameters"),
-            optional_keys=["url_prefix", "proxy_url"],
+            optional_keys=["ignore_ssl", "url_prefix", "proxy_url"],
             elements=[
                 ("webhook_url",
                  CascadingDropdown(
@@ -343,7 +357,7 @@ class NotificationParameterCiscoWebexTeams(NotificationParameter):
                      help=
                      _("Webhook URL. Setup Cisco Webex Teams Webhook " +
                        "<a href=\"https://apphub.webex.com/messaging/applications/incoming-webhooks-cisco-systems-38054\" target=\"_blank\">here</a>"
-                       "<br />This URL can also be collected from the Password Store from Check_MK."
+                       "<br />This URL can also be collected from the Password Store from Checkmk."
                       ),
                      choices=[("webhook_url", _("Webhook URL"), HTTPUrl(size=80,
                                                                         allow_empty=False)),
@@ -354,6 +368,13 @@ class NotificationParameterCiscoWebexTeams(NotificationParameter):
                                ))],
                  )),
                 ("url_prefix", _get_url_prefix_specs(local_site_url)),
+                ("ignore_ssl",
+                 FixedValue(
+                     True,
+                     title=_("Disable SSL certificate verification"),
+                     totext=_("Disable SSL certificate verification"),
+                     help=_("Ignore unverified HTTPS request warnings. Use with caution."),
+                 )),
                 ("proxy_url", HTTPProxyReference()),
             ],
         )
@@ -369,7 +390,7 @@ class NotificationParameterVictorOPS(NotificationParameter):
     def spec(self):
         return Dictionary(
             title=_("Create notification with the following parameters"),
-            optional_keys=["url_prefix"],
+            optional_keys=["ignore_ssl", "proxy_url", "url_prefix"],
             elements=[
                 ("webhook_url",
                  CascadingDropdown(
@@ -377,7 +398,7 @@ class NotificationParameterVictorOPS(NotificationParameter):
                      help=
                      _("Learn how to setup a REST endpoint "
                        "<a href=\"https://help.victorops.com/knowledge-base/victorops-restendpoint-integration/\" target=\"_blank\">here</a>"
-                       "<br />This URL can also be collected from the Password Store from Check_MK."
+                       "<br />This URL can also be collected from the Password Store from Checkmk."
                       ),
                      choices=[("webhook_url", _("REST Endpoint URL"),
                                HTTPUrl(allow_empty=False,
@@ -391,6 +412,14 @@ class NotificationParameterVictorOPS(NotificationParameter):
                                    choices=passwordstore_choices,
                                ))],
                  )),
+                ("ignore_ssl",
+                 FixedValue(
+                     True,
+                     title=_("Disable SSL certificate verification"),
+                     totext=_("Disable SSL certificate verification"),
+                     help=_("Ignore unverified HTTPS request warnings. Use with caution."),
+                 )),
+                ("proxy_url", HTTPProxyReference()),
                 ("url_prefix", _get_url_prefix_specs(local_site_url)),
             ],
         )
@@ -406,7 +435,7 @@ class NotificationParameterPagerDuty(NotificationParameter):
     def spec(self):
         return Dictionary(
             title=_("Create notification with the following parameters"),
-            optional_keys=["url_prefix"],
+            optional_keys=["ignore_ssl", "proxy_url", "url_prefix"],
             hidden_keys=["webhook_url"],
             elements=[
                 ("routing_key",
@@ -414,13 +443,21 @@ class NotificationParameterPagerDuty(NotificationParameter):
                      title=_("PagerDuty Service Integration Key"),
                      help=_("After setting up a new Service in PagerDuty you will receive an "
                             "Integration key associated with that service. Copy that value here."),
-                     choices=[("routing_key", _("Integration Key"), TextAscii(size=32)),
+                     choices=[("routing_key", _("Integration Key"), TextInput(size=32)),
                               ("store", _("Key from password store"),
                                DropdownChoice(sorted=True, choices=passwordstore_choices))],
                  )),
                 ("webhook_url",
                  FixedValue("https://events.pagerduty.com/v2/enqueue",
                             title=_("API Endpoint from PagerDuty V2"))),
+                ("ignore_ssl",
+                 FixedValue(
+                     True,
+                     title=_("Disable SSL certificate verification"),
+                     totext=_("Disable SSL certificate verification"),
+                     help=_("Ignore unverified HTTPS request warnings. Use with caution."),
+                 )),
+                ("proxy_url", HTTPProxyReference()),
                 ("url_prefix", _get_url_prefix_specs(local_site_url)),
             ],
         )
@@ -436,7 +473,7 @@ class NotificationParameterSIGNL4(NotificationParameter):
     def spec(self):
         return Dictionary(
             title=_("Create notification with the following parameters"),
-            optional_keys=[],
+            optional_keys=["ignore_ssl", "proxy_url"],
             elements=[
                 ("password",
                  IndividualOrStoredPassword(
@@ -445,6 +482,14 @@ class NotificationParameterSIGNL4(NotificationParameter):
                             "your webhook URL: https://connect.signl4.com/webhook/<team_secret>"),
                      allow_empty=False,
                  )),
+                ("ignore_ssl",
+                 FixedValue(
+                     True,
+                     title=_("Disable SSL certificate verification"),
+                     totext=_("Disable SSL certificate verification"),
+                     help=_("Ignore unverified HTTPS request warnings. Use with caution."),
+                 )),
+                ("proxy_url", HTTPProxyReference()),
                 ("url_prefix", _get_url_prefix_specs(local_site_url)),
             ],
         )
@@ -510,7 +555,7 @@ class NotificationILert(NotificationParameter):
     def spec(self):
         return Dictionary(
             title=_("Create notification with the following parameters"),
-            optional_keys=[],
+            optional_keys=["ignore_ssl", "proxy_url"],
             elements=[
                 ("ilert_api_key",
                  CascadingDropdown(title=_("iLert alert source API key"),
@@ -518,11 +563,19 @@ class NotificationILert(NotificationParameter):
                                    choices=[(
                                        "ilert_api_key",
                                        _("API key"),
-                                       TextAscii(size=80, allow_empty=False),
+                                       TextInput(size=80, allow_empty=False),
                                    ),
                                             ("store", _("API key from password store"),
                                              DropdownChoice(sorted=True,
                                                             choices=passwordstore_choices))])),
+                ("ignore_ssl",
+                 FixedValue(
+                     True,
+                     title=_("Disable SSL certificate verification"),
+                     totext=_("Disable SSL certificate verification"),
+                     help=_("Ignore unverified HTTPS request warnings. Use with caution."),
+                 )),
+                ("proxy_url", HTTPProxyReference()),
                 ("ilert_priority",
                  DropdownChoice(
                      sorted=True,
@@ -535,14 +588,14 @@ class NotificationILert(NotificationParameter):
                       ),
                      default_value='HIGH')),
                 ("ilert_summary_host",
-                 TextUnicode(
+                 TextInput(
                      title=_("Custom incident summary for host alerts"),
                      default_value=
                      "$NOTIFICATIONTYPE$ Host Alert: $HOSTNAME$ is $HOSTSTATE$ - $HOSTOUTPUT$",
                      size=64,
                  )),
                 ("ilert_summary_service",
-                 TextUnicode(
+                 TextInput(
                      title=_("Custom incident summary for service alerts"),
                      default_value=
                      "$NOTIFICATIONTYPE$ Service Alert: $HOSTALIAS$/$SERVICEDESC$ is $SERVICESTATE$ - $SERVICEOUTPUT$",
@@ -565,8 +618,8 @@ class NotificationParameterJIRA_ISSUES(NotificationParameter):
         return Dictionary(
             title=_("Create notification with the following parameters"),
             optional_keys=[
-                'priority', 'resolution', 'host_summary', 'service_summary', 'ignore_ssl',
-                'timeout', 'label'
+                'site_customid', 'priority', 'resolution', 'host_summary', 'service_summary',
+                'ignore_ssl', 'timeout', 'label'
             ],
             elements=[
                 ("url", HTTPUrl(
@@ -581,7 +634,7 @@ class NotificationParameterJIRA_ISSUES(NotificationParameter):
                      help=_("Ignore unverified HTTPS request warnings. Use with caution."),
                  )),
                 ("username",
-                 TextAscii(
+                 TextInput(
                      title=_("User Name"),
                      help=_("Configure the user name here."),
                      size=40,
@@ -596,7 +649,7 @@ class NotificationParameterJIRA_ISSUES(NotificationParameter):
                      allow_empty=False,
                  )),
                 ("project",
-                 TextAscii(
+                 TextInput(
                      title=_("Project ID"),
                      help=_(
                          "The numerical JIRA project ID. If not set, it will be retrieved from a "
@@ -605,7 +658,7 @@ class NotificationParameterJIRA_ISSUES(NotificationParameter):
                      size=10,
                  )),
                 ("issuetype",
-                 TextAscii(
+                 TextInput(
                      title=_("Issue type ID"),
                      help=_(
                          "The numerical JIRA issue type ID. If not set, it will be retrieved from a "
@@ -614,19 +667,19 @@ class NotificationParameterJIRA_ISSUES(NotificationParameter):
                      size=10,
                  )),
                 ("host_customid",
-                 TextAscii(
+                 TextInput(
                      title=_("Host custom field ID"),
                      help=_("The numerical JIRA custom field ID for host problems."),
                      size=10,
                  )),
                 ("service_customid",
-                 TextAscii(
+                 TextInput(
                      title=_("Service custom field ID"),
                      help=_("The numerical JIRA custom field ID for service problems."),
                      size=10,
                  )),
                 ("site_customid",
-                 TextAscii(
+                 TextInput(
                      title=_("Site custom field ID"),
                      help=_("The numerical ID of the JIRA custom field for sites. "
                             "Please use this option if you have multiple sites in a "
@@ -642,7 +695,7 @@ class NotificationParameterJIRA_ISSUES(NotificationParameter):
                          "Used for link to check_mk out of jira."),
                  )),
                 ("priority",
-                 TextAscii(
+                 TextInput(
                      title=_("Priority ID"),
                      help=_(
                          "The numerical JIRA priority ID. If not set, it will be retrieved from a "
@@ -651,7 +704,7 @@ class NotificationParameterJIRA_ISSUES(NotificationParameter):
                      size=10,
                  )),
                 ("host_summary",
-                 TextUnicode(
+                 TextInput(
                      title=_("Summary for host notifications"),
                      help=_("Here you are allowed to use all macros that are defined in the "
                             "notification context."),
@@ -659,7 +712,7 @@ class NotificationParameterJIRA_ISSUES(NotificationParameter):
                      size=64,
                  )),
                 ("service_summary",
-                 TextUnicode(
+                 TextInput(
                      title=_("Summary for service notifications"),
                      help=_("Here you are allowed to use all macros that are defined in the "
                             "notification context."),
@@ -667,27 +720,33 @@ class NotificationParameterJIRA_ISSUES(NotificationParameter):
                      size=64,
                  )),
                 ("label",
-                 TextUnicode(
+                 TextInput(
                      title=_("Label"),
                      help=_("Here you can set a custom label for new issues. "
                             "If not set, 'monitoring' will be used."),
                      size=16,
                  )),
                 ("resolution",
-                 TextAscii(
+                 TextInput(
                      title=_("Activate resolution with following resolution transition ID"),
                      help=_("The numerical JIRA resolution transition ID. "
                             "11 - 'To Do', 21 - 'In Progress', 31 - 'Done'"),
                      size=3,
                  )),
                 ("timeout",
-                 TextAscii(
+                 TextInput(
                      title=_("Set optional timeout for connections to JIRA"),
                      help=_("Here you can configure timeout settings."),
                      default_value=10,
                  )),
             ],
         )
+
+
+def _servicenow_add_use_site_id(value):
+    # introduced in 1.6.0p24, werk #12856
+    value.setdefault("use_site_id", False)
+    return value
 
 
 @notification_parameter_registry.register
@@ -698,274 +757,299 @@ class NotificationParameterServiceNow(NotificationParameter):
 
     @property
     def spec(self):
-        return Dictionary(
-            title=_("Create notification with the following parameters"),
-            required_keys=['url', 'username', 'password', 'caller'],
-            elements=[
-                ("url",
-                 HTTPUrl(
-                     title=_("ServiceNow URL"),
-                     help=_("Configure your ServiceNow URL here (eg. https://myservicenow.com)."),
-                     allow_empty=False,
-                 )),
-                ("proxy_url", HTTPProxyReference()),
-                ("username",
-                 TextAscii(
-                     title=_("Username"),
-                     help=_("The user, used for login, has to have at least the "
-                            "role 'itil' in ServiceNow."),
-                     size=40,
-                     allow_empty=False,
-                 )),
-                ("password", PasswordFromStore(
-                    title=_("Password of the user"),
-                    allow_empty=False,
-                )),
-                ("caller",
-                 TextAscii(
-                     title=_("Caller ID"),
-                     help=_("Caller is the user on behalf of whom the incident is being reported "
-                            "within ServiceNow. Please enter the name of the caller here. "
-                            "It is recommended to use the same user as used for login. "
-                            "Otherwise, your ACL rules in ServiceNow must be "
-                            "adjusted, so that the user who is used for login "
-                            "can create/edit/resolve incidents on behalf of the "
-                            "caller. Please have a look at ServiceNow "
-                            "documentation for details."),
-                 )),
-                ("host_short_desc",
-                 TextAscii(
-                     title=_("Short description for host incidents"),
-                     help=_("Text that should be set in field <tt>Short description</tt> "
-                            "for host notifications."),
-                     default_value="Check_MK: $HOSTNAME$ - $HOSTSHORTSTATE$",
-                     size=64,
-                 )),
-                ("svc_short_desc",
-                 TextAscii(
-                     title=_("Short description for service incidents"),
-                     help=_("Text that should be set in field <tt>Short description</tt> "
-                            "for service notifications."),
-                     default_value="Check_MK: $HOSTNAME$/$SERVICEDESC$ $SERVICESHORTSTATE$",
-                     size=68,
-                 )),
-                ("host_desc",
-                 TextAreaUnicode(title=_("Description for host incidents"),
-                                 help=_("Text that should be set in field <tt>Description</tt> "
-                                        "for host notifications."),
-                                 rows=7,
-                                 cols=58,
-                                 monospaced=True,
-                                 default_value="""Host: $HOSTNAME$
+        return Transform(
+            Dictionary(
+                title=_("Create notification with the following parameters"),
+                required_keys=['url', 'username', 'password', 'caller'],
+                elements=[
+                    ("url",
+                     HTTPUrl(
+                         title=_("ServiceNow URL"),
+                         help=_(
+                             "Configure your ServiceNow URL here (eg. https://myservicenow.com)."),
+                         allow_empty=False,
+                     )),
+                    ("proxy_url", HTTPProxyReference()),
+                    ("username",
+                     TextInput(
+                         title=_("Username"),
+                         help=_("The user, used for login, has to have at least the "
+                                "role 'itil' in ServiceNow."),
+                         size=40,
+                         allow_empty=False,
+                     )),
+                    ("password",
+                     PasswordFromStore(
+                         title=_("Password of the user"),
+                         allow_empty=False,
+                     )),
+                    ("use_site_id",
+                     Alternative(
+                         title=_("Use site ID prefix"),
+                         help=_("Please use this option if you have multiple "
+                                "sites in a distributed setup which send their "
+                                "notifications to the same ServiceNow instance. "
+                                "The site ID will be used as prefix for the "
+                                "problem ID on incident creation."),
+                         elements=[
+                             FixedValue(False, title=_("Deactivated"), totext=""),
+                             FixedValue(True, title=_("Use site ID"), totext=""),
+                         ],
+                         default_value=False,
+                     )),
+                    ("caller",
+                     TextInput(
+                         title=_("Caller ID"),
+                         help=_(
+                             "Caller is the user on behalf of whom the incident is being reported "
+                             "within ServiceNow. Please enter the name of the caller here. "
+                             "It is recommended to use the same user as used for login. "
+                             "Otherwise, your ACL rules in ServiceNow must be "
+                             "adjusted, so that the user who is used for login "
+                             "can create/edit/resolve incidents on behalf of the "
+                             "caller. Please have a look at ServiceNow "
+                             "documentation for details."),
+                     )),
+                    ("host_short_desc",
+                     TextInput(
+                         title=_("Short description for host incidents"),
+                         help=_("Text that should be set in field <tt>Short description</tt> "
+                                "for host notifications."),
+                         default_value="Check_MK: $HOSTNAME$ - $HOSTSHORTSTATE$",
+                         size=64,
+                     )),
+                    ("svc_short_desc",
+                     TextInput(
+                         title=_("Short description for service incidents"),
+                         help=_("Text that should be set in field <tt>Short description</tt> "
+                                "for service notifications."),
+                         default_value="Check_MK: $HOSTNAME$/$SERVICEDESC$ $SERVICESHORTSTATE$",
+                         size=68,
+                     )),
+                    ("host_desc",
+                     TextAreaUnicode(title=_("Description for host incidents"),
+                                     help=_("Text that should be set in field <tt>Description</tt> "
+                                            "for host notifications."),
+                                     rows=7,
+                                     cols=58,
+                                     monospaced=True,
+                                     default_value="""Host: $HOSTNAME$
 Event:    $EVENT_TXT$
 Output:   $HOSTOUTPUT$
 Perfdata: $HOSTPERFDATA$
 $LONGHOSTOUTPUT$
 """)),
-                ("svc_desc",
-                 TextAreaUnicode(title=_("Description for service incidents"),
-                                 help=_("Text that should be set in field <tt>Description</tt> "
-                                        "for service notifications."),
-                                 rows=11,
-                                 cols=58,
-                                 monospaced=True,
-                                 default_value="""Host: $HOSTNAME$
+                    ("svc_desc",
+                     TextAreaUnicode(title=_("Description for service incidents"),
+                                     help=_("Text that should be set in field <tt>Description</tt> "
+                                            "for service notifications."),
+                                     rows=11,
+                                     cols=58,
+                                     monospaced=True,
+                                     default_value="""Host: $HOSTNAME$
 Service:  $SERVICEDESC$
 Event:    $EVENT_TXT$
 Output:   $SERVICEOUTPUT$
 Perfdata: $SERVICEPERFDATA$
 $LONGSERVICEOUTPUT$
 """)),
-                ("urgency",
-                 DropdownChoice(
-                     title=_("Urgency"),
-                     help=_("See <a href=\"https://docs.servicenow.com/bundle/"
-                            "helsinki-it-service-management/page/product/incident-management/"
-                            "reference/r_PrioritizationOfIncidents.html\" target=\"_blank\">"
-                            "ServiceNow Incident</a> for more information."),
-                     choices=[
-                         ("low", _("Low")),
-                         ("medium", _("Medium")),
-                         ("high", _("High")),
-                     ],
-                     default_value="low",
-                 )),
-                ("impact",
-                 DropdownChoice(
-                     title=_("Impact"),
-                     help=_("See <a href=\"https://docs.servicenow.com/bundle/"
-                            "helsinki-it-service-management/page/product/incident-management/"
-                            "reference/r_PrioritizationOfIncidents.html\" target=\"_blank\">"
-                            "ServiceNow Incident</a> for more information."),
-                     choices=[
-                         ("low", _("Low")),
-                         ("medium", _("Medium")),
-                         ("high", _("High")),
-                     ],
-                     default_value="low",
-                 )),
-                ("ack_state",
-                 Dictionary(
-                     title=_("Settings for incident state in case of acknowledgement"),
-                     help=_("Here you can define the state of the incident in case of an "
-                            "acknowledgement of the affected host or service problem."),
-                     elements=[
-                         ("start",
-                          Transform(
-                              Alternative(
-                                  title=_("State of incident if acknowledgement is set"),
-                                  help=_(
-                                      "Here you can define the state of the incident in case of an "
-                                      "acknowledgement of the host or service problem."),
-                                  elements=[
-                                      DropdownChoice(
-                                          title=
-                                          _("State of incident if acknowledgement is set (predefined)"
-                                           ),
-                                          help=_(
-                                              "Please note that the mapping to the numeric "
-                                              "ServiceNow state may be changed at your system "
-                                              "and can differ from our definitions. In this case "
-                                              "use the option below."),
-                                          choices=[
-                                              ("none", _("Don't change state")),
-                                              ("new", _("New")),
-                                              ("progress", _("In Progress")),
-                                              ("hold", _("On Hold")),
-                                              ("resolved", _("Resolved")),
-                                              ("closed", _("Closed")),
-                                              ("canceled", _("Canceled")),
-                                          ],
-                                          default_value="none",
-                                      ),
-                                      Integer(
-                                          title=
-                                          _("State of incident if acknowledgement is set (as integer)"
-                                           ),
-                                          minvalue=0,
-                                      ),
-                                  ]))),
-                     ])),
-                ("recovery_state",
-                 Dictionary(
-                     title=_("Settings for incident state in case of recovery"),
-                     help=_("Here you can define the state of the incident in case of a recovery "
-                            "of the affected host or service problem."),
-                     elements=[
-                         (
-                             "start",
-                             Transform(
-                                 Alternative(
-                                     title=_("State of incident if recovery is set"),
-                                     elements=[
-                                         DropdownChoice(
-                                             title=_(
-                                                 "State of incident if recovery is set (predefined)"
+                    ("urgency",
+                     DropdownChoice(
+                         title=_("Urgency"),
+                         help=_("See <a href=\"https://docs.servicenow.com/bundle/"
+                                "helsinki-it-service-management/page/product/incident-management/"
+                                "reference/r_PrioritizationOfIncidents.html\" target=\"_blank\">"
+                                "ServiceNow Incident</a> for more information."),
+                         choices=[
+                             ("low", _("Low")),
+                             ("medium", _("Medium")),
+                             ("high", _("High")),
+                         ],
+                         default_value="low",
+                     )),
+                    ("impact",
+                     DropdownChoice(
+                         title=_("Impact"),
+                         help=_("See <a href=\"https://docs.servicenow.com/bundle/"
+                                "helsinki-it-service-management/page/product/incident-management/"
+                                "reference/r_PrioritizationOfIncidents.html\" target=\"_blank\">"
+                                "ServiceNow Incident</a> for more information."),
+                         choices=[
+                             ("low", _("Low")),
+                             ("medium", _("Medium")),
+                             ("high", _("High")),
+                         ],
+                         default_value="low",
+                     )),
+                    ("ack_state",
+                     Dictionary(
+                         title=_("Settings for incident state in case of acknowledgement"),
+                         help=_("Here you can define the state of the incident in case of an "
+                                "acknowledgement of the affected host or service problem."),
+                         elements=[
+                             ("start",
+                              Transform(
+                                  Alternative(
+                                      title=_("State of incident if acknowledgement is set"),
+                                      help=_(
+                                          "Here you can define the state of the incident in case of an "
+                                          "acknowledgement of the host or service problem."),
+                                      elements=[
+                                          DropdownChoice(
+                                              title=
+                                              _("State of incident if acknowledgement is set (predefined)"
+                                               ),
+                                              help=_(
+                                                  "Please note that the mapping to the numeric "
+                                                  "ServiceNow state may be changed at your system "
+                                                  "and can differ from our definitions. In this case "
+                                                  "use the option below."),
+                                              choices=[
+                                                  ("none", _("Don't change state")),
+                                                  ("new", _("New")),
+                                                  ("progress", _("In Progress")),
+                                                  ("hold", _("On Hold")),
+                                                  ("resolved", _("Resolved")),
+                                                  ("closed", _("Closed")),
+                                                  ("canceled", _("Canceled")),
+                                              ],
+                                              default_value="none",
+                                          ),
+                                          Integer(
+                                              title=
+                                              _("State of incident if acknowledgement is set (as integer)"
+                                               ),
+                                              minvalue=0,
+                                          ),
+                                      ]))),
+                         ])),
+                    ("recovery_state",
+                     Dictionary(
+                         title=_("Settings for incident state in case of recovery"),
+                         help=_(
+                             "Here you can define the state of the incident in case of a recovery "
+                             "of the affected host or service problem."),
+                         elements=[
+                             (
+                                 "start",
+                                 Transform(
+                                     Alternative(
+                                         title=_("State of incident if recovery is set"),
+                                         elements=[
+                                             DropdownChoice(
+                                                 title=
+                                                 _("State of incident if recovery is set (predefined)"
+                                                  ),
+                                                 help=
+                                                 _("Please note that the mapping to the numeric "
+                                                   "ServiceNow state may be changed at your system "
+                                                   "and can differ from our definitions. In this case "
+                                                   "use the option below."),
+                                                 choices=[
+                                                     ("none", _("Don't change state")),
+                                                     ("new", _("New")),
+                                                     ("progress", _("In Progress")),
+                                                     ("hold", _("On Hold")),
+                                                     ("resolved", _("Resolved")),
+                                                     ("closed", _("Closed")),
+                                                     ("canceled", _("Canceled")),
+                                                 ],
+                                                 default_value="none",
                                              ),
-                                             help=_(
-                                                 "Please note that the mapping to the numeric "
-                                                 "ServiceNow state may be changed at your system "
-                                                 "and can differ from our definitions. In this case "
-                                                 "use the option below."),
-                                             choices=[
-                                                 ("none", _("Don't change state")),
-                                                 ("new", _("New")),
-                                                 ("progress", _("In Progress")),
-                                                 ("hold", _("On Hold")),
-                                                 ("resolved", _("Resolved")),
-                                                 ("closed", _("Closed")),
-                                                 ("canceled", _("Canceled")),
-                                             ],
-                                             default_value="none",
-                                         ),
-                                         Integer(
-                                             title=_(
-                                                 "State of incident if recovery is set (as integer)"
+                                             Integer(
+                                                 title=
+                                                 _("State of incident if recovery is set (as integer)"
+                                                  ),
+                                                 minvalue=0,
                                              ),
-                                             minvalue=0,
-                                         ),
-                                     ],
-                                 )),
-                         ),
-                     ],
-                 )),
-                ("dt_state",
-                 Dictionary(
-                     title=_("Settings for incident state in case of downtime"),
-                     help=_("Here you can define the state of the incident in case of a "
-                            "downtime of the affected host or service."),
-                     elements=[
-                         ("start",
-                          Transform(
-                              Alternative(
-                                  title=_("State of incident if downtime is set"),
-                                  elements=[
-                                      DropdownChoice(
-                                          title=_(
-                                              "State of incident if downtime is set (predefined)"),
-                                          help=_(
-                                              "Please note that the mapping to the numeric "
-                                              "ServiceNow state may be changed at your system "
-                                              "and can differ from our definitions. In this case "
-                                              "use the option below."),
-                                          choices=[
-                                              ("none", _("Don't change state")),
-                                              ("new", _("New")),
-                                              ("progress", _("In Progress")),
-                                              ("hold", _("On Hold")),
-                                              ("resolved", _("Resolved")),
-                                              ("closed", _("Closed")),
-                                              ("canceled", _("Canceled")),
-                                          ],
-                                          default_value="none",
-                                      ),
-                                      Integer(
-                                          title=_(
-                                              "State of incident if downtime is set (as integer)"),
-                                          minvalue=0,
-                                      ),
-                                  ]))),
-                         ("end",
-                          Transform(
-                              Alternative(
-                                  title=_("State of incident if downtime expires"),
-                                  help=_(
-                                      "Here you can define the state of the incident in case of an "
-                                      "ending acknowledgement of the host or service problem."),
-                                  elements=[
-                                      DropdownChoice(
-                                          title=_(
-                                              "State of incident if downtime expires (predefined)"),
-                                          help=_(
-                                              "Please note that the mapping to the numeric "
-                                              "ServiceNow state may be changed at your system "
-                                              "and can differ from our definitions. In this case "
-                                              "use the option below."),
-                                          choices=[
-                                              ("none", _("Don't change state")),
-                                              ("new", _("New")),
-                                              ("progress", _("In Progress")),
-                                              ("hold", _("On Hold")),
-                                              ("resolved", _("Resolved")),
-                                              ("closed", _("Closed")),
-                                              ("canceled", _("Canceled")),
-                                          ],
-                                          default_value="none",
-                                      ),
-                                      Integer(
-                                          title=_(
-                                              "State of incident if downtime expires (as integer)"),
-                                          minvalue=0,
-                                      ),
-                                  ]))),
-                     ],
-                 )),
-                ("timeout",
-                 TextAscii(title=_("Set optional timeout for connections to ServiceNow"),
-                           help=_("Here you can configure timeout settings in seconds."),
-                           default_value=10,
-                           size=3)),
-            ],
+                                         ],
+                                     )),
+                             ),
+                         ],
+                     )),
+                    ("dt_state",
+                     Dictionary(
+                         title=_("Settings for incident state in case of downtime"),
+                         help=_("Here you can define the state of the incident in case of a "
+                                "downtime of the affected host or service."),
+                         elements=[
+                             ("start",
+                              Transform(
+                                  Alternative(
+                                      title=_("State of incident if downtime is set"),
+                                      elements=[
+                                          DropdownChoice(
+                                              title=_(
+                                                  "State of incident if downtime is set (predefined)"
+                                              ),
+                                              help=_(
+                                                  "Please note that the mapping to the numeric "
+                                                  "ServiceNow state may be changed at your system "
+                                                  "and can differ from our definitions. In this case "
+                                                  "use the option below."),
+                                              choices=[
+                                                  ("none", _("Don't change state")),
+                                                  ("new", _("New")),
+                                                  ("progress", _("In Progress")),
+                                                  ("hold", _("On Hold")),
+                                                  ("resolved", _("Resolved")),
+                                                  ("closed", _("Closed")),
+                                                  ("canceled", _("Canceled")),
+                                              ],
+                                              default_value="none",
+                                          ),
+                                          Integer(
+                                              title=_(
+                                                  "State of incident if downtime is set (as integer)"
+                                              ),
+                                              minvalue=0,
+                                          ),
+                                      ]))),
+                             ("end",
+                              Transform(
+                                  Alternative(
+                                      title=_("State of incident if downtime expires"),
+                                      help=_(
+                                          "Here you can define the state of the incident in case of an "
+                                          "ending acknowledgement of the host or service problem."),
+                                      elements=[
+                                          DropdownChoice(
+                                              title=
+                                              _("State of incident if downtime expires (predefined)"
+                                               ),
+                                              help=_(
+                                                  "Please note that the mapping to the numeric "
+                                                  "ServiceNow state may be changed at your system "
+                                                  "and can differ from our definitions. In this case "
+                                                  "use the option below."),
+                                              choices=[
+                                                  ("none", _("Don't change state")),
+                                                  ("new", _("New")),
+                                                  ("progress", _("In Progress")),
+                                                  ("hold", _("On Hold")),
+                                                  ("resolved", _("Resolved")),
+                                                  ("closed", _("Closed")),
+                                                  ("canceled", _("Canceled")),
+                                              ],
+                                              default_value="none",
+                                          ),
+                                          Integer(
+                                              title=
+                                              _("State of incident if downtime expires (as integer)"
+                                               ),
+                                              minvalue=0,
+                                          ),
+                                      ]))),
+                         ],
+                     )),
+                    ("timeout",
+                     TextInput(title=_("Set optional timeout for connections to ServiceNow"),
+                               help=_("Here you can configure timeout settings in seconds."),
+                               default_value=10,
+                               size=3)),
+                ],
+            ),
+            forth=_servicenow_add_use_site_id,
         )
 
 
@@ -991,7 +1075,7 @@ class NotificationParameterOpsgenie(NotificationParameter):
                      allow_empty=False,
                  )),
                 ("url",
-                 TextAscii(
+                 TextInput(
                      title=_("Domain (only used for european accounts)"),
                      help=_("If you have an european account, please set the "
                             "domain of your opsgenie. Specify an absolute URL like "
@@ -1002,7 +1086,7 @@ class NotificationParameterOpsgenie(NotificationParameter):
                  )),
                 ("proxy_url", HTTPProxyReference()),
                 ("owner",
-                 TextUnicode(
+                 TextInput(
                      title=_("Owner"),
                      help=("Sets the user of the alert. "
                            "Display name of the request owner."),
@@ -1010,7 +1094,7 @@ class NotificationParameterOpsgenie(NotificationParameter):
                      allow_empty=False,
                  )),
                 ("source",
-                 TextUnicode(
+                 TextInput(
                      title=_("Source"),
                      help=_("Source field of the alert. Default value is IP "
                             "address of the incoming request."),
@@ -1029,19 +1113,19 @@ class NotificationParameterOpsgenie(NotificationParameter):
                      default_value="P3",
                  )),
                 ("note_created",
-                 TextUnicode(
+                 TextInput(
                      title=_("Note while creating"),
                      help=_("Additional note that will be added while creating the alert."),
                      default_value="Alert created by Check_MK",
                  )),
                 ("note_closed",
-                 TextUnicode(
+                 TextInput(
                      title=_("Note while closing"),
                      help=_("Additional note that will be added while closing the alert."),
                      default_value="Alert closed by Check_MK",
                  )),
                 ("host_msg",
-                 TextUnicode(
+                 TextInput(
                      title=_("Description for host alerts"),
                      help=_("Description field of host alert that is generally "
                             "used to provide a detailed information about the "
@@ -1050,7 +1134,7 @@ class NotificationParameterOpsgenie(NotificationParameter):
                      size=64,
                  )),
                 ("svc_msg",
-                 TextUnicode(
+                 TextInput(
                      title=_("Description for service alerts"),
                      help=_("Description field of service alert that is generally "
                             "used to provide a detailed information about the "
@@ -1106,7 +1190,7 @@ $LONGSERVICEOUTPUT$
                      orientation="horizontal",
                  )),
                 ("entity",
-                 TextUnicode(
+                 TextInput(
                      title=_("Entity"),
                      help=_("Is used to specify which domain the alert is related to."),
                      allow_empty=False,
@@ -1166,7 +1250,7 @@ class NotificationParameterSpectrum(NotificationParameter):
                      help=_("SNMP Community for the SNMP trap"),
                  )),
                 ("baseoid",
-                 TextAscii(title=_("Base OID"),
+                 TextInput(title=_("Base OID"),
                            help=_("The base OID for the trap content"),
                            default_value="1.3.6.1.4.1.1234")),
             ],
@@ -1186,7 +1270,7 @@ class NotificationParameterPushover(NotificationParameter):
             optional_keys=["url_prefix", "proxy_url", "priority", "sound"],
             elements=[
                 ("api_key",
-                 TextAscii(
+                 TextInput(
                      title=_("API Key"),
                      help=
                      _("You need to provide a valid API key to be able to send push notifications "
@@ -1198,7 +1282,7 @@ class NotificationParameterPushover(NotificationParameter):
                      regex="[a-zA-Z0-9]{30}",
                  )),
                 ("recipient_key",
-                 TextAscii(
+                 TextInput(
                      title=_("User / Group Key"),
                      help=_("Configure the user or group to receive the notifications by providing "
                             "the user or group key here. The key can be obtained from the Pushover "
@@ -1208,7 +1292,7 @@ class NotificationParameterPushover(NotificationParameter):
                      regex="[a-zA-Z0-9]{30}",
                  )),
                 ("url_prefix",
-                 TextAscii(
+                 TextInput(
                      title=_("URL prefix for links to Checkmk"),
                      help=_("If you specify an URL prefix here, then several parts of the "
                             "email body are armed with hyperlinks to your Check_MK GUI, so "
@@ -1225,7 +1309,7 @@ class NotificationParameterPushover(NotificationParameter):
                     "proxy_url",
                     Transform(
                         HTTPProxyReference(),
-                        # Transform legacy explicit TextAscii() proxy URL
+                        # Transform legacy explicit TextInput() proxy URL
                         forth=lambda v: ("url", v) if isinstance(v, str) else v,
                     )),
                 ("priority",
@@ -1239,7 +1323,7 @@ class NotificationParameterPushover(NotificationParameter):
                               Tuple(elements=[
                                   Age(title=_("Retry time")),
                                   Age(title=_("Expire time")),
-                                  TextAscii(
+                                  TextInput(
                                       title=_("Receipt"),
                                       help=
                                       _("The receipt can be used to periodically poll receipts API to get "

@@ -5,7 +5,7 @@
 # conditions defined in the file COPYING, which is part of this source code package.
 """F5-BIGIP-Cluster Config Sync - SNMP sections and Checks
 """
-from typing import Any, List, Mapping
+from typing import Any, List, Mapping, Optional
 from collections import namedtuple
 
 from .agent_based_api.v1 import (
@@ -60,12 +60,12 @@ def discover_f5_bigip_config_sync(section: State) -> DiscoveryResult:
         yield Service()
 
 
-def parse_f5_bigip_config_sync_pre_v11(string_table: List[StringTable]) -> State:
+def parse_f5_bigip_config_sync_pre_v11(string_table: List[StringTable]) -> Optional[State]:
     """Read a node status encoded as stringified int
     >>> parse_f5_bigip_config_sync_pre_v11([[["0 - Synchronized"]]])
     State(state='0', description='Synchronized')
     """
-    return State(*string_table[0][0][0].split(" - ", 1))
+    return State(*string_table[0][0][0].split(" - ", 1)) if string_table[0] else None
 
 
 # see: 1.3.6.1.4.1.3375.2.1.1.1.1.6.0
@@ -118,18 +118,18 @@ register.check_plugin(
 # F5 nodes need to be ntp synced otherwise status reports might be wrong.
 
 
-def parse_f5_bigip_config_sync_v11_plus(string_table: List[StringTable]) -> State:
+def parse_f5_bigip_config_sync_v11_plus(string_table: List[StringTable]) -> Optional[State]:
     """Read a node status encoded as stringified int
     >>> parse_f5_bigip_config_sync_v11_plus([[['3', 'In Sync']]])
     State(state='3', description='In Sync')
     """
-    return State(*string_table[0][0])
+    return State(*string_table[0][0]) if string_table[0] else None
 
 
 def check_f5_bigip_config_sync_v11_plus(params: Mapping[str, Any], section: State) -> CheckResult:
     """
     >> for r in check_f5_bigip_config_sync_v11_plus(
-    ...         params=Mapping[str, Any](CONFIG_SYNC_DEFAULT_PARAMETERS),
+    ...         params=CONFIG_SYNC_DEFAULT_PARAMETERS,
     ...         section={"node1": 0, "node2": 3}):
     ...     print(r)
     Result(state=<state.OK: 0>, summary='Node [node1] is standby')

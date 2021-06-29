@@ -7,6 +7,7 @@
 from typing import (
     Any,
     Dict,
+    Final,
     Iterable,
     Iterator,
     List,
@@ -19,7 +20,7 @@ from typing import (
     TYPE_CHECKING,
 )
 
-import cmk.utils.caching as caching
+from cmk.utils.exceptions import OnError
 from cmk.utils.log import console
 import cmk.utils.piggyback
 import cmk.utils.tty as tty
@@ -33,11 +34,14 @@ from cmk.utils.type_defs import (
     SourceType,
 )
 
+import cmk.core_helpers.cache as cache
+from cmk.core_helpers.host_sections import HostSections
+
 import cmk.base.api.agent_based.register as agent_based_register
 from cmk.base.api.agent_based.type_defs import SectionPlugin
+from cmk.base.crash_reporting import create_section_crash_dump
 from cmk.base.sources import fetch_all, make_nodes, make_sources
 from cmk.base.sources.agent import AgentHostSections
-from cmk.core_helpers.host_sections import HostSections
 
 if TYPE_CHECKING:
     from cmk.base.sources import Source
@@ -49,10 +53,17 @@ CacheInfo = Optional[Tuple[int, int]]
 
 ParsedSectionContent = Any
 
+SourceResults = Sequence[Tuple['Source', result.Result[HostSections, Exception]]]
+
 
 class ParsingResult(NamedTuple):
     data: ParsedSectionContent
     cache_info: CacheInfo
+
+
+class ResolvedResult(NamedTuple):
+    parsed: ParsingResult
+    section: SectionPlugin
 
 
 class SectionsParser:
@@ -64,6 +75,7 @@ class SectionsParser:
     ) -> None:
         super().__init__()
         self._host_sections = host_sections
+        self._parsing_errors: List[str] = []
         self._memoized_results: Dict[SectionName, Optional[ParsingResult]] = {}
 
     def __repr__(self) -> str:
@@ -76,6 +88,10 @@ class SectionsParser:
     @property
     def sections(self) -> Iterable[SectionName]:  # TODO: see if we really need this in the long run
         return self._host_sections.sections.keys()
+
+    @property
+    def parsing_errors(self) -> Sequence[str]:
+        return self._parsing_errors
 
     def parse(self, section: SectionPlugin) -> Optional[ParsingResult]:
         if section.name in self._memoized_results:
@@ -98,13 +114,87 @@ class SectionsParser:
             raw_data = self._host_sections.sections[section.name]
         except KeyError:
             return None
-        return section.parse_function(raw_data)
+
+        try:
+            return section.parse_function(raw_data)
+        except Exception:
+            if cmk.utils.debug.enabled():
+                raise
+            self._parsing_errors.append(
+                create_section_crash_dump(
+                    operation="parsing",
+                    section_name=section.name,
+                    section_content=raw_data,
+                ))
+            return None
 
     def _get_cache_info(self, section_name: SectionName) -> CacheInfo:
         return self._host_sections.cache_info.get(section_name)
 
 
-class ParsedSectionsBroker(Mapping[HostKey, SectionsParser]):
+class ParsedSectionsResolver:
+    """Find the desired parsed data by ParsedSectionName
+
+    This class resolves ParsedSectionNames while respecting supersedes.
+    """
+    def __init__(
+        self,
+        *,
+        section_plugins: Sequence[SectionPlugin],
+    ) -> None:
+        self._section_plugins = section_plugins
+        self._memoized_results: Dict[ParsedSectionName, Optional[ResolvedResult]] = {}
+        self._superseders = self._init_superseders()
+        self._producers = self._init_producers()
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(section_plugins={self._section_plugins})"
+
+    def _init_superseders(self) -> Mapping[SectionName, Sequence[SectionPlugin]]:
+        superseders: Dict[SectionName, List[SectionPlugin]] = {}
+        for section in self._section_plugins:
+            for superseded in section.supersedes:
+                superseders.setdefault(superseded, []).append(section)
+        return superseders
+
+    def _init_producers(self) -> Mapping[ParsedSectionName, Sequence[SectionPlugin]]:
+        producers: Dict[ParsedSectionName, List[SectionPlugin]] = {}
+        for section in self._section_plugins:
+            producers.setdefault(section.parsed_section_name, []).append(section)
+        return producers
+
+    def resolve(
+        self,
+        parser: SectionsParser,
+        parsed_section_name: ParsedSectionName,
+    ) -> Optional[ResolvedResult]:
+        if parsed_section_name in self._memoized_results:
+            return self._memoized_results[parsed_section_name]
+
+        # try all producers. If there can be multiple, supersedes should come into play
+        for producer in self._producers.get(parsed_section_name, ()):
+            # Before we can parse the section, we must parse all potential superseders.
+            # Registration validates against indirect supersedings, no need to recurse
+            for superseder in self._superseders.get(producer.name, ()):
+                if parser.parse(superseder) is not None:
+                    parser.disable(superseder.supersedes)
+
+            if (parsing_result := parser.parse(producer)) is not None:
+                return self._memoized_results.setdefault(
+                    parsed_section_name, ResolvedResult(
+                        parsed=parsing_result,
+                        section=producer,
+                    ))
+
+        return self._memoized_results.setdefault(parsed_section_name, None)
+
+    def resolve_all(self, parser: SectionsParser) -> Iterator[ResolvedResult]:
+        return iter(
+            result for psn in {section.parsed_section_name for section in self._section_plugins}
+            if (result := self.resolve(parser, psn)) is not None)
+
+
+class ParsedSectionsBroker(Mapping[HostKey, Tuple[ParsedSectionsResolver, SectionsParser]]):
     """Object for aggregating, parsing and disributing the sections
 
     An instance of this class allocates all raw sections of a given host or cluster and
@@ -114,81 +204,26 @@ class ParsedSectionsBroker(Mapping[HostKey, SectionsParser]):
     """
     def __init__(
         self,
-        data: Mapping[HostKey, HostSections],
+        providers: Mapping[HostKey, Tuple[ParsedSectionsResolver, SectionsParser]],
     ) -> None:
         super().__init__()
-        # TODO: rename _data
-        self._data = {
-            host_key: SectionsParser(host_sections=host_sections)
-            for host_key, host_sections in data.items()
-        }
+        self._providers: Final = providers
 
-        # This holds the result of the superseding section along with the
-        # cache info of the raw section that was used (by parsed section name!)
-        self._memoized_parsed_sections = caching.DictCache()
-
+    # TODO: see if we need the mapping interface once .checking._legacy_mode is gone
     def __len__(self) -> int:
-        return len(self._data)
+        return len(self._providers)
 
     def __iter__(self) -> Iterator[HostKey]:
-        return self._data.__iter__()
+        return self._providers.__iter__()
 
-    def __getitem__(self, key: HostKey) -> SectionsParser:
-        return self._data.__getitem__(key)
-
-    def __repr__(self) -> str:
-        return "%s(data=%r)" % (type(self).__name__, self._data)
-
-    # TODO (mo): consider making this a function
-    def get_section_kwargs(
-        self,
-        host_key: HostKey,
-        parsed_section_names: List[ParsedSectionName],
-    ) -> Dict[str, ParsedSectionContent]:
-        """Prepares section keyword arguments for a non-cluster host
-
-        It returns a dictionary containing one entry (may be None) for each
-        of the required sections, or an empty dictionary if no data was found at all.
-        """
-        keys = (["section"] if len(parsed_section_names) == 1 else
-                ["section_%s" % s for s in parsed_section_names])
-
-        kwargs = {
-            key: self.get_parsed_section(host_key, parsed_section_name)
-            for key, parsed_section_name in zip(keys, parsed_section_names)
-        }
-        # empty it, if nothing was found:
-        if all(v is None for v in kwargs.values()):
-            kwargs.clear()
-
-        return kwargs
-
-    # TODO (mo): consider making this a function
-    def get_section_cluster_kwargs(
-        self,
-        node_keys: List[HostKey],
-        parsed_section_names: List[ParsedSectionName],
-    ) -> Dict[str, Dict[str, ParsedSectionContent]]:
-        """Prepares section keyword arguments for a cluster host
-
-        It returns a dictionary containing one optional dictionary[Host, ParsedSection]
-        for each of the required sections, or an empty dictionary if no data was found at all.
-        """
-        kwargs: Dict[str, Dict[str, Any]] = {}
-        for node_key in node_keys:
-            node_kwargs = self.get_section_kwargs(node_key, parsed_section_names)
-            for key, sections_node_data in node_kwargs.items():
-                kwargs.setdefault(key, {})[node_key.hostname] = sections_node_data
-        # empty it, if nothing was found:
-        if all(v is None for s in kwargs.values() for v in s.values()):
-            kwargs.clear()
-
-        return kwargs
+    def __getitem__(self, key: HostKey) -> Tuple[ParsedSectionsResolver, SectionsParser]:
+        return self._providers.__getitem__(key)
 
     def get_cache_info(
         self,
         parsed_section_names: List[ParsedSectionName],
     ) -> CacheInfo:
+        # TODO: should't the host key be provided here?
         """Aggregate information about the age of the data in the agent sections
 
         In order to determine the caching info for a parsed section we must in fact
@@ -197,13 +232,11 @@ class ParsedSectionsBroker(Mapping[HostKey, SectionsParser]):
         But fear not, the parsing itself is cached.
         """
         cache_infos = [
-            cache_info  #
-            for _parsed, cache_info in (  #
-                self._get_parsed_section_with_cache_info(host_key, parsed_section_name)
-                for host_key in self._data
-                for parsed_section_name in parsed_section_names  #
-            )  #
-            if cache_info
+            resolved.parsed.cache_info
+            for resolved in (resolver.resolve(parser, parsed_section_name)
+                             for resolver, parser in self._providers.values()
+                             for parsed_section_name in parsed_section_names)
+            if resolved is not None and resolved.parsed.cache_info is not None
         ]
         return (
             min(ats for ats, _intervals in cache_infos),
@@ -215,71 +248,46 @@ class ParsedSectionsBroker(Mapping[HostKey, SectionsParser]):
         host_key: HostKey,
         parsed_section_name: ParsedSectionName,
     ) -> Optional[ParsedSectionContent]:
-        return self._get_parsed_section_with_cache_info(host_key, parsed_section_name)[0]
-
-    def _get_parsed_section_with_cache_info(
-        self,
-        host_key: HostKey,
-        parsed_section_name: ParsedSectionName,
-    ) -> Tuple[Optional[ParsedSectionContent], CacheInfo]:
-        cache_key = host_key + (parsed_section_name,)
-        if cache_key in self._memoized_parsed_sections:
-            return self._memoized_parsed_sections[cache_key]
-
         try:
-            sections_parser = self._data[host_key]
+            resolver, parser = self._providers[host_key]
         except KeyError:
-            return self._memoized_parsed_sections.setdefault(cache_key, (None, None))
+            return None
 
-        for section in agent_based_register.get_ranked_sections(
-                sections_parser.sections,
-            {parsed_section_name},
-        ):
-            parsing_result = sections_parser.parse(section)
-            if parsing_result is None:
-                continue
-            return self._memoized_parsed_sections.setdefault(
-                cache_key, (parsing_result.data, parsing_result.cache_info))
+        return None if (  #
+            (resolved := resolver.resolve(parser, parsed_section_name)) is None  #
+        ) else resolved.parsed.data
 
-        return self._memoized_parsed_sections.setdefault(cache_key, (None, None))
-
-    def determine_applicable_sections(
+    def filter_available(
         self,
-        parse_sections: Set[ParsedSectionName],
+        parsed_section_names: Set[ParsedSectionName],
         source_type: SourceType,
-    ) -> List[SectionPlugin]:
-        """Try to parse all given sections and return a set of names for which the
-        parsed sections value is not None.
+    ) -> Set[ParsedSectionName]:
+        return {
+            parsed_section_name for host_key, (resolver, parser) in self._providers.items()
+            for parsed_section_name in parsed_section_names
+            if (host_key.source_type is source_type and
+                resolver.resolve(parser, parsed_section_name) is not None)
+        }
 
-        This takes into account the supersedings and permanently "dismisses" all
-        superseded raw sections (by setting their parsing result to None).
-        """
-        applicable_sections: List[SectionPlugin] = []
-        for host_key, sections_parser in self._data.items():
-            if host_key.source_type != source_type:
-                continue
+    def all_parsing_results(self, host_key: HostKey) -> Iterable[ResolvedResult]:
+        try:
+            resolver, parser = self._providers[host_key]
+        except KeyError:
+            return ()
 
-            for section in agent_based_register.get_ranked_sections(
-                    sections_parser.sections,
-                    parse_sections,
-            ):
-                parsing_result = sections_parser.parse(section)
-                if parsing_result is None:
-                    continue
+        return sorted(resolver.resolve_all(parser), key=lambda r: r.section.name)
 
-                applicable_sections.append(section)
-                self._memoized_parsed_sections[host_key +
-                                               (section.parsed_section_name,)] = parsing_result
-                # disable superseded sections:
-                sections_parser.disable(section.supersedes)
-
-        return applicable_sections
+    def parsing_errors(self) -> Sequence[str]:
+        return sum(
+            (list(parser.parsing_errors) for _, parser in self._providers.values()),
+            start=[],
+        )
 
 
 def _collect_host_sections(
     *,
     nodes: Iterable[Tuple[HostName, Optional[HostAddress], Sequence['Source']]],
-    file_cache_max_age: int,
+    file_cache_max_age: cache.MaxAge,
     fetcher_messages: Sequence['FetcherMessage'],
     selected_sections: 'SectionNameCollection',
 ) -> Tuple[  #
@@ -293,7 +301,7 @@ def _collect_host_sections(
     use source.get_summary_result() to get the state, output and perfdata of the agent execution
     or source.exception to get the exception object.
     """
-    console.verbose("%s+%s %s\n", tty.yellow, tty.normal, "Parse fetcher results".upper())
+    console.vverbose("%s+%s %s\n", tty.yellow, tty.normal, "Parse fetcher results".upper())
 
     flat_node_sources = [(hn, ip, src) for hn, ip, sources in nodes for src in sources]
 
@@ -349,20 +357,18 @@ def make_broker(
     ip_address: Optional[HostAddress],
     mode: 'Mode',
     selected_sections: 'SectionNameCollection',
-    file_cache_max_age: int,
+    file_cache_max_age: cache.MaxAge,
     fetcher_messages: Sequence['FetcherMessage'],
     force_snmp_cache_refresh: bool,
-    on_scan_error: str,
-) -> Tuple[ParsedSectionsBroker, Sequence[Tuple['Source', result.Result[HostSections, Exception]]]]:
+    on_scan_error: OnError,
+) -> Tuple[ParsedSectionsBroker, SourceResults]:
     nodes = make_nodes(
         config_cache,
         host_config,
         ip_address,
-        mode,
         make_sources(
             host_config,
             ip_address,
-            mode=mode,
             selected_sections=selected_sections,
             force_snmp_cache_refresh=force_snmp_cache_refresh,
             on_scan_error=on_scan_error,
@@ -373,13 +379,15 @@ def make_broker(
         # Note: *Not* calling `fetch_all(sources)` here is probably buggy.
         # Note: `fetch_all(sources)` is almost always called in similar
         #       code in discovery and inventory.  The only two exceptions
-        #       are `cmk.base.checking.do_check(...)` and
-        #       `cmk.base.discovery.check_discovery(...)`.
+        #       are `cmk.base.agent_based.checking.active_check_checking(...)` and
+        #       `cmk.base.agent_based.discovery.active_check_discovery(...)`.
         #       This does not seem right.
-        fetcher_messages = list(fetch_all(
-            nodes=nodes,
-            file_cache_max_age=file_cache_max_age,
-        ))
+        fetcher_messages = list(
+            fetch_all(
+                nodes=nodes,
+                file_cache_max_age=file_cache_max_age,
+                mode=mode,
+            ))
 
     collected_host_sections, results = _collect_host_sections(
         nodes=nodes,
@@ -387,4 +395,12 @@ def make_broker(
         fetcher_messages=fetcher_messages,
         selected_sections=selected_sections,
     )
-    return ParsedSectionsBroker(collected_host_sections), results
+    return ParsedSectionsBroker({
+        host_key: (
+            ParsedSectionsResolver(section_plugins=[
+                agent_based_register.get_section_plugin(section_name)
+                for section_name in host_sections.sections
+            ],),
+            SectionsParser(host_sections=host_sections),
+        ) for host_key, host_sections in collected_host_sections.items()
+    }), results

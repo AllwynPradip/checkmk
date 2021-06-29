@@ -936,7 +936,10 @@ class EC2Limits(AWSSectionLimits):
                 logging.info("%s: Unknown instance type '%s'", self.name, inst_type)
                 continue
 
-            inst_az = res_inst['AvailabilityZone']
+            inst_az = res_inst.get('AvailabilityZone')
+            if not inst_az:
+                logging.info("AvailabilityZone not available")
+                continue
             res_limits.setdefault(inst_az, {})[inst_type] = res_limits.get(inst_az, {}).get(
                 inst_type, 0) + res_inst['InstanceCount']
         return res_limits
@@ -1346,7 +1349,7 @@ class EBSLimits(AWSSectionLimits):
         response = self._client.describe_volumes()
         volumes = self._get_response_content(response, 'Volumes')
 
-        response = self._client.describe_snapshots()
+        response = self._client.describe_snapshots(OwnerIds=['self'])
         snapshots = self._get_response_content(response, 'Snapshots')
         return volumes, snapshots
 
@@ -4566,11 +4569,11 @@ def main(sys_argv=None):
 
     if not access_key_id:
         has_exceptions = True
-        logging.error('access key id is not set')
+        sys.stderr.write('access key id is not set\n')
 
     if not secret_access_key:
         has_exceptions = True
-        logging.error('secret access key is not set')
+        sys.stderr.write('secret access key is not set\n')
 
     if has_exceptions:
         return 1

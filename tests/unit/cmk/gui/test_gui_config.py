@@ -9,7 +9,7 @@
 import json
 from pathlib import Path
 
-import pytest  # type: ignore[import]
+import pytest
 from flask_babel.speaklater import LazyString  # type: ignore[import]
 
 import cmk.utils.paths
@@ -18,7 +18,7 @@ import cmk.utils.version as cmk_version
 import cmk.gui.config as config
 import cmk.gui.permissions as permissions
 from cmk.gui.exceptions import MKAuthException
-from cmk.gui.globals import html
+from cmk.gui.globals import theme
 from cmk.gui.permissions import Permission, permission_registry, permission_section_registry
 from cmk.gui.watolib.utils import may_edit_ruleset
 
@@ -114,7 +114,6 @@ def test_registered_permissions():
         'background_jobs.stop_jobs',
         'bi.see_all',
         'dashboard.main',
-        'dashboard.problems',
         'dashboard.simple_problems',
         'dashboard.checkmk',
         'dashboard.checkmk_host',
@@ -523,6 +522,7 @@ def test_registered_permissions():
 
     if not cmk_version.is_raw_edition():
         expected_permissions += [
+            'dashboard.problems',
             'dashboard.site',
             'dashboard.ntop_alerts',
             'dashboard.ntop_flows',
@@ -550,6 +550,7 @@ def test_registered_permissions():
             'wato.bake_agents',
             'wato.dcd_connections',
             'wato.download_all_agents',
+            'wato.influxdb_connections',
             'wato.license_usage',
             'wato.submit_license_usage',
             'wato.manage_mkps',
@@ -913,17 +914,6 @@ def test_theme_broken_meta(my_theme):
     assert config.theme_choices() == sorted([
         ("my_theme", u"my_theme"),
     ])
-
-
-def test_html_set_theme(my_theme, register_builtin_html):
-    html.set_theme("")
-    assert html.get_theme() == "facelift"
-
-    html.set_theme("not_existing")
-    assert html.get_theme() == "facelift"
-
-    html.set_theme("my_theme")
-    assert html.get_theme() == "my_theme"
 
 
 @pytest.mark.usefixtures("load_config")

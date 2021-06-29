@@ -5,9 +5,9 @@
 # conditions defined in the file COPYING, which is part of this source code package.
 import json
 
-import pytest  # type: ignore[import]
+import pytest
 
-from cmk.gui.plugins.openapi.livestatus_helpers.testing import MockLiveStatusConnection
+from cmk.utils.livestatus_helpers.testing import MockLiveStatusConnection
 
 
 @pytest.mark.parametrize(
@@ -32,7 +32,7 @@ def test_openapi_acknowledge_all_services(
     live: MockLiveStatusConnection = mock_livestatus
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     live.add_table('services', [
         {
@@ -99,7 +99,7 @@ def test_openapi_acknowledge_specific_service(
     live: MockLiveStatusConnection = mock_livestatus
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     live.add_table('services', [
         {
@@ -180,7 +180,7 @@ def test_openapi_acknowledge_host(
     live: MockLiveStatusConnection = mock_livestatus
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     live.add_table('hosts', [
         {
@@ -226,7 +226,7 @@ def test_openapi_bulk_acknowledge(
     live: MockLiveStatusConnection = mock_livestatus
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     live.add_table('services', [{
         'host_name': 'heute',
@@ -285,20 +285,21 @@ def test_openapi_acknowledge_servicegroup(
     wsgi_app,
     with_automation_user,
     mock_livestatus,
+    with_groups,
 ):
     live: MockLiveStatusConnection = mock_livestatus
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     live.add_table('servicegroups', [
         {
             'members': [('example.com', 'Memory'), ('example.com', 'CPU load')],
-            'name': 'windows',
+            'name': 'routers',
         },
     ])
 
-    live.expect_query('GET servicegroups\nColumns: members\nFilter: name = windows',)
+    live.expect_query('GET servicegroups\nColumns: members\nFilter: name = routers',)
     live.expect_query(
         'COMMAND [...] ACKNOWLEDGE_SVC_PROBLEM;example.com;Memory;1;0;0;test123-...;Acknowledged',
         match_type='ellipsis',
@@ -313,7 +314,7 @@ def test_openapi_acknowledge_servicegroup(
             content_type='application/json',
             params=json.dumps({
                 'acknowledge_type': 'servicegroup',
-                'servicegroup_name': 'windows',
+                'servicegroup_name': 'routers',
                 'sticky': False,
                 'notify': False,
                 'persistent': False,
@@ -327,20 +328,21 @@ def test_openapi_acknowledge_hostgroup(
     wsgi_app,
     with_automation_user,
     mock_livestatus,
+    with_groups,
 ):
     live: MockLiveStatusConnection = mock_livestatus
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     live.add_table('hostgroups', [
         {
             'members': ['example.com', 'heute'],
-            'name': 'samples',
+            'name': 'windows',
         },
     ])
-
-    live.expect_query('GET hostgroups\nColumns: members\nFilter: name = samples')
+    live.expect_query('GET hostgroups\nColumns: name\nFilter: name = windows')
+    live.expect_query('GET hostgroups\nColumns: members\nFilter: name = windows')
     live.expect_query(
         'COMMAND [...] ACKNOWLEDGE_HOST_PROBLEM;example.com;1;0;0;test123-...;Acknowledged',
         match_type='ellipsis',
@@ -356,7 +358,7 @@ def test_openapi_acknowledge_hostgroup(
             content_type='application/json',
             params=json.dumps({
                 'acknowledge_type': 'hostgroup',
-                'hostgroup_name': 'samples',
+                'hostgroup_name': 'windows',
                 'sticky': False,
                 'notify': False,
                 'persistent': False,
@@ -365,8 +367,7 @@ def test_openapi_acknowledge_hostgroup(
             status=204,
         )
 
-    live.expect_query('GET hostgroups\nColumns: members\nFilter: name = twiddledee')
-    with live(expect_status_query=True):
+    with live(expect_status_query=False):
         wsgi_app.post(
             base + '/domain-types/acknowledge/collections/host',
             content_type='application/json',
@@ -378,7 +379,25 @@ def test_openapi_acknowledge_hostgroup(
                 'persistent': False,
                 'comment': 'Acknowledged'
             }),
-            status=404,
+            status=400,
+        )
+
+    # Test created but not monitored
+    live.add_table('hostgroups', [])
+    live.expect_query('GET hostgroups\nColumns: name\nFilter: name = windows')
+    with live(expect_status_query=True):
+        wsgi_app.post(
+            base + '/domain-types/acknowledge/collections/host',
+            content_type='application/json',
+            params=json.dumps({
+                'acknowledge_type': 'hostgroup',
+                'hostgroup_name': 'windows',
+                'sticky': False,
+                'notify': False,
+                'persistent': False,
+                'comment': 'Acknowledged'
+            }),
+            status=400,
         )
 
 
@@ -390,7 +409,7 @@ def test_openapi_acknowledge_host_with_query(
     live: MockLiveStatusConnection = mock_livestatus
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     live.add_table('hosts', [
         {
@@ -433,7 +452,7 @@ def test_openapi_acknowledge_host_with_non_matching_query(
     live: MockLiveStatusConnection = mock_livestatus
     username, secret = with_automation_user
     wsgi_app.set_authorization(('Bearer', username + " " + secret))
-    base = '/NO_SITE/check_mk/api/v0'
+    base = '/NO_SITE/check_mk/api/1.0'
 
     live.add_table('hosts', [
         {

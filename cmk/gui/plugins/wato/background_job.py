@@ -148,10 +148,10 @@ class ModeBackgroundJobDetails(WatoMode):
             )
 
     def _back_url(self):
-        return html.get_url_input("back_url", deflt="")
+        return request.get_url_input("back_url", deflt="")
 
     def page(self):
-        job_id = html.request.var("job_id")
+        job_id = request.var("job_id")
 
         job = gui_background_job.GUIBackgroundJob(job_id)
         if not job.exists():

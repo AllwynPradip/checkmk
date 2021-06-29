@@ -8,9 +8,9 @@ import os
 import re
 from pathlib import Path
 
-import pytest  # type: ignore[import]
+import pytest
 
-import testlib  # type: ignore[import]
+import testlib
 
 import cmk.utils.paths
 import cmk.base.config as config

@@ -12,13 +12,15 @@ import importlib
 import subprocess
 from pathlib import Path
 
-import pytest  # type: ignore[import]
+import pytest
 
 from testlib.base import Scenario
 
 import cmk.utils.version as cmk_version
-import cmk.utils.paths as paths
-from cmk.utils.type_defs import CheckPluginName, ConfigSerial
+from cmk.utils.type_defs import CheckPluginName
+
+import cmk.core_helpers.paths as paths
+from cmk.core_helpers.paths import ConfigSerial
 
 import cmk.base.core_config as core_config
 import cmk.base.core_nagios as core_nagios
@@ -253,7 +255,7 @@ def test_dump_precompiled_hostcheck(monkeypatch, serial):
     monkeypatch.setattr(
         core_nagios,
         "_get_needed_plugin_names",
-        lambda c: ([], [CheckPluginName("uptime")], []),
+        lambda c: (set(), {CheckPluginName("uptime")}, set()),
     )
 
     host_check = core_nagios._dump_precompiled_hostcheck(config_cache, serial, "localhost")
@@ -284,7 +286,7 @@ def test_compile_delayed_host_check(monkeypatch, serial):
     monkeypatch.setattr(
         core_nagios,
         "_get_needed_plugin_names",
-        lambda c: ([], [CheckPluginName("uptime")], []),
+        lambda c: (set(), {CheckPluginName("uptime")}, set()),
     )
 
     source_file = core_nagios.HostCheckStore.host_check_source_file_path(serial, hostname)

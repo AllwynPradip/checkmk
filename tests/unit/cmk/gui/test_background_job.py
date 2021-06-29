@@ -9,7 +9,7 @@ import time
 import multiprocessing
 import sys
 
-import pytest  # type: ignore[import]
+import pytest
 
 import testlib
 
@@ -40,11 +40,13 @@ def test_registered_background_jobs():
         'FetchAgentOutputBackgroundJob',
         'BulkDiscoveryBackgroundJob',
         'UserSyncBackgroundJob',
+        'UserProfileCleanupBackgroundJob',
         'ServiceDiscoveryBackgroundJob',
         'ActivationCleanupBackgroundJob',
         'CheckmkAutomationBackgroundJob',
         'DiagnosticsDumpBackgroundJob',
         'SearchIndexBackgroundJob',
+        'DiscoveredHostLabelSyncJob',
     ]
 
     if not cmk_version.is_raw_edition():

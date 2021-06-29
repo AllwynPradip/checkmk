@@ -19,8 +19,10 @@ import apispec  # type: ignore[import]
 import apispec.utils  # type: ignore[import]
 from marshmallow import Schema, ValidationError
 from marshmallow.schema import SchemaMeta
+from werkzeug.datastructures import MultiDict
 from werkzeug.utils import import_string
 
+import cmk.gui.config as config
 from cmk.gui.globals import request
 from cmk.gui.plugins.openapi import fields
 from cmk.gui.plugins.openapi.restful_objects.code_examples import code_samples
@@ -34,6 +36,7 @@ from cmk.gui.plugins.openapi.restful_objects.params import path_parameters, to_o
 from cmk.gui.plugins.openapi.restful_objects.response_schemas import ApiError
 from cmk.gui.plugins.openapi.restful_objects.specification import SPEC
 from cmk.gui.plugins.openapi.restful_objects.type_defs import (
+    ContentObject,
     EndpointTarget,
     ETagBehaviour,
     HTTPMethod,
@@ -49,10 +52,15 @@ from cmk.gui.plugins.openapi.restful_objects.type_defs import (
     PathItem,
 )
 from cmk.gui.plugins.openapi.utils import problem
+from cmk.gui.watolib.activate_changes import update_config_generation
+from cmk.gui.watolib.git import do_git_commit
+from cmk.utils import store
 
 _SEEN_ENDPOINTS: Set[FunctionType] = set()
 
 T = TypeVar("T")
+
+Version = str
 
 
 def to_named_schema(fields_: Dict[str, fields.Field]) -> Type[Schema]:
@@ -147,6 +155,32 @@ def _path_item(
     return response
 
 
+def _from_multi_dict(multi_dict: MultiDict) -> Dict[str, Union[List[str], str]]:
+    """Transform a MultiDict to a non-heterogenous dict
+
+    Meaning: lists are lists and lists of lenght 1 are scalars.
+
+    Examples:
+        >>> _from_multi_dict(MultiDict([('a', '1'), ('a', '2'), ('c', '3')]))
+        {'a': ['1', '2'], 'c': '3'}
+
+    Args:
+        multi_dict:
+            A Werkzeug MultiDict instance.
+
+    Returns:
+        A dict.
+
+    """
+    ret = {}
+    for key, values in multi_dict.to_dict(flat=False).items():
+        if len(values) == 1:
+            ret[key] = values[0]
+        else:
+            ret[key] = values
+    return ret
+
+
 class Endpoint:
     """Mark the function as a REST-API endpoint.
 
@@ -161,9 +195,9 @@ class Endpoint:
             These variables have to be defined elsewhere first. See the {query,path,header}_params
             Arguments of this class.
 
-        name:
-            The name of the endpoint. This is the name where this endpoint is "registered" under
-            and can only be used once globally.
+        link_relation:
+            The link relation of the endpoint. This relation is used to identify an endpoint
+            for linking. This has to be unique in it's module.
 
         method:
             The HTTP method under which the endpoint should be accessible. Methods are written
@@ -197,6 +231,13 @@ class Endpoint:
         header_params:
             All parameters, which are expected via HTTP headers.
 
+        skip_locking:
+            When set to True, the decorator will not try to acquire a wato configuration lock,
+            which can lead to higher performance of this particular endpoint. WARNING: Do not
+            activate this flag when configuration files are changed by the endpoint! This exposes
+            the data to potential race conditions. Use it for endpoints which trigger livestatus
+            commands.
+
         etag:
             One of 'input', 'output', 'both'. When set to 'input' a valid ETag is required in
             the 'If-Match' request header. When set to 'output' a ETag is sent to the client
@@ -214,8 +255,9 @@ class Endpoint:
         method: HTTPMethod = 'get',
         content_type: str = 'application/json',
         output_empty: bool = False,
-        response_schema: Optional[Type[Schema]] = None,
-        request_schema: Optional[Type[Schema]] = None,
+        response_schema: Optional[RawParameter] = None,
+        request_schema: Optional[RawParameter] = None,
+        skip_locking: bool = False,
         path_params: Optional[Sequence[RawParameter]] = None,
         query_params: Optional[Sequence[RawParameter]] = None,
         header_params: Optional[Sequence[RawParameter]] = None,
@@ -225,6 +267,8 @@ class Endpoint:
         tag_group: Literal['Monitoring', 'Setup'] = 'Setup',
         blacklist_in: Optional[Sequence[EndpointTarget]] = None,
         additional_status_codes: Optional[Sequence[StatusCodeInt]] = None,
+        valid_from: Optional[Version] = None,
+        valid_until: Optional[Version] = None,
         func: Optional[FunctionType] = None,
         operation_id: Optional[str] = None,
         wrapped: Optional[Any] = None,
@@ -235,6 +279,7 @@ class Endpoint:
         self.content_type = content_type
         self.output_empty = output_empty
         self.response_schema = response_schema
+        self.skip_locking = skip_locking
         self.request_schema = request_schema
         self.path_params = path_params
         self.query_params = query_params
@@ -245,13 +290,24 @@ class Endpoint:
         self.tag_group = tag_group
         self.blacklist_in: List[EndpointTarget] = self._list(blacklist_in)
         self.additional_status_codes = self._list(additional_status_codes)
+        self.valid_from = valid_from
+        self.valid_until = valid_until
         self.func = func
         self.operation_id = operation_id
         self.wrapped = wrapped
 
         self._expected_status_codes = self.additional_status_codes.copy()
 
-        if self.response_schema is not None:
+        if content_type == 'application/json':
+            if self.response_schema is not None:
+                self._expected_status_codes.append(200)  # ok
+        else:
+            if output_empty:
+                raise ValueError(f"output_emtpy=True not allowed on custom content_type "
+                                 f"{self.content_type}. [{self.method} {self.path}]")
+            if response_schema:
+                raise ValueError("response_schema not allowed for content_type "
+                                 f"{self.content_type}. [{self.method} {self.path}]")
             self._expected_status_codes.append(200)  # ok
 
         if self.output_empty:
@@ -285,6 +341,14 @@ class Endpoint:
         Returns:
         A wrapped function. The wrapper does input and output validation.
         """
+        self.operation_id = func.__module__ + "." + func.__name__
+        if self.method in ("get", "delete") and self.request_schema:
+            raise ValueError(
+                f"According to the OpenAPI 3 spec, consumers SHALL ignore request bodies on "
+                f"{self.method.upper()!r}. Please use another request method for the endpont: "
+                f"{self.operation_id} "
+                "See: https://swagger.io/specification/#operation-object")
+
         header_schema = None
         if self.header_params is not None:
             header_params = list(self.header_params)
@@ -292,22 +356,22 @@ class Endpoint:
                 header_params.append(CONTENT_TYPE)
             header_schema = to_schema(header_params)
 
-        path_schema = to_schema(self.path_params, required='all')
+        path_schema = to_schema(self.path_params)
         query_schema = to_schema(self.query_params)
+        response_schema = to_schema(self.response_schema)
+        request_schema = to_schema(self.request_schema)
 
         self.func = func
 
         wrapped = self.wrap_with_validation(
-            self.request_schema,
-            self.response_schema,
+            request_schema,
+            response_schema,
             header_schema,
             path_schema,
             query_schema,
         )
 
         _verify_parameters(self.path, path_schema)
-
-        self.operation_id = func.__module__ + "." + func.__name__
 
         def _mandatory_parameter_names(*_params):
             schema: Type[Schema]
@@ -327,7 +391,8 @@ class Endpoint:
 
         ENDPOINT_REGISTRY.add_endpoint(self, params)
 
-        if not self.output_empty and self.response_schema is None:
+        if (self.content_type == 'application/json' and not self.output_empty and
+                self.response_schema is None):
             raise ValueError(
                 f"{self.operation_id}: 'response_schema' required when output will be sent.")
 
@@ -336,6 +401,7 @@ class Endpoint:
                              "'response_schema' may not be used.")
 
         self.wrapped = wrapped
+        self.wrapped.path = self.path
         return self.wrapped
 
     def wrap_with_validation(
@@ -408,7 +474,7 @@ class Endpoint:
 
             try:
                 if query_schema:
-                    param.update(query_schema().load(request.args))
+                    param.update(query_schema().load(_from_multi_dict(request.args)))
 
                 if header_schema:
                     param.update(header_schema().load(request.headers))
@@ -429,13 +495,42 @@ class Endpoint:
             # We need to get the "original data" somewhere and are currently "piggy-backing"
             # it on the response instance. This is somewhat problematic because it's not
             # expected behaviour and not a valid interface of Response. Needs refactoring.
-            response = self.func(param)
+
+            if not self.skip_locking and self.method != 'get':
+                with store.lock_checkmk_configuration():
+                    response = self.func(param)
+            else:
+                response = self.func(param)
+
+            response.freeze()
+
+            if self.output_empty and response.status_code < 400 and response.data:
+                return problem(status=500,
+                               title="Unexpected data was sent.",
+                               detail=(f"Endpoint {self.operation_id}\n"
+                                       "This is a bug, please report."),
+                               ext={'data_sent': str(response.data)})
+
+            if self.output_empty:
+                response.content_type = None
 
             if response.status_code not in self._expected_status_codes:
                 return problem(status=500,
                                title=f"Unexpected status code returned: {response.status_code}",
-                               detail=f"Endpoint {self.operation_id}",
+                               detail=(f"Endpoint {self.operation_id}\n"
+                                       "This is a bug, please report."),
                                ext={'codes': self._expected_status_codes})
+
+            # We assume something has been modified and increase the config generation ID
+            # by one. This is necessary to ensure a warning in the "Activate Changes" GUI
+            # about there being new changes to activate can be given to the user.
+            if request.method != 'get' and response.status_code < 300:
+                update_config_generation()
+
+                # We assume no configuration change on GET and no configuration change on
+                # non-ok responses.
+                if config.wato_use_git:
+                    do_git_commit()
 
             if hasattr(response, 'original_data') and response_schema:
                 try:
@@ -456,6 +551,11 @@ class Endpoint:
             return response
 
         return _validating_wrapper
+
+    @property
+    def does_redirects(self):
+        # created, moved permanently, found
+        return any(code in self._expected_status_codes for code in [201, 301, 302])
 
     @property
     def default_path(self):
@@ -523,7 +623,7 @@ class Endpoint:
         if 409 in self._expected_status_codes:
             responses['409'] = self._path_item(
                 409,
-                'The request is in conflict with the stored resource',
+                'The request is in conflict with the stored resource.',
             )
 
         if 415 in self._expected_status_codes:
@@ -537,17 +637,30 @@ class Endpoint:
             )
 
         if 400 in self._expected_status_codes:
-            responses['400'] = self._path_item(400, 'Parameter or validation failure')
+            responses['400'] = self._path_item(400, 'Parameter or validation failure.')
 
         # We don't(!) support any endpoint without an output schema.
         # Just define one!
         if 200 in self._expected_status_codes:
+            if self.response_schema:
+                content: ContentObject
+                content = {self.content_type: {'schema': self.response_schema}}
+            elif (self.content_type == 'application/octet-stream' or
+                  self.content_type.startswith("image/")):
+                content = {
+                    self.content_type: {
+                        'schema': {
+                            'type': 'string',
+                            'format': 'binary',
+                        }
+                    }
+                }
+            else:
+                raise ValueError(f"Unknown content-type: {self.content_type} Please add condition.")
             responses['200'] = self._path_item(
                 200,
                 'The operation was done successfully.',
-                content={self.content_type: {
-                    'schema': self.response_schema
-                }},
+                content=content,
                 headers=response_headers,
             )
 
@@ -586,7 +699,7 @@ class Endpoint:
         path_params: Sequence[
             RawParameter] = self.path_params if self.path_params is not None else []
 
-        if self.etag in ('input', 'both'):
+        if config.rest_api_etag_locking and self.etag in ('input', 'both'):
             header_params.append(ETAG_IF_MATCH_HEADER)
 
         if self.request_schema:
@@ -795,7 +908,7 @@ def _tag_from_schema(schema: Type[Schema]) -> OpenAPITag:
     return tag
 
 
-def _docstring_name(docstring: Union[Any, str, None]) -> str:
+def _docstring_name(docstring: Optional[str]) -> str:
     """Split the docstring by title and rest.
 
     This is part of the rest.
@@ -821,7 +934,7 @@ def _docstring_name(docstring: Union[Any, str, None]) -> str:
     return [part.strip() for part in apispec.utils.dedent(docstring).split("\n\n", 1)][0]
 
 
-def _docstring_description(docstring: Union[Any, str, None]) -> Optional[str]:
+def _docstring_description(docstring: Optional[str]) -> Optional[str]:
     """Split the docstring by title and rest.
 
     This is part of the rest.

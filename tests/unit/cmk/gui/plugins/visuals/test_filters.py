@@ -6,14 +6,14 @@
 
 # yapf: disable
 from collections import namedtuple
-import pytest  # type: ignore[import]
+import pytest
 
 import cmk.utils.version as cmk_version
 import cmk.utils.tags
 
 import cmk.gui.config
 import cmk.gui.inventory
-from cmk.gui.globals import html
+from cmk.gui.globals import output_funnel, request
 import cmk.gui.plugins.visuals
 from cmk.gui.plugins.visuals.wato import FilterWatoFolder
 
@@ -76,8 +76,8 @@ def test_filters_filter_with_empty_request(register_builtin_html, filter_ident, 
     else:
         expected_filter = ""
 
-    with live(expect_status_query=False), html.stashed_vars():
-        html.request.del_vars()
+    with live(expect_status_query=False), request.stashed_vars():
+        request.del_vars()
 
         filt = cmk.gui.plugins.visuals.utils.filter_registry[filter_ident]
         assert filt.filter(infoname="bla") == expected_filter
@@ -539,6 +539,23 @@ filter_tests = [
         request_vars=[('wato_folder', "abc/xyz")],
         expected_filters="Filter: host_filename ~ ^/wato/abc/xyz/\n",
     ),
+    # Testing FilterHostnameOrAlias
+    FilterTest(
+        ident="hostnameoralias",
+        request_vars=[('hostnameoralias', "horst")],
+        expected_filters="Filter: host_name ~~ horst\nFilter: alias ~~ horst\nOr: 2\n",
+    ),
+    # Testing FilterCommaSeparatedStringList
+    FilterTest(
+        ident="log_contact_name",
+        request_vars=[('log_contact_name', "gottlob")],
+        expected_filters="Filter: log_contact_name ~ (,|^)gottlob(,|$)\n",
+    ),
+    FilterTest(
+        ident="log_contact_name",
+        request_vars=[('log_contact_name', "gott.lob"),('neg_log_contact_name', "on")],
+        expected_filters="Filter: log_contact_name ~ (,|^)gott\\.lob(,|$)\n",
+    ),
 ]
 
 
@@ -554,10 +571,10 @@ def test_filters_filter(register_builtin_html, test, monkeypatch):
     # Need for ABCTagFilter
     monkeypatch.setattr(cmk.gui.config, "tags", cmk.utils.tags.BuiltinTagConfig())
 
-    with html.stashed_vars(), on_time('2018-04-15 16:50', 'CET'):
-        html.request.del_vars()
+    with request.stashed_vars(), on_time('2018-04-15 16:50', 'CET'):
+        request.del_vars()
         for key, val in test.request_vars:
-            html.request.set_var(key, val)
+            request.set_var(key, val)
 
         filt = cmk.gui.plugins.visuals.utils.filter_registry[test.ident]
         assert filt.filter(infoname="bla") == test.expected_filters
@@ -1049,10 +1066,10 @@ def test_filters_filter_table(register_builtin_html, test, monkeypatch):
 
     monkeypatch.setattr(cmk.gui.bi, "is_part_of_aggregation", is_part_of_aggregation_patch)
 
-    with html.stashed_vars(), on_time('2018-04-15 16:50', 'CET'):
-        html.request.del_vars()
+    with request.stashed_vars(), on_time('2018-04-15 16:50', 'CET'):
+        request.del_vars()
         for key, val in test.request_vars:
-            html.request.set_var(key, val)
+            request.set_var(key, val)
 
         # TODO: Fix this for real...
         if not cmk_version.is_raw_edition or test.ident != "deployment_has_agent":
@@ -1062,11 +1079,11 @@ def test_filters_filter_table(register_builtin_html, test, monkeypatch):
 
 # Filter form is not really checked. Only checking that no exception occurs
 def test_filters_display_with_empty_request(register_builtin_html, live):
-    with live, html.stashed_vars():
-        html.request.del_vars()
+    with live, request.stashed_vars():
+        request.del_vars()
 
         for filt in cmk.gui.plugins.visuals.utils.filter_registry.values():
-            with html.plugged():
+            with output_funnel.plugged():
                 _set_expected_queries(filt.ident, live)
                 filt.display()
 

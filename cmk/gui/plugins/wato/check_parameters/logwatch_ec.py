@@ -19,9 +19,7 @@ from cmk.gui.valuespec import (
     ListOf,
     ListOfStrings,
     RegExp,
-    RegExpUnicode,
-    TextAscii,
-    TextUnicode,
+    TextInput,
     Transform,
     Tuple,
 )
@@ -60,12 +58,12 @@ def _valuespec_logwatch_rules():
                                        ('I', _('IGNORE')),
                                    ],
                                ),
-                               RegExpUnicode(
+                               RegExp(
                                    title=_("Pattern (Regex)"),
                                    size=40,
                                    mode=RegExp.infix,
                                ),
-                               TextUnicode(
+                               TextInput(
                                    title=_("Comment"),
                                    size=40,
                                ),
@@ -78,6 +76,10 @@ def _valuespec_logwatch_rules():
                        'be used for reclassifying a message. You can use the '
                        '<a href="wato.py?mode=pattern_editor">Logfile Pattern Analyzer</a> '
                        'to test the rules you defined here.</p>'
+                       '<p>Note that to match a special regex character in your patterns, you need to use a '
+                       'backslash to escape its special meaning. This is especially relevant for Windows file paths. '
+                       'For example, to match the Windows path "C:\\Users\\amdin\\Desktop", enter '
+                       '"C:\\\\Users\\\\admin\\\\Desktop".</p>'
                        '<p>Select "Ignore" as state to get the matching logs deleted. Other states will keep the '
                        'log entries but reclassify the state of them.</p>'),
                      add_label=_("Add pattern"),
@@ -162,34 +164,44 @@ rulespec_registry.register(
 
 
 def _valuespec_logwatch_groups():
-    return ListOf(
-        Tuple(
-            help=_("This defines one logfile grouping pattern"),
-            show_titles=True,
-            orientation="horizontal",
+    return Transform(
+        Dictionary(
+            title=_('Logfile Grouping'),
             elements=[
-                TextAscii(title=_("Name of group"),),
-                Tuple(
-                    show_titles=True,
-                    orientation="vertical",
-                    elements=[
-                        TextAscii(title=_("Include Pattern")),
-                        TextAscii(title=_("Exclude Pattern"))
-                    ],
-                ),
+                ("grouping_patterns",
+                 ListOf(
+                     Tuple(
+                         help=_("This defines one logfile grouping pattern"),
+                         show_titles=True,
+                         orientation="horizontal",
+                         elements=[
+                             TextInput(title=_("Name of group"),),
+                             Tuple(
+                                 show_titles=True,
+                                 orientation="vertical",
+                                 elements=[
+                                     TextInput(title=_("Include Pattern")),
+                                     TextInput(title=_("Exclude Pattern"))
+                                 ],
+                             ),
+                         ],
+                     ),
+                     add_label=_("Add pattern group"),
+                     title=_('List Grouping Patterns'),
+                 )),
             ],
+            optional_keys=[],
+            help=
+            _('The check <tt>logwatch</tt> normally creates one service for each logfile. '
+              'By defining grouping patterns you can switch to the check <tt>logwatch.groups</tt>. '
+              'If the pattern begins with a tilde then this pattern is interpreted as a regular '
+              'expression instead of as a filename globbing pattern and  <tt>*</tt> and <tt>?</tt> '
+              'are treated differently. '
+              'That check monitors a list of logfiles at once. This is useful if you have '
+              'e.g. a folder with rotated logfiles where the name of the current logfile'
+              'also changes with each rotation'),
         ),
-        title=_('Logfile Grouping Patterns'),
-        help=_(
-            'The check <tt>logwatch</tt> normally creates one service for each logfile. '
-            'By defining grouping patterns you can switch to the check <tt>logwatch.groups</tt>. '
-            'If the pattern begins with a tilde then this pattern is interpreted as a regular '
-            'expression instead of as a filename globbing pattern and  <tt>*</tt> and <tt>?</tt> '
-            'are treated differently. '
-            'That check monitors a list of logfiles at once. This is useful if you have '
-            'e.g. a folder with rotated logfiles where the name of the current logfile'
-            'also changes with each rotation'),
-        add_label=_("Add pattern group"),
+        forth=lambda p: p if isinstance(p, dict) else {"grouping_patterns": p},
     )
 
 
@@ -231,7 +243,7 @@ def _parameter_valuespec_logwatch_ec():
                                          ),
                                         totext=_("Directly forward to Event Console"),
                                     ),
-                                    TextAscii(
+                                    TextInput(
                                         title=
                                         _("Local: Send events to local Event Console into unix socket"
                                          ),
@@ -245,7 +257,7 @@ def _parameter_valuespec_logwatch_ec():
                                         totext=_("Spool to Event Console"),
                                     ),
                                     Transform(
-                                        TextAscii(allow_empty=False,),
+                                        TextInput(allow_empty=False,),
                                         title=
                                         _("Local: Spooling - Send events to local Event Console into given spool directory"
                                          ),
@@ -262,7 +274,7 @@ def _parameter_valuespec_logwatch_ec():
                                                 Dictionary(
                                                     elements=[
                                                         ("address",
-                                                         TextAscii(
+                                                         TextInput(
                                                              title=_("Address"),
                                                              allow_empty=False,
                                                          )),
@@ -325,7 +337,7 @@ def _parameter_valuespec_logwatch_ec():
                                              Dictionary(
                                                  elements=[
                                                      ("address",
-                                                      TextAscii(
+                                                      TextInput(
                                                           title=_("Address"),
                                                           allow_empty=False,
                                                       )),
@@ -384,7 +396,7 @@ def _parameter_valuespec_logwatch_ec():
                      )),
                     ('expected_logfiles',
                      ListOf(
-                         TextUnicode(),
+                         TextInput(),
                          title=_("List of expected logfiles"),
                          help=
                          _("When the monitoring of forwarded logfiles is enabled, the check verifies that "

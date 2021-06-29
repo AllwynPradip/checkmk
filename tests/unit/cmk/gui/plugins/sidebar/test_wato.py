@@ -5,7 +5,7 @@
 # conditions defined in the file COPYING, which is part of this source code package.
 
 from typing import Dict, List
-import pytest  # type: ignore[import]
+import pytest
 
 import cmk.utils.version as cmk_version
 from cmk.gui.plugins.sidebar.wato import (
@@ -83,7 +83,7 @@ def expected_items() -> Dict[str, List[str]]:
     if cmk_version.is_managed_edition():
         users_items.insert(0, 'customer_management')
 
-    return {
+    expected_items = {
         'agents': agents_items,
         'events': events_items,
         'general': [
@@ -111,6 +111,11 @@ def expected_items() -> Dict[str, List[str]]:
         'bi': ['bi_packs'],
         'users': users_items,
     }
+
+    if not cmk_version.is_raw_edition():
+        expected_items.update({'custom': ['influxdb_connections']})
+
+    return expected_items
 
 
 @pytest.mark.usefixtures("register_builtin_html", "load_plugins", "with_admin_login")

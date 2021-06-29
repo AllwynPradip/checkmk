@@ -6,23 +6,34 @@
 """Service status
 
 The service status provides the service's "health" information.
+
 A service (for example, a file system or a process) is a property of a certain host that
 is monitored by Checkmk.
 
-You can find an introduction to services in the
-[Checkmk guide](https://docs.checkmk.com/latest/en/wato_services.html).
+### Related documentation
+
+How to use the query DSL used in the `query` parameters of these endpoints, have a look at the
+[Querying Status Data](#section/Querying-Status-Data) section of this documentation.
+
+These endpoints support all [Livestatus filter operators](https://docs.checkmk.com/latest/en/livestatus_references.html#heading_filter),
+which you can look up in the Checkmk documentation.
+
+For a detailed list of columns have a look at the [services table](https://github.com/tribe29/checkmk/blob/master/cmk/gui/plugins/openapi/livestatus_helpers/tables/services.py)
+definition on GitHub.
 """
 from cmk.gui import sites
 from cmk.gui.plugins.openapi import fields
-from cmk.gui.plugins.openapi.endpoints.utils import verify_columns
-from cmk.gui.plugins.openapi.livestatus_helpers.queries import Query
-from cmk.gui.plugins.openapi.livestatus_helpers.tables import Services
+from cmk.utils.livestatus_helpers.expressions import And
+from cmk.utils.livestatus_helpers.queries import Query
+from cmk.utils.livestatus_helpers.tables import Services
 from cmk.gui.plugins.openapi.restful_objects import (
     Endpoint,
     constructors,
     response_schemas,
 )
 from cmk.gui.plugins.openapi.restful_objects.parameters import HOST_NAME, OPTIONAL_HOST_NAME
+from cmk.gui.plugins.openapi.restful_objects.constructors import object_action_href
+from cmk.gui.plugins.openapi.utils import problem
 
 PARAMETERS = [{
     'sites': fields.List(
@@ -30,21 +41,65 @@ PARAMETERS = [{
         description="Restrict the query to this particular site.",
         missing=list,
     ),
-    'query': fields.query_field(Services, required=False),
-    'columns': fields.List(
-        fields.LiveStatusColumn(
-            table=Services,
-            mandatory=[Services.host_name.name, Services.description.name],
-        ),
+    'query': fields.query_field(
+        Services,
         required=False,
-        description="The desired columns of the services table. If left empty, a default set"
-        " of columns is used.",
-        missing=[
-            Services.host_name.name,
-            Services.description.name,
-        ],
+        example='{"op": "=", "left": "host_name", "right": "example.com"}',
     ),
+    'columns': fields.column_field(
+        Services,
+        mandatory=[
+            Services.host_name,
+            Services.description,
+        ],
+    )
 }]
+
+
+@Endpoint(object_action_href('host', '{host_name}', 'show_service'),
+          'cmk/show',
+          method='get',
+          path_params=[HOST_NAME],
+          query_params=[{
+              "service_description": fields.String(
+                  description="The service description of the selected host",
+                  example="Filesystem %boot",
+              ),
+          }],
+          tag_group='Monitoring',
+          response_schema=response_schemas.DomainObject)
+def show_service(params):
+    """Show the monitored service of a host"""
+    service_description = params["service_description"]
+    host_name = params["host_name"]
+    live = sites.live()
+    q = Query(
+        [
+            Services.description,
+            Services.host_name,
+            Services.state_type,
+            Services.state,
+            Services.last_check,
+        ],
+        filter_expr=And(Services.host_name.op("=", params["host_name"]),
+                        Services.description.op("=", service_description)),
+    )
+    try:
+        service = q.fetchone(live)
+    except ValueError:
+        return problem(
+            status=404,
+            title="The requested service was not found",
+            detail=f"The service description {service_description} did not match any service",
+        )
+    return constructors.serve_json(
+        constructors.domain_object(domain_type='service',
+                                   identifier=f"{host_name}-{service_description}",
+                                   title=f"Service {service_description}",
+                                   extensions=service,
+                                   links=[],
+                                   editable=False,
+                                   deletable=False))
 
 
 @Endpoint(constructors.domain_object_collection_href('host', '{host_name}', 'services'),
@@ -80,8 +135,7 @@ def _list_all_services(param):
 def _list_services(param):
     live = sites.live()
 
-    columns = verify_columns(Services, param['columns'])
-    q = Query(columns)
+    q = Query(param['columns'])
 
     host_name = param.get('host_name')
     if host_name is not None:
@@ -100,10 +154,21 @@ def _list_services(param):
                 constructors.domain_object(
                     domain_type='service',
                     title=f"{entry['description']} on {entry['host_name']}",
-                    identifier=entry['description'],
+                    identifier=f"{entry['host_name']}:{entry['description']}",
                     editable=False,
                     deletable=False,
                     extensions=entry,
+                    self_link=constructors.link_rel(
+                        rel='cmk/show',
+                        href=constructors.object_action_href(
+                            'host',
+                            entry['host_name'],
+                            'show_service',
+                            query_params=[('service_description', entry['description'])],
+                        ),
+                        method='get',
+                        title=f"Show the service {entry['description']}",
+                    ),
                 ) for entry in result
             ],
         ))

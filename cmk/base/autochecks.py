@@ -6,7 +6,7 @@
 """Caring about persistance of the discovered services (aka autochecks)"""
 
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union, NamedTuple
-import sys
+import logging
 from pathlib import Path
 
 from six import ensure_str
@@ -23,7 +23,6 @@ from cmk.utils.type_defs import (
     Item,
     ServiceName,
 )
-from cmk.utils.log import console
 
 from cmk.base.discovered_labels import DiscoveredServiceLabels, ServiceLabel
 from cmk.base.check_utils import LegacyCheckParameters, Service
@@ -35,6 +34,8 @@ GetServiceDescription = Callable[[HostName, CheckPluginName, Item], ServiceName]
 HostOfClusteredService = Callable[[HostName, str], str]
 
 ServiceWithNodes = NamedTuple("ServiceWithNodes", [("service", Service), ("nodes", List[HostName])])
+
+logger = logging.getLogger('cmk.base.autochecks')
 
 
 class AutochecksManager:
@@ -52,7 +53,7 @@ class AutochecksManager:
 
     def get_autochecks_of(
         self,
-        hostname: str,
+        hostname: HostName,
         compute_check_parameters: ComputeCheckParameters,
         service_description: GetServiceDescription,
     ) -> List[Service]:
@@ -129,12 +130,12 @@ class AutochecksManager:
                 check_variables=None,
             )
         except SyntaxError as e:
-            console.verbose("Syntax error in file %s: %s\n", path, e, stream=sys.stderr)
+            logger.exception("Syntax error in file %s: %s", path, e)
             if cmk.utils.debug.enabled():
                 raise
             return []
         except Exception as e:
-            console.verbose("Error in file %s:\n%s\n", path, e, stream=sys.stderr)
+            logger.exception("Error in file %s:\n%s", path, e)
             if cmk.utils.debug.enabled():
                 raise
             return []
@@ -200,7 +201,7 @@ def _load_raw_autochecks(
     if not path.exists():
         return []
 
-    console.vverbose("Loading autochecks from %s\n", path)
+    logger.debug("Loading autochecks from %s", path)
     with path.open(encoding="utf-8") as f:
         raw_file_content = f.read()
 
@@ -208,7 +209,13 @@ def _load_raw_autochecks(
         return []
 
     try:
-        return eval(raw_file_content, check_variables or {}, check_variables or {})
+        # This evaluation was needed to resolve references to variables in the autocheck
+        # default parameters and to evaluate data structure declarations containing references to
+        # variables.
+        # Since Checkmk 2.0 we have a better API and need it only for compatibility. The parameters
+        # are resolved now *before* they are written to the autochecks file, and earlier autochecks
+        # files are resolved during cmk-update-config.
+        return eval(raw_file_content, check_variables or {}, check_variables or {})  # pylint: disable=eval-used
     except NameError as exc:
         raise MKGeneralException(
             "%s in an autocheck entry of host '%s' (%s). This entry is in pre Checkmk 1.7 "

@@ -64,10 +64,13 @@ CmkEndpointName = Literal[
     'cmk/download',
     'cmk/list',
     'cmk/move',
+    'cmk/permalink',
     'cmk/rename',
     'cmk/show',
     'cmk/sign',
     'cmk/start',
+    'cmk/host_config',
+    'cmk/folder_config',
     'cmk/delete_bi_rule',
     'cmk/delete_bi_aggregation',
     'cmk/delete_bi_pack',
@@ -373,3 +376,6 @@ ParameterKey = Tuple[str, ...]
 
 StatusCodeInt = Literal[200, 204, 301, 302, 400, 404, 405, 409, 412, 415, 422, 428]
 StatusCode = Literal["200", "204", "301", "302", "400", "404", "409", "412", "415", "422", "428"]
+
+ContentType = str
+ContentObject = Dict[ContentType, Dict[str, Any]]

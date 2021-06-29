@@ -5,7 +5,7 @@
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import sys
-import pytest  # type: ignore[import]
+import pytest
 
 import cmk.utils.version as cmk_version
 import cmk.gui.pages
@@ -147,10 +147,8 @@ def test_registered_pages():
     if not cmk_version.is_raw_edition():
         expected_pages += [
             "ajax_host_overview_tooltip",
-            'ajax_metric_choice',
             'ajax_pagetype_add_element',
             'ajax_popup_add_metric_to_graph',
-            'ajax_scalar_choice',
             'combined_graphs',
             'create_report',
             'custom_graph',
