@@ -1,2 +1,5 @@
-etc/init.d/xinetd 755
-etc/htpasswd 660
+etc/init.d/xinetd 750
+etc/init.d/systemd 750
+etc/htpasswd 600
+etc 751
+etc/omd 751

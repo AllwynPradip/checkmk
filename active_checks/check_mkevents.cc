@@ -1,6 +1,7 @@
-// Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
-// This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
-// conditions defined in the file COPYING, which is part of this source code package.
+// Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
+// This file is part of Checkmk (https://checkmk.com). It is subject to the
+// terms and conditions defined in the file COPYING, which is part of this
+// source code package.
 
 // NOTE: We really need <sstream>, IWYU bug?
 #include <arpa/inet.h>
@@ -10,6 +11,7 @@
 #include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
+
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
@@ -35,8 +37,7 @@ std::ostream &operator<<(std::ostream &os, const State &state) {
     return os;  // make compilers happy
 }
 
-[[noreturn]] void reply(State state, const std::string &output) {
-    std::cout << state << " - ";
+void print_line(const std::string &output) {
     // Make sure that plugin output does not contain a vertical bar. If that is
     // the case then replace it with a Uniocode "Light vertical bar". Same as in
     // Check_MK.
@@ -49,28 +50,39 @@ std::ostream &operator<<(std::ostream &os, const State &state) {
         }
     }
     std::cout << std::endl;
-    exit(static_cast<int>(state));
+}
+
+[[noreturn]] void exit(State state) {
+    ::exit(static_cast<int>(state));
+}
+
+[[noreturn]] void reply_and_exit(State state, const std::string &output) {
+    std::cout << state << " - ";
+    print_line(output);
+    exit(state);
 }
 
 [[noreturn]] void ioError(const std::string &message) {
-    reply(State::unknown, message + " (" + strerror(errno) + ")");
+    reply_and_exit(State::unknown, message + " (" + strerror(errno) + ")");
 }
 
 [[noreturn]] void missingHeader(const std::string &header,
                                 const std::string &query,
                                 const std::stringstream &response) {
     auto resp = response.str();
-    reply(State::unknown,
+    reply_and_exit(State::unknown,
           "Event console answered with incorrect header (missing " + header +
               ")\nQuery was:\n" + query + "\nReceived " +
               std::to_string(resp.size()) + " byte response:\n" + resp);
 }
 
 void usage() {
-    reply(
+    reply_and_exit(
         State::unknown,
-        "Usage: check_mkevents [-s SOCKETPATH] [-H REMOTE:PORT] [-a] HOST [APPLICATION]\n"
+        "Usage: check_mkevents [-s SOCKETPATH] [-H REMOTE:PORT] [-a] [-l|-L] HOST [APPLICATION]\n"
         " -a    do not take acknowledged events into account.\n"
+        " -l    show last log message in summary/short output\n"
+        " -L    show last log message in details/long output\n"
         " HOST  may be a hostname, and IP address or hostname/IP-address.");
 }
 
@@ -94,6 +106,8 @@ int main(int argc, char **argv) {
     char *remote_host = nullptr;
     char *application = nullptr;
     bool ignore_acknowledged = false;
+    bool last_log_in_summary = false;
+    bool last_log_in_details = false;
     std::string unixsocket_path;
 
     int argc_count = argc;
@@ -108,6 +122,12 @@ int main(int argc, char **argv) {
             argc_count -= 2;
         } else if (strcmp("-a", argv[i]) == 0) {
             ignore_acknowledged = true;
+            argc_count--;
+        } else if (strcmp("-l", argv[i]) == 0) {
+            last_log_in_summary = true;
+            argc_count--;
+        } else if (strcmp("-L", argv[i]) == 0) {
+            last_log_in_details = true;
             argc_count--;
         } else if (argc_count > 2) {
             host = argv[i];
@@ -128,7 +148,7 @@ int main(int argc, char **argv) {
         char *remote_hostaddress = strtok(remote_host, ":");
         struct hostent *he = gethostbyname(remote_hostaddress);
         if (he == nullptr) {
-            reply(State::unknown, "Unable to resolve remote host address: " +
+            reply_and_exit(State::unknown, "Unable to resolve remote host address: " +
                                       std::string(remote_hostaddress));
         }
 
@@ -140,7 +160,7 @@ int main(int argc, char **argv) {
         }
 
         char *port_str = strtok(nullptr, ":");
-        int remote_port = port_str != nullptr ? atoi(port_str) : 6558;
+        uint16_t remote_port = port_str != nullptr ? atoi(port_str) : 6558;
 
         sock = ::socket(AF_INET, SOCK_STREAM, 0);
         if (sock == -1) {
@@ -173,7 +193,7 @@ int main(int argc, char **argv) {
         if (unixsocket_path.empty()) {
             char *omd_path = getenv("OMD_ROOT");
             if (omd_path == nullptr) {
-                reply(State::unknown,
+                reply_and_exit(State::unknown,
                       "OMD_ROOT is not set, no socket path is defined.");
             }
             unixsocket_path =
@@ -251,7 +271,8 @@ int main(int argc, char **argv) {
     while (true) {
         char response_chunk[4096];
         memset(response_chunk, 0, sizeof(response_chunk));
-        ssize_t bytes_read = ::read(sock, response_chunk, sizeof(response_chunk));
+        ssize_t bytes_read =
+            ::read(sock, response_chunk, sizeof(response_chunk));
         if (bytes_read == -1) {
             if (errno != EINTR) {
                 ioError("Error while reading response");
@@ -357,15 +378,23 @@ int main(int argc, char **argv) {
     if (count == 0) {
         std::string app =
             application == nullptr ? "" : (std::string(application) + " on ");
-        reply(State::ok, "no events for " + app + host);
+        reply_and_exit(State::ok, "no events for " + app + host);
     }
+
+    std::cout << worst_state << " - ";
 
     std::stringstream output;
     output << count << " events (" << unhandled << " unacknowledged)";
-    if (!worst_row_event_text.empty()) {
-        output << ", worst state is " << worst_state
-               << " (Last line: " << worst_row_event_text << ")";
+    if (!worst_row_event_text.empty() &&  last_log_in_summary) {
+        output << ", Last line: " << worst_row_event_text;
     }
-    reply(worst_state, output.str());
+    print_line(output.str());
+
+    if (!worst_row_event_text.empty() && last_log_in_details) {
+        print_line("Last line: " + worst_row_event_text);
+    }
+
+    exit(worst_state);
+
     return 0;  // never reached
 }

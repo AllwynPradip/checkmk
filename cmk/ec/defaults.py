@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """Defaults for rule pack and configuration"""
 
 import logging
-from typing import Any, Dict, Iterable
+from collections.abc import Collection
 
 from cmk.utils.i18n import _
+from cmk.utils.translations import TranslationOptions
 
-from .config import ConfigFromWATO, Rule, SNMPCredential
+from .config import ConfigFromWATO, ECRulePackSpec, Rule, SNMPCredential
 
 
-def default_rule_pack(rules: Iterable[Rule]) -> Dict[str, Any]:
+def default_rule_pack(rules: Collection[Rule]) -> ECRulePackSpec:
     """Returns the default rule pack"""
-    return {
-        "id": "default",
-        "title": _("Default rule pack"),
-        "rules": rules,
-        "disabled": False,
-    }
+    return ECRulePackSpec(
+        id="default",
+        title=_("Default rule pack"),
+        rules=rules,
+        disabled=False,
+    )
 
 
 def default_config() -> ConfigFromWATO:
@@ -31,8 +31,7 @@ def default_config() -> ConfigFromWATO:
     }
     return {
         "rules": [],  # old pre 1.2.7i1 format. Only used if rule_packs is empty
-        "rule_packs": [],  # new format with rule packages
-        "mkp_rule_packs": {},  # rule packs provided by MKPs and referenced in rule_packs
+        "rule_packs": [],  # new format with rule packs
         "actions": [],
         "debug_rules": False,
         "rule_optimizer": True,
@@ -55,23 +54,20 @@ def default_config() -> ConfigFromWATO:
         "remote_status": None,
         "socket_queue_len": 10,
         "eventsocket_queue_len": 10,
-        "hostname_translation": {},
+        "hostname_translation": TranslationOptions(),
         "archive_orphans": False,
         "archive_mode": "file",
         "translate_snmptraps": False,
         "snmp_credentials": [v1_v2_credential],
         "event_limit": {
-            'by_host': {
-                'action': 'stop_overflow_notify',
-                'limit': 1000,
+            "by_host": {
+                "action": "stop_overflow_notify",
+                "limit": 1000,
             },
-            'by_rule': {
-                'action': 'stop_overflow_notify',
-                'limit': 1000,
+            "by_rule": {
+                "action": "stop_overflow_notify",
+                "limit": 1000,
             },
-            'overall': {
-                'action': 'stop_overflow_notify',
-                'limit': 10000
-            },
+            "overall": {"action": "stop_overflow_notify", "limit": 10000},
         },
     }

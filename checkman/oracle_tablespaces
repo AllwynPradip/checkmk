@@ -1,7 +1,7 @@
 title: Oracle Tablespaces: General Information
 agents: linux, hpux, solaris, windows
 catalog: app/oracle
-license: GPL
+license: GPLv2
 distribution: check_mk
 description:
  This check monitors the state of Oracle tablespaces. It
@@ -17,12 +17,9 @@ description:
  extension turned on. The behaviour of autoextension setting can be configured
  with a check parameter.
 
- {Increment size}: If the configuration parameter
- {oracle_tablespaces_check_default_increment} is set to
- {True} (which is the default), then the check will warn
- you, if the increment size is set to the Oracle default
- value of {1} (which is generally considered as a non-optimal
- setting).
+ {Increment size}:
+ By default an increment size set to the Oracle default  value of {1} (which is generally considered as a non-optimal setting) will lead to a warning.
+ This can be configured using the configuration parameter {Default increment},
 
  {State}: Only table spaces in state {ONLINE} and {READONLY}
  will be found by inventory and monitored. If the state changes
@@ -48,7 +45,7 @@ description:
 item:
  The SID and the tablespace name, separated by a dot, for example {"pengt.TEMP"}.
 
-inventory:
+discovery:
  One service is created for each tablespace which is {ONLINE}, {READONLY} or {OFFLINE}.
 
 cluster:

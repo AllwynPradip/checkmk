@@ -1,11 +1,6 @@
-$CMK_VERSION = "2.1.0i1"
+$CMK_VERSION = "2.3.0b1"
 ## filename for timestamp
 $MK_CONFDIR = $env:MK_CONFDIR
-
-## Fallback if the (old) agent does not provide the MK_CONFDIR
-if (!$MK_CONFDIR) {
-    $MK_CONFDIR= "c:\Program Files (x86)\check_mk\config"
-}
 
 ## Source the configuration file for this agent plugin
 $CONFIG_FILE="${MK_CONFDIR}\msoffice.cfg.ps1"

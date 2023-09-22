@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2020 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2020 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Optional
 
 import pytest
 
@@ -22,43 +20,50 @@ SECTION_BATTERY_CAPACITY_DEFAULT = Battery(
     percent_charged=80,
 )
 
-SECTION_ON_BATTERY_YES = Battery(on_battery=True,)
+SECTION_ON_BATTERY_YES = Battery(
+    on_battery=True,
+)
 
-SECTION_ON_BATTERY_NO = Battery(on_battery=False,)
+SECTION_ON_BATTERY_NO = Battery(
+    on_battery=False,
+)
 
-SECTION_SECONDS_ON_BATTERY_DEFAULT = Battery(seconds_on_bat=100,)
+SECTION_SECONDS_ON_BATTERY_DEFAULT = Battery(
+    seconds_on_bat=100,
+)
 
 RESULTS_ON_BATTERY_WITH_TIME: type_defs.CheckResult = [
-    Result(state=State.OK, summary='10 minutes 0 seconds'),
-    Metric('battery_seconds_remaining', 600.0),
-    Result(state=State.CRIT, summary='80.00% (warn/crit below 95.00%/90.00%)'),
-    Metric('battery_capacity', 80.0),
-    Result(state=State.OK, summary='Time running on battery: 1 minute 40 seconds'),
+    Result(state=State.OK, summary="10 minutes 0 seconds"),
+    Metric("battery_seconds_remaining", 600.0),
+    Result(state=State.CRIT, summary="80.00% (warn/crit below 95.00%/90.00%)"),
+    Metric("battery_capacity", 80.0),
+    Result(state=State.OK, summary="Time running on battery: 1 minute 40 seconds"),
 ]
 
 RESULTS_ON_BATTERY_NO_TIME: type_defs.CheckResult = [
-    Result(state=State.OK, summary='10 minutes 0 seconds'),
-    Metric('battery_seconds_remaining', 600.0),
-    Result(state=State.CRIT, summary='80.00% (warn/crit below 95.00%/90.00%)'),
-    Metric('battery_capacity', 80.0),
+    Result(state=State.OK, summary="10 minutes 0 seconds"),
+    Metric("battery_seconds_remaining", 600.0),
+    Result(state=State.CRIT, summary="80.00% (warn/crit below 95.00%/90.00%)"),
+    Metric("battery_capacity", 80.0),
 ]
 
 RESULTS_TIME_ON_BATTERY_NO_FLAG: type_defs.CheckResult = [
     Result(
         state=State.WARN,
-        summary='10 minutes 0 seconds (warn/crit below 12 minutes 0 seconds/5 minutes 0 seconds)'),
-    Metric('battery_seconds_remaining', 600.0),
-    Result(state=State.OK, summary='80.00%'),
-    Metric('battery_capacity', 80.0),
-    Result(state=State.OK, summary='Time running on battery: 1 minute 40 seconds'),
+        summary="10 minutes 0 seconds (warn/crit below 12 minutes 0 seconds/5 minutes 0 seconds)",
+    ),
+    Metric("battery_seconds_remaining", 600.0),
+    Result(state=State.OK, summary="80.00%"),
+    Metric("battery_capacity", 80.0),
+    Result(state=State.OK, summary="Time running on battery: 1 minute 40 seconds"),
 ]
 
 RESULTS_NOT_ON_BATTERY: type_defs.CheckResult = [
-    Result(state=State.OK, summary='10 minutes 0 seconds'),
-    Metric('battery_seconds_remaining', 600.0),
-    Result(state=State.OK, summary='On mains'),
-    Result(state=State.OK, summary='80.00%'),
-    Metric('battery_capacity', 80.0),
+    Result(state=State.OK, summary="10 minutes 0 seconds"),
+    Metric("battery_seconds_remaining", 600.0),
+    Result(state=State.OK, summary="On mains"),
+    Result(state=State.OK, summary="80.00%"),
+    Metric("battery_capacity", 80.0),
 ]
 
 
@@ -87,8 +92,8 @@ RESULTS_NOT_ON_BATTERY: type_defs.CheckResult = [
         ),
         (
             {
-                'battime': (12, 5),
-                'capacity': (20, 10),
+                "battime": (12, 5),
+                "capacity": (20, 10),
             },
             SECTION_BATTERY_CAPACITY_DEFAULT,
             None,
@@ -107,18 +112,22 @@ RESULTS_NOT_ON_BATTERY: type_defs.CheckResult = [
 )
 def test_check_ups_capacity(
     params: UpsParameters,
-    section_ups_battery_capacity: Optional[Battery],
-    section_ups_on_battery: Optional[Battery],
-    section_ups_seconds_on_battery: Optional[Battery],
+    section_ups_battery_capacity: Battery | None,
+    section_ups_on_battery: Battery | None,
+    section_ups_seconds_on_battery: Battery | None,
     results: type_defs.CheckResult,
 ) -> None:
-    assert list(
-        check_ups_capacity(
-            params,
-            section_ups_battery_capacity,
-            section_ups_on_battery,
-            section_ups_seconds_on_battery,
-        )) == results
+    assert (
+        list(
+            check_ups_capacity(
+                params,
+                section_ups_battery_capacity,
+                section_ups_on_battery,
+                section_ups_seconds_on_battery,
+            )
+        )
+        == results
+    )
 
 
 SECTION_BATTERY_WARNINGS = Battery(
@@ -157,9 +166,9 @@ SECTION_BATTERY_WARNINGS_OK = Battery(
             SECTION_ON_BATTERY_YES,
             None,
             [
-                Result(state=State.CRIT, summary='UPS is on battery'),
-                Result(state=State.CRIT, summary='Battery is not charging'),
-                Result(state=State.CRIT, summary='Overload'),
+                Result(state=State.CRIT, summary="UPS is on battery"),
+                Result(state=State.CRIT, summary="Battery is not charging"),
+                Result(state=State.CRIT, summary="Overload"),
             ],
         ),
         (
@@ -167,21 +176,25 @@ SECTION_BATTERY_WARNINGS_OK = Battery(
             SECTION_ON_BATTERY_NO,
             None,
             [
-                Result(state=State.OK, summary='No battery warnings reported'),
+                Result(state=State.OK, summary="No battery warnings reported"),
             ],
         ),
     ],
     ids=["some_not_ok", "all_ok"],
 )
 def test_check_ups_battery_state(
-    section_ups_battery_warnings: Optional[Battery],
-    section_ups_on_battery: Optional[Battery],
-    section_ups_seconds_on_battery: Optional[Battery],
+    section_ups_battery_warnings: Battery | None,
+    section_ups_on_battery: Battery | None,
+    section_ups_seconds_on_battery: Battery | None,
     results: type_defs.CheckResult,
 ) -> None:
-    assert list(
-        check_ups_battery_state(
-            section_ups_battery_warnings,
-            section_ups_on_battery,
-            section_ups_seconds_on_battery,
-        )) == results
+    assert (
+        list(
+            check_ups_battery_state(
+                section_ups_battery_warnings,
+                section_ups_on_battery,
+                section_ups_seconds_on_battery,
+            )
+        )
+        == results
+    )

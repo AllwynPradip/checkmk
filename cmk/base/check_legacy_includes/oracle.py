@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# type: ignore[list-item,import,assignment,misc,operator]  # TODO: see which are needed in this file
 # pylint: disable=no-else-continue
 
-from cmk.base.check_api import MKGeneralException
+from cmk.utils.exceptions import MKGeneralException
 
 
 # This function must be executed for each agent line which has been
@@ -26,28 +24,27 @@ from cmk.base.check_api import MKGeneralException
 # THE NEW CHECK API. PLEASE DO NOT MODIFY THIS FILE ANYMORE. INSTEAD, MODIFY THE MIGRATED CODE
 # RESIDING IN
 # cmk/base/plugins/agent_based/utils/oracle.py
-# IF YOU CANNOT FIND THE MIGRATED COUNTERPART OF A FUNCTION, PLEASE TALK TO TIMI BEFORE DOING
-# ANYTHING ELSE.
 # ==================================================================================================
 def oracle_handle_ora_errors(line):
     if len(line) == 1:
-        return
+        return None
 
     legacy_error = oracle_handle_legacy_ora_errors(line)
     if legacy_error:
         return legacy_error
 
     # Handle error output from new agent
-    if line[1] == 'FAILURE':
+    if line[1] == "FAILURE":
         if len(line) >= 3 and line[2].startswith("ORA-"):
             return (3, "%s" % " ".join(line[2:]))
         return False  # ignore other FAILURE lines
 
     # Handle error output from old (pre 1.2.0p2) agent
-    if line[1] in ['select', '*', 'ERROR']:
+    if line[1] in ["select", "*", "ERROR"]:
         return False
-    if line[1].startswith('ORA-'):
-        return (3, 'Found error in agent output "%s"' % ' '.join(line[1:]))
+    if line[1].startswith("ORA-"):
+        return (3, 'Found error in agent output "%s"' % " ".join(line[1:]))
+    return None
 
 
 # ==================================================================================================
@@ -55,16 +52,19 @@ def oracle_handle_ora_errors(line):
 # THE NEW CHECK API. PLEASE DO NOT MODIFY THIS FILE ANYMORE. INSTEAD, MODIFY THE MIGRATED CODE
 # RESIDING IN
 # cmk/base/plugins/agent_based/utils/oracle.py
-# IF YOU CANNOT FIND THE MIGRATED COUNTERPART OF A FUNCTION, PLEASE TALK TO TIMI BEFORE DOING
-# ANYTHING ELSE.
 # ==================================================================================================
 def oracle_handle_legacy_ora_errors(line):
     # Skip over line before ORA- errors (e.g. sent by AIX agent from 2014)
     if line == ["ERROR:"]:
         return False
 
-    if line[0].startswith('ORA-'):
-        return (3, 'Found error in agent output "%s"' % ' '.join(line))
+    if line[0].startswith("ORA-"):
+        return (3, 'Found error in agent output "%s"' % " ".join(line))
+
+    # Handle error output from 1.6 solaris agent, see SUP-9521
+    if line[0] == "Error":
+        return (3, 'Found error in agent output "%s"' % " ".join(line[1:]))
+    return None
 
 
 # Fully prevent creation of services when an error is found.

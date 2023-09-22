@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2021 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2021 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Optional, NamedTuple
 from dataclasses import dataclass
+from enum import Enum
+from typing import NamedTuple
 
 
 class Load(NamedTuple):
@@ -14,9 +14,21 @@ class Load(NamedTuple):
     load15: float
 
 
+class ProcessorType(Enum):
+    unspecified = 0
+    physical = 1
+    logical = 2
+
+
+@dataclass(frozen=True)
+class Threads:
+    count: int
+    max: int | None = None
+
+
 @dataclass
 class Section:
     load: Load
     num_cpus: int
-    num_threads: int
-    max_threads: Optional[int] = None
+    threads: Threads | None = None
+    type: ProcessorType = ProcessorType.unspecified

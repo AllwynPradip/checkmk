@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -20,8 +19,11 @@
 # hardware.cpuPkg.vendor.0 intel
 # hardware.cpuPkg.vendor.1 intel
 
-from typing import Callable, Dict, Final, List, Optional, Tuple, TypedDict, Union
 import time
+from collections.abc import Callable
+from typing import Final
+
+from typing_extensions import TypedDict
 
 from .agent_based_api.v1 import Attributes, register, type_defs
 from .utils.esx_vsphere import Section
@@ -29,13 +31,15 @@ from .utils.esx_vsphere import Section
 FIRST_ELEMENT: Final = lambda v: v[0]
 FIRST_ELEMENT_AS_FLOAT: Final = lambda v: float(v[0])
 JOIN_LIST: Final = " ".join
-SUB_SECTION = TypedDict("SUB_SECTION", {
-    "path": List[str],
-    "translation": Dict[str, Tuple[str, Callable]]
-})
+
+
+class SUB_SECTION(TypedDict):
+    path: list[str]
+    translation: dict[str, tuple[str, Callable]]
+
 
 # This giant dict describes how the section translates into the different nodes of the inventory
-SECTION_TO_INVENTORY: Dict[str, SUB_SECTION] = {
+SECTION_TO_INVENTORY: dict[str, SUB_SECTION] = {
     "hw": {
         "path": ["hardware", "cpu"],
         "translation": {
@@ -55,25 +59,33 @@ SECTION_TO_INVENTORY: Dict[str, SUB_SECTION] = {
             "hardware.biosInfo.releaseDate": ("date", lambda v: _try_convert_to_epoch(v[0])),
         },
     },
+    "os": {
+        "path": ["software", "os"],
+        "translation": {
+            "config.product.licenseProductName": ("name", JOIN_LIST),
+            "config.product.version": ("version", FIRST_ELEMENT),
+            "config.product.build": ("build", FIRST_ELEMENT),
+            "config.product.vendor": ("vendor", JOIN_LIST),
+            "config.product.osType": ("type", FIRST_ELEMENT),
+        },
+    },
     "sys": {
         "path": ["hardware", "system"],
         "translation": {
             "hardware.systemInfo.model": ("product", JOIN_LIST),
             "hardware.systemInfo.vendor": ("vendor", FIRST_ELEMENT),
             "hardware.systemInfo.uuid": ("uuid", FIRST_ELEMENT),
-            "hardware.systemInfo.0.ServiceTag": ("serial", FIRST_ELEMENT)
+            "hardware.systemInfo.0.ServiceTag": ("serial", FIRST_ELEMENT),
         },
     },
     "mem": {
         "path": ["hardware", "memory"],
-        "translation": {
-            "hardware.memorySize": ("total_ram_usable", FIRST_ELEMENT_AS_FLOAT)
-        },
-    }
+        "translation": {"hardware.memorySize": ("total_ram_usable", FIRST_ELEMENT_AS_FLOAT)},
+    },
 }
 
 
-def _try_convert_to_epoch(release_date: str) -> Optional[str]:
+def _try_convert_to_epoch(release_date: str) -> str | None:
     try:
         epoch = time.strftime("%Y-%m-%d", time.strptime(release_date, "%Y-%m-%dT%H:%M:%SZ"))
     except ValueError:
@@ -82,12 +94,12 @@ def _try_convert_to_epoch(release_date: str) -> Optional[str]:
 
 
 def inv_esx_vsphere_hostsystem(section: Section) -> type_defs.InventoryResult:
-
     for name, sub_section in SECTION_TO_INVENTORY.items():
-        data: Dict[str, Union[None, str, float]] = {}
+        data: dict[str, None | str | float] = {}
         for section_key, (inv_key, transform) in sub_section["translation"].items():
             if section_key in section:
-                data[inv_key] = transform(section[section_key])
+                # Found after update to 2.9.0. Seems to be a false positive
+                data[inv_key] = transform(section[section_key])  # pylint: disable=not-callable
 
         # Handle some corner cases for hw and sys
         if name == "hw":
@@ -100,7 +112,8 @@ def inv_esx_vsphere_hostsystem(section: Section) -> type_defs.InventoryResult:
                 # ...but it is missing in some cases
                 try:
                     data["serial"] = section[
-                        "hardware.systemInfo.otherIdentifyingInfo.ServiceTag.0"][0]
+                        "hardware.systemInfo.otherIdentifyingInfo.ServiceTag.0"
+                    ][0]
                 except KeyError:
                     pass
 

@@ -1,4 +1,4 @@
-// Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+// Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 // This file is part of Checkmk (https://checkmk.com). It is subject to the
 // terms and conditions defined in the file COPYING, which is part of this
 // source code package.
@@ -10,14 +10,14 @@
 #include <cstdint>
 namespace wtools {
 
-/// \brief Replacement for INVALID_HANDLE_VALUE
-inline HANDLE InvalidHandle() {
+/// Replacement for INVALID_HANDLE_VALUE
+inline HANDLE InvalidHandle() noexcept {
     // conversion to satisfy Win32 API and C++:
     return reinterpret_cast<HANDLE>(
         static_cast<size_t>(static_cast<LONG_PTR>(-1)));
 }
 
-inline bool IsInvalidHandle(HANDLE h) {
+inline bool IsInvalidHandle(HANDLE h) noexcept {
     //
     return InvalidHandle() == h;
 }

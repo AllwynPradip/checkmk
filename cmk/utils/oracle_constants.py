@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- encoding: utf-8; py-indent-offset: 4 -*-
 # +------------------------------------------------------------------+
 # |             ____ _               _        __  __ _  __           |
 # |            / ___| |__   ___  ___| | __   |  \/  | |/ /           |
@@ -24,16 +23,13 @@
 # to the Free Software Foundation, Inc., 51 Franklin St,  Fifth Floor,
 # Boston, MA 02110-1301 USA.
 
-import collections
+from collections.abc import Sequence
+from typing import Final, NamedTuple
 
 
-def _convert_to_identifier(value):
-    characters = {
-        " ": "_",
-        "/": "",
-        "-": "_",
-    }
-    for char, repl in characters.items():
+def _convert_to_identifier(value: str) -> str:
+    characters: Final = ((" ", "_"), ("/", ""), ("-", "_"))
+    for char, repl in characters:
         value = value.replace(char, repl)
     return value.lower()
 
@@ -41,117 +37,140 @@ def _convert_to_identifier(value):
 #
 # IO Files
 #
-OracleIOFile = collections.namedtuple("OracleIOFile", "name id")
+class OracleIOFile(NamedTuple):
+    name: str
+    id: str
 
 
-def make_oracle_io_file_list(name_list):
+def make_oracle_io_file_list(name_list: Sequence[str]) -> list[OracleIOFile]:
     return [OracleIOFile(name, _convert_to_identifier(name)) for name in name_list]
 
 
-oracle_iofiles = make_oracle_io_file_list([
-    "Archive Log",
-    "Archive Log Backup",
-    "Control File",
-    "Data File",
-    "Data File Backup",
-    "Data File Copy",
-    "Data File Incremental Backup",
-    "Data Pump Dump File",
-    "External Table",
-    "Flashback Log",
-    "Log File",
-    "Other",
-    "Temp File",
-])
+oracle_iofiles: Final = make_oracle_io_file_list(
+    [
+        "Archive Log",
+        "Archive Log Backup",
+        "Control File",
+        "Data File",
+        "Data File Backup",
+        "Data File Copy",
+        "Data File Incremental Backup",
+        "Data Pump Dump File",
+        "External Table",
+        "Flashback Log",
+        "Log File",
+        "Other",
+        "Temp File",
+    ]
+)
 
-oracle_io_sizes = [
+oracle_io_sizes: Final = [
     ("s", "Small"),
     ("l", "Large"),
 ]
 
-oracle_io_types = [
+oracle_io_types: Final = [
     ("r", "Reads", "1/s"),
     ("w", "Writes", "1/s"),
     ("rb", "Read Bytes", "bytes/s"),
     ("wb", "Write Bytes", "bytes/s"),
 ]
 
+
 #
 # Waitclasses
 #
-OracleWaitclass = collections.namedtuple("OracleWaitclass", "name id metric metric_fg")
+class OracleWaitclass(NamedTuple):
+    name: str
+    id: str
+    metric: str
+    metric_fg: str
 
 
-def make_oracle_waitclass(name):
+def make_oracle_waitclass(name: str) -> OracleWaitclass:
     ident = _convert_to_identifier(name)
-    metric = "oracle_wait_class_%s_waited" % ident
-    metric_fg = metric + "_fg"
+    metric = f"oracle_wait_class_{ident}_waited"
+    metric_fg = f"{metric}_fg"
     return OracleWaitclass(name, ident, metric, metric_fg)
 
 
-def make_oracle_waitclass_list(name_list):
+def make_oracle_waitclass_list(name_list: Sequence[str]) -> list[OracleWaitclass]:
     return [make_oracle_waitclass(name) for name in name_list]
 
 
-oracle_waitclasses = make_oracle_waitclass_list([
-    "Administrative",
-    "Application",
-    "Cluster",
-    "Commit",
-    "Concurrency",
-    "Configuration",
-    "Idle",
-    "Network",
-    "Other",
-    "Scheduler",
-    "System I/O",
-    "User I/O",
-])
+oracle_waitclasses: Final = make_oracle_waitclass_list(
+    [
+        "Administrative",
+        "Application",
+        "Cluster",
+        "Commit",
+        "Concurrency",
+        "Configuration",
+        "Idle",
+        "Network",
+        "Other",
+        "Scheduler",
+        "System I/O",
+        "User I/O",
+    ]
+)
+
 
 #
 # SGAs
 #
-OracleSGA = collections.namedtuple("OracleSGA", "name id metric")
+class OracleSGA(NamedTuple):
+    name: str
+    id: str
+    metric: str
 
 
-def make_oracle_sga(name, metric):
+def make_oracle_sga(name: str, metric: str) -> OracleSGA:
     ident = _convert_to_identifier(name)
     return OracleSGA(name, ident, metric)
 
 
-def make_oracle_sga_list(input_list):
+def make_oracle_sga_list(input_list: Sequence[tuple[str, str]]) -> list[OracleSGA]:
     return [make_oracle_sga(name, metric) for name, metric in input_list]
 
 
-oracle_sga_fields = make_oracle_sga_list([
-    ("Maximum SGA Size", "oracle_sga_size"),
-    ("Buffer Cache Size", "oracle_sga_buffer_cache"),
-    ("Shared Pool Size", "oracle_sga_shared_pool"),
-    ("Redo Buffers", "oracle_sga_redo_buffer"),
-    ("Java Pool Size", "oracle_sga_java_pool"),
-    ("Large Pool Size", "oracle_sga_large_pool"),
-    ("Streams Pool Size", "oracle_sga_streams_pool"),
-    ("Shared IO Pool Size", "oracle_sga_shared_io_pool"),
-])
+oracle_sga_fields: Final = make_oracle_sga_list(
+    [
+        ("Maximum SGA Size", "oracle_sga_size"),
+        ("Buffer Cache Size", "oracle_sga_buffer_cache"),
+        ("Shared Pool Size", "oracle_sga_shared_pool"),
+        ("Redo Buffers", "oracle_sga_redo_buffer"),
+        ("Java Pool Size", "oracle_sga_java_pool"),
+        ("Large Pool Size", "oracle_sga_large_pool"),
+        ("Streams Pool Size", "oracle_sga_streams_pool"),
+        ("Shared IO Pool Size", "oracle_sga_shared_io_pool"),
+    ]
+)
+
 
 #
 # PGAs
 #
-OraclePGA = collections.namedtuple("OraclePGA", "name id metric")
+class OraclePGA(NamedTuple):
+    name: str
+    id: str
+    metric: str
 
 
-def make_oracle_pga(name):
+def make_oracle_pga(name: str) -> OraclePGA:
     ident = _convert_to_identifier(name)
-    metric = "oracle_pga_%s" % ident
+    metric = f"oracle_pga_{ident}"
     return OraclePGA(name, ident, metric)
 
 
-def make_oracle_pga_list(name_list):
+def make_oracle_pga_list(name_list: Sequence[str]) -> list[OraclePGA]:
     return [make_oracle_pga(name) for name in name_list]
 
 
-oracle_pga_fields = make_oracle_pga_list([
-    "total PGA allocated",
-    "total PGA inuse",
-    "total freeable PGA memory",
-])
+oracle_pga_fields: Final = make_oracle_pga_list(
+    [
+        "total PGA allocated",
+        "total PGA inuse",
+        "total freeable PGA memory",
+    ]
+)

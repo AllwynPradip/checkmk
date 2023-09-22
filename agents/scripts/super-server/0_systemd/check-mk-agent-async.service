@@ -1,0 +1,15 @@
+[Unit]
+Description=Checkmk agent - Asynchronous background tasks
+After=network.target
+Documentation=https://docs.checkmk.com/latest/en/agent_linux.html
+
+[Service]
+ExecStart=/usr/bin/check_mk_agent
+Environment='MK_RUN_SYNC_PARTS=false'
+Environment='MK_LOOP_INTERVAL=60'
+Type=simple
+
+User=root
+
+[Install]
+WantedBy=multi-user.target

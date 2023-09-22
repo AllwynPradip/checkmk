@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+from cmk.gui.graphing._utils import graph_info, metric_info
 from cmk.gui.i18n import _
 
-from cmk.gui.plugins.metrics import (
-    metric_info,
-    graph_info,
-)
-
-#.
+# .
 #   .--Metrics-------------------------------------------------------------.
 #   |                   __  __      _        _                             |
 #   |                  |  \/  | ___| |_ _ __(_) ___ ___                    |
@@ -28,11 +23,10 @@ from cmk.gui.plugins.metrics import (
 
 
 def _fix_title(title):
-    return title.replace('read data', 'data read').replace('write data', 'data written')
+    return title.replace("read data", "data read").replace("write data", "data written")
 
 
 def register_netapp_api_vs_traffic_metrics():
-
     metric_info["read_data"] = {
         "title": _("Data read"),
         "unit": "bytes",
@@ -45,6 +39,14 @@ def register_netapp_api_vs_traffic_metrics():
         "color": "44/a",
     }
 
+    metric_info["space_savings"] = {"title": _("Saved space"), "unit": "bytes", "color": "45/a"}
+
+    metric_info["logical_used"] = {
+        "title": _("Used logical space"),
+        "unit": "bytes",
+        "color": "41/b",
+    }
+
     for volume_info in ["NFS", "NFSv4", "NFSv4.1", "CIFS", "SAN", "FCP", "ISCSI"]:
         for what, unit in [
             ("data", "bytes"),
@@ -55,20 +57,20 @@ def register_netapp_api_vs_traffic_metrics():
         ]:
             volume = volume_info.lower().replace(".", "_")
 
-            metric_info["%s_read_%s" % (volume, what)] = {
+            metric_info[f"{volume}_read_{what}"] = {
                 "title": _fix_title(_("%s read %s") % (volume_info, what)),
                 "unit": unit,
                 "color": "31/a",
             }
 
-            metric_info["%s_write_%s" % (volume, what)] = {
+            metric_info[f"{volume}_write_{what}"] = {
                 "title": _fix_title(_("%s write %s") % (volume_info, what)),
                 "unit": unit,
                 "color": "44/a",
             }
 
             if what in ["data", "ops", "latency"]:
-                metric_info["%s_other_%s" % (volume, what)] = {
+                metric_info[f"{volume}_other_{what}"] = {
                     "title": _("%s other %s") % (volume_info, what),
                     "unit": unit,
                     "color": "21/a",
@@ -77,7 +79,7 @@ def register_netapp_api_vs_traffic_metrics():
 
 register_netapp_api_vs_traffic_metrics()
 
-#.
+# .
 #   .--Graphs--------------------------------------------------------------.
 #   |                    ____                 _                            |
 #   |                   / ___|_ __ __ _ _ __ | |__  ___                    |
@@ -91,13 +93,28 @@ register_netapp_api_vs_traffic_metrics()
 
 
 def register_netapp_api_vs_traffic_graphs():
-
     graph_info["read_write_data"] = {
         "title": _("Traffic"),
         "metrics": [
             ("read_data", "-area"),
             ("write_data", "area"),
         ],
+    }
+
+    graph_info["savings"] = {
+        "title": _("Space savings"),
+        "metrics": [
+            ("fs_used", "area"),
+            ("fs_free", "stack"),
+            ("fs_used,fs_free,+#006040", "line", "Filesystem size"),
+            ("logical_used", "line"),
+            ("space_savings", "line"),
+        ],
+        "scalars": [
+            "fs_used:warn",
+            "fs_used:crit",
+        ],
+        "range": (0, "logical_used:max"),
     }
 
     for what, text in [

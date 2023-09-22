@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Optional, Sequence
 import sys
+from collections.abc import Mapping, Sequence
+
+import pydantic
 import requests
+
+from cmk.special_agents.utils.agent_common import SectionWriter, special_agent_main
 from cmk.special_agents.utils.argument_parsing import Args, create_default_argument_parser
-from cmk.special_agents.utils.agent_common import special_agent_main
 
 
-def agent_elasticsearch_main(args: Args) -> None:
-    sys.stdout.write('<<<check_mk>>>\n')
+def agent_elasticsearch_main(args: Args) -> int:
     for host in args.hosts:
         url_base = "%s://%s:%d" % (args.proto, host, args.port)
 
@@ -20,41 +21,37 @@ def agent_elasticsearch_main(args: Args) -> None:
         # Cluster health: https://www.elastic.co/guide/en/elasticsearch/reference/current/cluster-health.html
         # Node stats: https://www.elastic.co/guide/en/elasticsearch/reference/current/cluster-nodes-stats.html
         # Indices Stats: https://www.elastic.co/guide/en/elasticsearch/reference/current/indices-stats.html
-        sections = {
-            'cluster_health': '/_cluster/health',
-            'nodes': '/_nodes/_all/stats',
-            'stats': '/*-*/_stats/store,docs',
+        section_urls_and_handlers = {
+            "cluster_health": ("/_cluster/health", handle_cluster_health),
+            "nodes": ("/_nodes/_all/stats", handle_nodes),
+            "stats": ("/*-*/_stats/store,docs", handle_stats),
         }
 
         try:
             for section in args.modules:
-                url = url_base + sections[section]
+                section_url, handler = section_urls_and_handlers[section]
+                url = url_base + section_url
 
                 auth = (args.user, args.password) if args.user and args.password else None
+                certcheck = not args.no_cert_check
                 try:
-                    response = requests.get(url, auth=auth)
+                    response = requests.get(url, auth=auth, verify=certcheck)  # nosec B113
                 except requests.exceptions.RequestException as e:
                     sys.stderr.write("Error: %s\n" % e)
                     if args.debug:
                         raise
-                else:
-                    sys.stdout.write("<<<elasticsearch_%s>>>\n" % section)
 
-                json_response = response.json()
-                if section == 'cluster_health':
-                    handle_cluster_health(json_response)
-                elif section == 'nodes':
-                    handle_nodes(json_response)
-                elif section == 'stats':
-                    handle_stats(json_response)
-            sys.exit(0)
+                handler(response.json())
+
         except Exception:
             if args.debug:
                 raise
+            return 1
+
+    return 0
 
 
-def parse_arguments(argv: Optional[Sequence[str]]) -> Args:
-
+def parse_arguments(argv: Sequence[str] | None) -> Args:
     parser = create_default_argument_parser(description=__doc__)
 
     parser.add_argument("-u", "--user", default=None, help="Username for elasticsearch login")
@@ -63,94 +60,86 @@ def parse_arguments(argv: Optional[Sequence[str]]) -> Args:
         "-P",
         "--proto",
         default="https",
-        help="Use 'http' or 'https' for connection to elasticsearch (default=https)")
-    parser.add_argument("-p",
-                        "--port",
-                        default=9200,
-                        type=int,
-                        help="Use alternative port (default: 9200)")
+        help="Use 'http' or 'https' for connection to elasticsearch (default=https)",
+    )
+    parser.add_argument(
+        "-p", "--port", default=9200, type=int, help="Use alternative port (default: 9200)"
+    )
     parser.add_argument(
         "-m",
         "--modules",
-        type=lambda x: x.split(' '),
-        default="cluster_health nodes stats",
-        help=
-        "Space-separated list of modules to query. Possible values: cluster_health, nodes, stats (default: all)"
+        nargs="*",
+        default=["cluster_health", "nodes", "stats"],
+        choices=["cluster_health", "nodes", "stats"],
+        help="List of modules to query.",
+    )
+    parser.add_argument(
+        "--no-cert-check", action="store_true", help="Disable certificate verification"
     )
     parser.add_argument(
         "hosts",
         metavar="HOSTNAME",
         nargs="+",
-        help=
-        "You can define one or more elasticsearch instances to query. First instance where data is queried wins."
+        help="You can define one or more elasticsearch instances to query. First instance where data is queried wins.",
     )
 
     return parser.parse_args(argv)
 
 
-def handle_cluster_health(response):
-    for item, value in response.items():
-        sys.stdout.write("%s %s\n" % (item, value))
+def handle_cluster_health(response: Mapping[str, object]) -> None:
+    with SectionWriter("elasticsearch_cluster_health", separator=" ") as writer:
+        for item, value in response.items():
+            writer.append(f"{item} {value}")
 
 
-def handle_nodes(response):
-    nodes_data = response.get("nodes")
-    if nodes_data is not None:
-        for node in nodes_data:
-            node = nodes_data[node]
-            proc = node["process"]
-            cpu = proc["cpu"]
-            mem = proc["mem"]
-
-            sys.stdout.write("%s open_file_descriptors %s\n" %
-                             (node["name"], proc["open_file_descriptors"]))
-            sys.stdout.write("%s max_file_descriptors %s\n" %
-                             (node["name"], proc["max_file_descriptors"]))
-            sys.stdout.write("%s cpu_percent %s\n" % (node["name"], cpu["percent"]))
-            sys.stdout.write("%s cpu_total_in_millis %s\n" % (node["name"], cpu["total_in_millis"]))
-            sys.stdout.write("%s mem_total_virtual_in_bytes %s\n" %
-                             (node["name"], mem["total_virtual_in_bytes"]))
+class _CPUResponse(pydantic.BaseModel, frozen=True):
+    percent: int
+    total_in_millis: int
 
 
-def handle_stats(response):
-    shards = response.get("_shards")
-    if shards is not None:
-        sys.stdout.write("<<<elasticsearch_shards>>>\n")
-
-        sys.stdout.write("%s %s %s\n" %
-                         (shards.get("total"), shards.get("successful"), shards.get("failed")))
-
-    docs = response.get("_all", {}).get("total")
-    if docs is not None:
-        sys.stdout.write("<<<elasticsearch_cluster>>>\n")
-        count = docs.get("docs", {}).get("count")
-        size = docs.get("store", {}).get("size_in_bytes")
-
-        sys.stdout.write("%s %s\n" % (count, size))
-
-    indices_data = response.get("indices")
-    if indices_data is not None:
-        indices = set()
-
-        sys.stdout.write("<<<elasticsearch_indices>>>\n")
-        for index in indices_data:
-            indices.add(index.split("-")[0])
-        for indice in list(indices):
-            all_counts = []
-            all_sizes = []
-            for index in indices_data:
-                if index.split("-")[0] == indice:
-                    all_counts.append(
-                        indices_data.get(index, {}).get("primaries", {}).get("docs",
-                                                                             {}).get("count"))
-                    all_sizes.append(
-                        indices_data.get(index, {}).get("total", {}).get("store",
-                                                                         {}).get("size_in_bytes"))
-            sys.stdout.write("%s %s %s\n" %
-                             (indice, sum(all_counts) / len(all_counts),
-                              sum(all_sizes) / len(all_sizes)))  # fixed: true-division
+class _MemResponse(pydantic.BaseModel, frozen=True):
+    total_virtual_in_bytes: int
 
 
-def main():
-    """Main entry point to be used """
-    special_agent_main(parse_arguments, agent_elasticsearch_main)
+class _ProcessResponse(pydantic.BaseModel, frozen=True):
+    open_file_descriptors: int
+    max_file_descriptors: int
+    cpu: _CPUResponse
+    mem: _MemResponse
+
+
+class _NodeReponse(pydantic.BaseModel, frozen=True):
+    name: str
+    process: _ProcessResponse
+
+
+class _NodesReponse(pydantic.BaseModel, frozen=True):
+    nodes: Mapping[str, _NodeReponse]
+
+
+def handle_nodes(response: Mapping[str, object]) -> None:
+    with SectionWriter("elasticsearch_nodes", separator=" ") as writer:
+        for node_response in _NodesReponse.parse_obj(response).nodes.values():
+            writer.append(
+                f"{node_response.name} open_file_descriptors {node_response.process.open_file_descriptors}"
+            )
+            writer.append(
+                f"{node_response.name} max_file_descriptors {node_response.process.max_file_descriptors}"
+            )
+            writer.append(f"{node_response.name} cpu_percent {node_response.process.cpu.percent}")
+            writer.append(
+                f"{node_response.name} cpu_total_in_millis {node_response.process.cpu.total_in_millis}"
+            )
+            writer.append(
+                f"{node_response.name} mem_total_virtual_in_bytes {node_response.process.mem.total_virtual_in_bytes}"
+            )
+
+
+def handle_stats(response: Mapping[str, object]) -> None:
+    with SectionWriter("elasticsearch_indices") as writer:
+        writer.append_json(response["indices"])
+
+
+def main() -> int:
+    """Main entry point to be used"""
+    return special_agent_main(parse_arguments, agent_elasticsearch_main)

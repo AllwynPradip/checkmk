@@ -1,41 +1,45 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# yapf: disable
-# type: ignore
+# fmt: off
+# mypy: disable-error-code=var-annotated
 
 
-
-checkname = u'db2_bp_hitratios'
-
-
-info = [[u'[[[serv0:ABC]]]'],
-        [u'node', u'0', u'foo1.bar2.baz3', u'0'],
-        [u'BP_NAME',
-         u'TOTAL_HIT_RATIO_PERCENT',
-         u'DATA_HIT_RATIO_PERCENT',
-         u'INDEX_HIT_RATIO_PERCENT',
-         u'XDA_HIT_RATIO_PERCENT'],
-        [u'IBMDEFAULTBP', u'83.62', u'78.70', u'99.74', u'50.00'],
-        [u'[[[serv1:XYZ]]]'],
-        [u'node', u'0', u'foo1.bar2.baz3', u'0']]
+checkname = "db2_bp_hitratios"
 
 
-discovery = {'': [(u'serv0:ABC DPF 0 foo1.bar2.baz3 0:IBMDEFAULTBP', {})]}
+info = [
+    ["[[[serv0:ABC]]]"],
+    ["node", "0", "foo1.bar2.baz3", "0"],
+    [
+        "BP_NAME",
+        "TOTAL_HIT_RATIO_PERCENT",
+        "DATA_HIT_RATIO_PERCENT",
+        "INDEX_HIT_RATIO_PERCENT",
+        "XDA_HIT_RATIO_PERCENT",
+    ],
+    ["IBMDEFAULTBP", "83.62", "78.70", "99.74", "50.00"],
+    ["[[[serv1:XYZ]]]"],
+    ["node", "0", "foo1.bar2.baz3", "0"],
+]
 
 
-checks = {'': [(u'serv0:ABC DPF 0 foo1.bar2.baz3 0:IBMDEFAULTBP',
-                {},
-                [(0,
-                  u'Total: 83.62%',
-                  [(u'total_hitratio', 83.62, None, None, 0, 100)]),
-                 (0,
-                  u'Data: 78.70%',
-                  [(u'data_hitratio', 78.7, None, None, 0, 100)]),
-                 (0,
-                  u'Index: 99.74%',
-                  [(u'index_hitratio', 99.74, None, None, 0, 100)]),
-                 (0, u'XDA: 50.00%', [(u'xda_hitratio', 50.0, None, None, 0, 100)])])]}
+discovery = {"": [("serv0:ABC DPF 0 foo1.bar2.baz3 0:IBMDEFAULTBP", {})]}
+
+
+checks = {
+    "": [
+        (
+            "serv0:ABC DPF 0 foo1.bar2.baz3 0:IBMDEFAULTBP",
+            {},
+            [
+                (0, "Total: 83.62%", [("total_hitratio", 83.62, None, None, 0, 100)]),
+                (0, "Data: 78.70%", [("data_hitratio", 78.7, None, None, 0, 100)]),
+                (0, "Index: 99.74%", [("index_hitratio", 99.74, None, None, 0, 100)]),
+                (0, "XDA: 50.00%", [("xda_hitratio", 50.0, None, None, 0, 100)]),
+            ],
+        )
+    ]
+}

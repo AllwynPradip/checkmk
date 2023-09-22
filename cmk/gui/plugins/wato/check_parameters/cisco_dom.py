@@ -1,31 +1,28 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Tuple as _Tuple
-
 from cmk.gui.i18n import _
+from cmk.gui.plugins.wato.utils import (
+    CheckParameterRulespecWithItem,
+    HostRulespec,
+    rulespec_registry,
+    RulespecGroupCheckParametersDiscovery,
+    RulespecGroupCheckParametersEnvironment,
+)
 from cmk.gui.valuespec import (
     Alternative,
     Dictionary,
     FixedValue,
     Float,
+    ListChoice,
     TextInput,
     Tuple,
-    ListChoice,
-)
-from cmk.gui.plugins.wato import (
-    HostRulespec,
-    RulespecGroupCheckParametersDiscovery,
-    RulespecGroupCheckParametersEnvironment,
-    CheckParameterRulespecWithItem,
-    rulespec_registry,
 )
 
 
-def _vs_cisco_dom(which_levels: str) -> _Tuple[str, Alternative]:
+def _vs_cisco_dom(which_levels: str) -> tuple[str, Alternative]:
     def _button_text_warn(which_levels: str) -> str:
         if which_levels == "upper":
             text = _("Warning at")
@@ -51,21 +48,25 @@ def _vs_cisco_dom(which_levels: str) -> _Tuple[str, Alternative]:
             default_value=True,  # use device levels
             elements=[
                 FixedValue(
-                    True,
+                    value=True,
                     title=_("Use device levels"),
                     totext="",
                 ),
-                Tuple(title=_("Use the following levels"),
-                      elements=[
-                          Float(title=_button_text_warn(which_levels), unit=_("dBm")),
-                          Float(title=_button_text_crit(which_levels), unit=_("dBm")),
-                      ]),
+                Tuple(
+                    title=_("Use the following levels"),
+                    elements=[
+                        Float(title=_button_text_warn(which_levels), unit=_("dBm")),
+                        Float(title=_button_text_crit(which_levels), unit=_("dBm")),
+                    ],
+                ),
                 FixedValue(
-                    False,
+                    value=False,
                     title=_("No levels"),
                     totext="",
                 ),
-            ]))
+            ],
+        ),
+    )
 
 
 def _item_spec_cisco_dom() -> TextInput:
@@ -73,10 +74,12 @@ def _item_spec_cisco_dom() -> TextInput:
 
 
 def _parameter_valuespec_cisco_dom() -> Dictionary:
-    return Dictionary(elements=[
-        (_vs_cisco_dom("upper")),
-        (_vs_cisco_dom("lower")),
-    ],)
+    return Dictionary(
+        elements=[
+            (_vs_cisco_dom("upper")),
+            (_vs_cisco_dom("lower")),
+        ],
+    )
 
 
 rulespec_registry.register(
@@ -87,24 +90,29 @@ rulespec_registry.register(
         match_type="dict",
         parameter_valuespec=_parameter_valuespec_cisco_dom,
         title=lambda: _("CISCO Digital Optical Monitoring (DOM)"),
-    ))
+    )
+)
 
 
 def _valuespec_discovery_cisco_dom_rules():
-    return Dictionary(title=_("Cisco DOM discovery"),
-                      elements=[
-                          ("admin_states",
-                           ListChoice(
-                               title=_("Admin states to discover"),
-                               choices={
-                                   1: _("up"),
-                                   2: _("down"),
-                                   3: _("testing"),
-                               },
-                               toggle_all=True,
-                               default_value=['1', '2', '3'],
-                           )),
-                      ])
+    return Dictionary(
+        title=_("Cisco DOM discovery"),
+        elements=[
+            (
+                "admin_states",
+                ListChoice(
+                    title=_("Admin states to discover"),
+                    choices={
+                        1: _("up"),
+                        2: _("down"),
+                        3: _("testing"),
+                    },
+                    toggle_all=True,
+                    default_value=["1", "2", "3"],
+                ),
+            ),
+        ],
+    )
 
 
 rulespec_registry.register(
@@ -113,4 +121,5 @@ rulespec_registry.register(
         match_type="dict",
         name="discovery_cisco_dom_rules",
         valuespec=_valuespec_discovery_cisco_dom_rules,
-    ))
+    )
+)

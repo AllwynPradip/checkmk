@@ -13,7 +13,7 @@
 
 case "$1" in
     default)
-            if [ ! -z "$CONFIG_WEBSERVER" ]; then
+            if [ -n "$CONFIG_WEBSERVER" ]; then
                 echo "$CONFIG_WEBSERVER"
             else
                 echo "own";
@@ -23,17 +23,4 @@ case "$1" in
             echo "own: Run an own webserver process for this instance"
             echo "none: Do not run or configure a webserver"
     ;;
-    set)
-        # When one configured shared, fallback to own mode
-        if [ "$2" == "own" ] || [ "$2" == "shared" ]; then
-            ln -sfn apache-own.conf $OMD_ROOT/etc/apache/mode.conf
-        elif [ "$2" == "shared" ] ; then
-            echo "DEPRECATION WARNING: the shared apache mode has been removed."
-            exit 1
-        elif [ "$2" == "none" ] ; then
-            rm -f $OMD_ROOT/etc/apache/mode.conf
-            : > $OMD_ROOT/etc/apache/mode.conf
-        fi
-    ;;
 esac
-

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """
@@ -115,16 +114,12 @@
     Hugepagesize: 2048 kB
 
 """
-from typing import Dict, Optional
-from .agent_based_api.v1 import (
-    register,
-    type_defs,
-)
 
+from .agent_based_api.v1 import register, type_defs
 from .utils.memory import SectionMemUsed
 
 
-def parse_aix_memory(string_table: type_defs.StringTable) -> Optional[SectionMemUsed]:
+def parse_aix_memory(string_table: type_defs.StringTable) -> SectionMemUsed | None:
     """Parse AIX vmstat output into something compatible with the Linux output of /proc/meminfo
 
     AIX speaks of 4k pages while Linux of kilobytes.
@@ -188,23 +183,23 @@ register.agent_section(
 )
 
 
-def parse_solaris_mem(string_table: type_defs.StringTable) -> Optional[SectionMemUsed]:
+def parse_solaris_mem(string_table: type_defs.StringTable) -> SectionMemUsed | None:
     """
-        >>> import pprint
-        >>> test = 'Memory: 512M phys mem, 353M free mem, 2000M total swap, 2000M free swap'
-        >>> section = parse_solaris_mem([test.split()])
-        >>> pprint.pprint(section)
-        {'MemFree': 370147328,
-         'MemTotal': 536870912,
-         'SwapFree': 2097152000,
-         'SwapTotal': 2097152000}
+    >>> import pprint
+    >>> test = 'Memory: 512M phys mem, 353M free mem, 2000M total swap, 2000M free swap'
+    >>> section = parse_solaris_mem([test.split()])
+    >>> pprint.pprint(section)
+    {'MemFree': 370147328,
+     'MemTotal': 536870912,
+     'SwapFree': 2097152000,
+     'SwapTotal': 2097152000}
 
     """
     # The 1.2.4 agent seems to create an empty section under some circumstances
     if not string_table:
         return None
 
-    units = {'G': 1024**3, 'M': 1024**2, 'K': 1024}
+    units = {"G": 1024**3, "M": 1024**2, "K": 1024}
 
     values = []
     mem_tokens = " ".join(string_table[0][1:]).split(",")
@@ -220,10 +215,10 @@ def parse_solaris_mem(string_table: type_defs.StringTable) -> Optional[SectionMe
         values[2] = values[2] + values[3]
 
     return {
-        'MemTotal': values[0],
-        'MemFree': values[1],
-        'SwapTotal': values[2],
-        'SwapFree': values[3],
+        "MemTotal": values[0],
+        "MemFree": values[1],
+        "SwapTotal": values[2],
+        "SwapFree": values[3],
     }
 
 
@@ -234,26 +229,26 @@ register.agent_section(
 )
 
 
-def parse_statgrab_mem(string_table: type_defs.StringTable) -> Optional[SectionMemUsed]:
+def parse_statgrab_mem(string_table: type_defs.StringTable) -> SectionMemUsed | None:
     """
-        >>> import pprint
-        >>> pprint.pprint(parse_statgrab_mem([
-        ...     ['mem.cache', '0'],
-        ...     ['mem.total', '4294967296'],
-        ...     ['mem.free', '677666816'],
-        ...     ['mem.used', '3617300480'],
-        ...     ['swap.total', '8589934592'],
-        ...     ['swap.free', '4976402432'],
-        ...     ['swap.used', '3613532160']
-        ... ]))
-        {'Cached': 0,
-         'MemFree': 677666816,
-         'MemTotal': 4294967296,
-         'SwapFree': 4976402432,
-         'SwapTotal': 8589934592}
+    >>> import pprint
+    >>> pprint.pprint(parse_statgrab_mem([
+    ...     ['mem.cache', '0'],
+    ...     ['mem.total', '4294967296'],
+    ...     ['mem.free', '677666816'],
+    ...     ['mem.used', '3617300480'],
+    ...     ['swap.total', '8589934592'],
+    ...     ['swap.free', '4976402432'],
+    ...     ['swap.used', '3613532160']
+    ... ]))
+    {'Cached': 0,
+     'MemFree': 677666816,
+     'MemTotal': 4294967296,
+     'SwapFree': 4976402432,
+     'SwapTotal': 8589934592}
 
     """
-    parsed: Dict[str, int] = {}
+    parsed: dict[str, int] = {}
     for var, value in string_table:
         try:
             parsed.setdefault(var, int(value))
@@ -261,10 +256,10 @@ def parse_statgrab_mem(string_table: type_defs.StringTable) -> Optional[SectionM
             pass
 
     try:
-        totalmem = parsed['mem.total']
-        memused = parsed['mem.used']
-        totalswap = parsed['swap.total']
-        swapused = parsed['swap.used']
+        totalmem = parsed["mem.total"]
+        memused = parsed["mem.used"]
+        totalswap = parsed["swap.total"]
+        swapused = parsed["swap.used"]
     except KeyError:
         return None
 
@@ -274,8 +269,8 @@ def parse_statgrab_mem(string_table: type_defs.StringTable) -> Optional[SectionM
         "SwapTotal": totalswap,
         "SwapFree": totalswap - swapused,
     }
-    if 'mem.cache' in parsed:
-        section["Cached"] = parsed['mem.cache']
+    if "mem.cache" in parsed:
+        section["Cached"] = parsed["mem.cache"]
 
     return section
 
@@ -284,15 +279,15 @@ register.agent_section(
     name="statgrab_mem",
     parsed_section_name="mem_used",
     parse_function=parse_statgrab_mem,
-    supersedes=['ucd_mem'],
+    supersedes=["ucd_mem"],
 )
 
 
-def parse_openbsd_mem(string_table: type_defs.StringTable) -> Optional[SectionMemUsed]:
-    units = {'kB': 1024}
+def parse_openbsd_mem(string_table: type_defs.StringTable) -> SectionMemUsed | None:
+    units = {"kB": 1024, "MB": 1024**2}
 
     try:
-        mem_data = {k.strip(':'): int(v) * units[u] for k, v, u in string_table}
+        mem_data = {k.strip(":"): int(v) * units[u] for k, v, u in string_table}
     except ValueError:
         return None
 

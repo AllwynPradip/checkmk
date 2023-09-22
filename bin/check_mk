@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -11,12 +10,11 @@
 # - cluster_name  - Name of a cluster (string)
 # - realhost_name - Name of a *real* host, not a cluster (string)
 
+import errno
+import getopt
 import logging
 import os
 import sys
-import getopt
-import socket
-import errno
 
 # Needs to be placed before cmk modules, because they are not available
 # when executed as non site user. Alas, this screws up our import ordering
@@ -26,19 +24,19 @@ if not os.environ.get("OMD_SITE"):
     sys.stderr.write("Check_MK can be used only as site user.\n")
     sys.exit(1)
 
-from cmk.utils.exceptions import MKGeneralException, MKTerminate, MKBailOut
 import cmk.utils.caching
 import cmk.utils.debug
 import cmk.utils.log
 import cmk.utils.paths
+from cmk.utils.crash_reporting import ABCCrashReport, crash_report_registry, CrashReportStore
+from cmk.utils.exceptions import MKBailOut, MKGeneralException, MKTerminate
 from cmk.utils.log import console
 
-import cmk.base.config as config  # pylint: disable=cmk-module-layer-violation
-import cmk.base.profiling as profiling  # pylint: disable=cmk-module-layer-violation
-from cmk.base.modes import modes  # pylint: disable=cmk-module-layer-violation
-import cmk.base.check_api as check_api  # pylint: disable=cmk-module-layer-violation
-import cmk.base.crash_reporting  # pylint: disable=cmk-module-layer-violation
-import cmk.base.utils  # pylint: disable=cmk-module-layer-violation
+import cmk.base.check_api as check_api
+import cmk.base.config as config
+import cmk.base.profiling as profiling
+import cmk.base.utils
+from cmk.base.modes import modes
 
 cmk.utils.log.setup_console_logging()
 logger = logging.getLogger("cmk.base")
@@ -46,6 +44,26 @@ logger = logging.getLogger("cmk.base")
 cmk.base.utils.register_sigint_handler()
 
 help_function = modes.get("help").handler_function
+
+
+# We probably don't really need to register that here, do we?
+@crash_report_registry.register
+class CrashReport(ABCCrashReport):
+    @classmethod
+    def type(cls) -> str:
+        return "base"
+
+    @classmethod
+    def from_exception(
+        cls, details: object = None, type_specific_attributes: object = None
+    ) -> ABCCrashReport:
+        return super().from_exception(
+            details={
+                "argv": sys.argv,
+                "env": dict(os.environ),
+            }
+        )
+
 
 try:
     opts, args = getopt.getopt(sys.argv[1:], modes.short_getopt_specs(), modes.long_getopt_specs())
@@ -76,7 +94,11 @@ try:
     # At least in case the config is needed, the checks are needed too, because
     # the configuration may refer to check config variable names.
     if mode_name not in modes.non_checks_options():
-        errors = config.load_all_agent_based_plugins(check_api.get_check_api_context)
+        errors = config.load_all_plugins(
+            check_api.get_check_api_context,
+            local_checks_dir=cmk.utils.paths.local_checks_dir,
+            checks_dir=cmk.utils.paths.checks_dir,
+        )
         if sys.stderr.isatty():
             for error_msg in errors:
                 console.error(error_msg)
@@ -115,17 +137,17 @@ except (MKGeneralException, MKBailOut) as e:
         raise
     sys.exit(3)
 
-except socket.error as e:
+except OSError as e:
     if e.errno == errno.EPIPE:
         # this is not an error, caller closes socket(s) and will kill cmk too
         sys.exit(4)
-    crash = cmk.base.crash_reporting.CMKBaseCrashReport.from_exception()
-    cmk.base.crash_reporting.CrashReportStore().save(crash)
+    crash = CrashReport.from_exception()
+    CrashReportStore().save(crash)
     raise
 
 except Exception:
-    crash = cmk.base.crash_reporting.CMKBaseCrashReport.from_exception()
-    cmk.base.crash_reporting.CrashReportStore().save(crash)
+    crash = CrashReport.from_exception()
+    CrashReportStore().save(crash)
     raise
 
 finally:

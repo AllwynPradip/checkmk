@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 r"""Check_MK Agent Plugin: mk_filestats
@@ -87,8 +87,10 @@ You should find an example configuration file at
 '../cfg_examples/filestats.cfg' relative to this file.
 """
 
-__version__ = "2.1.0i1"
+__version__ = "2.3.0b1"
 
+import collections
+import configparser
 import errno
 import glob
 import logging
@@ -96,32 +98,9 @@ import operator
 import os
 import re
 import shlex
+import stat
 import sys
 import time
-from stat import S_ISDIR, S_ISREG
-
-# NOTE: The tool 3to2 runs when the agent is configured for python 2.5/2.6
-#       and converts the import automatically to 'ConfigParser'.
-#       It does not run for python 2.7, which is why the try/except block
-#       is needed; python 2.7.17 supports importing 'configparser', but from
-#       2.7.18 this is not supported. The documentation explicitly states
-#       that the module 'configparser' is supported from python 3.
-#       https://docs.python.org/2/library/configparser.html
-
-try:
-    from collections import OrderedDict
-except ImportError:  # Python2
-    from ordereddict import OrderedDict  # type: ignore
-
-try:
-    import configparser
-except ImportError:  # Python2
-    import ConfigParser as configparser  # type: ignore
-
-try:
-    import typing
-except ImportError:
-    pass
 
 
 def ensure_str(s):
@@ -144,11 +123,11 @@ def ensure_text(s):
     return s
 
 
-DEFAULT_CFG_FILE = os.path.join(os.getenv('MK_CONFDIR', ''), "filestats.cfg")
+DEFAULT_CFG_FILE = os.path.join(os.getenv("MK_CONFDIR", ""), "filestats.cfg")
 
 DEFAULT_CFG_SECTION = {"output": "file_stats", "subgroups_delimiter": "@"}
 
-FILTER_SPEC_PATTERN = re.compile('(?P<operator>[<>=]+)(?P<value>.+)')
+FILTER_SPEC_PATTERN = re.compile("(?P<operator>[<>=]+)(?P<value>.+)")
 
 LOGGER = logging.getLogger(__name__)
 
@@ -170,74 +149,90 @@ def parse_arguments(argv=None):
     else:
         LOGGER.propagate = False
 
-    parsed_args['cfg_file'] = DEFAULT_CFG_FILE
+    parsed_args["cfg_file"] = DEFAULT_CFG_FILE
     for opt in ("-c", "--config-file"):
         if opt in argv:
             try:
-                parsed_args['cfg_file'] = argv[argv.index(opt) + 1]
+                parsed_args["cfg_file"] = argv[argv.index(opt) + 1]
             except IndexError:
                 sys.stderr.write("missing value for option %r\n" % opt)
                 sys.exit(1)
     return parsed_args
 
 
-class FileStat(object):  # pylint: disable=useless-object-inheritance
-    """Wrapper arount os.stat
+class FileStat:
+    """Wrapper around os.stat
 
     Only call os.stat once.
     """
-    def __init__(self, path):
-        super(FileStat, self).__init__()
-        LOGGER.debug("Creating FileStat(%r)", path)
-        self.path = ensure_text(path)
-        self.stat_status = 'ok'
-        self.size = None
-        self.age = None
-        self._m_time = None
-        # report on errors, regard failure as 'file'
-        self.isfile = True
-        self.isdir = False
 
-        LOGGER.debug("os.stat(%r)", self.path)
-        path = self.path.encode('utf8')
+    @classmethod
+    def from_path(cls, raw_path):
+        # raw_path is the value returned by iglob. This value cannot typed meaningfully:
+        # * if the path is utf-8 decodable, python2: unicode
+        # * if the path is not utf-8 decodable, python2: str
+        # * python3: str, possibly with surrogates aka it can only be encoded again like so:
+        #   str_with_surrogates.encode('utf-8', 'surrogateescape')
+        LOGGER.debug("Creating FileStat(%r)", raw_path)
         try:
-            stat = os.stat(path)
+            file_stat = os.stat(raw_path)
         except OSError as exc:
-            self.stat_status = "file vanished" if exc.errno == errno.ENOENT else str(exc)
-            return
+            # report on errors, regard failure as 'file'
+            stat_status = "file vanished" if exc.errno == errno.ENOENT else str(exc)
+            return cls(raw_path, stat_status)
 
         try:
-            self.size = int(stat.st_size)
+            size = int(file_stat.st_size)
         except ValueError as exc:
-            self.stat_status = str(exc)
-            return
+            stat_status = str(exc)
+            return cls(raw_path, stat_status)
 
         try:
-            self._m_time = int(stat.st_mtime)
-            self.age = int(time.time()) - self._m_time
+            m_time = int(file_stat.st_mtime)
+            age = int(time.time()) - m_time
         except ValueError as exc:
-            self.stat_status = str(exc)
-            return
+            stat_status = str(exc)
+            return cls(raw_path, stat_status, size)
 
-        self.isfile = S_ISREG(stat.st_mode)
-        self.isdir = S_ISDIR(stat.st_mode)
+        isfile = stat.S_ISREG(file_stat.st_mode)
+        isdir = stat.S_ISDIR(file_stat.st_mode)
 
-    def __repr__(self):
-        return "FileStat(%r)" % self.path
+        return cls(raw_path, "ok", size, age, m_time, isfile, isdir)
+
+    def __init__(
+        self, raw_path, stat_status, size=None, age=None, m_time=None, isfile=True, isdir=False
+    ):
+        super().__init__()
+        if sys.version_info[0] >= 3:
+            self.writeable_path = raw_path.encode("utf-8", "surrogateescape").decode(
+                "utf-8", "replace"
+            )
+        else:
+            if isinstance(raw_path, unicode):  # pylint: disable=undefined-variable
+                self.writeable_path = raw_path
+            else:
+                self.writeable_path = raw_path.decode("utf-8", "replace")
+        self.regex_matchable_path = self.writeable_path
+        self.stat_status = stat_status
+        self.size = size
+        self.age = age
+        self._m_time = m_time
+        self.isfile = isfile
+        self.isdir = isdir
 
     def dumps(self):
         data = {
             "type": "file",
-            "path": self.path,
+            "path": self.writeable_path,
             "stat_status": self.stat_status,
             "size": self.size,
             "age": self.age,
-            "mtime": self._m_time
+            "mtime": self._m_time,
         }
         return repr(data)
 
 
-#.
+# .
 #   .--Input---------------------------------------------------------------.
 #   |                      ___                   _                         |
 #   |                     |_ _|_ __  _ __  _   _| |_                       |
@@ -250,31 +245,37 @@ class FileStat(object):  # pylint: disable=useless-object-inheritance
 #   '----------------------------------------------------------------------'
 
 
-class PatternIterator(object):  # pylint: disable=useless-object-inheritance
+class PatternIterator:
     """Recursively iterate over all files"""
+
     def __init__(self, pattern_list):
-        super(PatternIterator, self).__init__()
+        super().__init__()
         self._patterns = [os.path.abspath(os.path.expanduser(p)) for p in pattern_list]
 
-    def _iter_files(self, pattern):
-        for item in glob.iglob(pattern):
-            filestat = FileStat(item)
-            if filestat.isfile:
-                yield filestat
-            elif filestat.isdir:
-                for filestat in self._iter_files(os.path.join(item, '*')):
-                    yield filestat
+    def _iterate_folder(self, folder):
+        # equivalent to `find -type f`
+        for currentpath, _folders, files in os.walk(folder):
+            for file in files:
+                yield FileStat.from_path(os.path.join(currentpath, file))
 
     def __iter__(self):
-        for pat in self._patterns:
-            LOGGER.info("processing pattern: %r", pat)
-            for filestat in self._iter_files(pat):
-                yield filestat
+        for pattern in self._patterns:
+            LOGGER.info("processing pattern: %r", pattern)
+            # pattern needs to be a unicode/python3 str. Otherwise things might go sour, for instance:
+            # If we pass "*".encode("utf-8"), then a non-UTF-8 filesystem may no longer realize that
+            # b'\x2A' refers to a wildcard. Instead iglob is responsible for conversion.
+            for item in glob.iglob(pattern):
+                filestat = FileStat.from_path(item)
+                if filestat.isfile:
+                    yield filestat
+                if filestat.isdir:
+                    for filestat in self._iterate_folder(item):
+                        yield filestat
 
 
 def get_file_iterator(config):
     """get a FileStat iterator"""
-    input_specs = [(k[6:], v) for k, v in config.items() if k.startswith('input_')]
+    input_specs = [(k[6:], v) for k, v in config.items() if k.startswith("input_")]
     if not input_specs:
         raise ValueError("missing input definition")
     if len(input_specs) != 1:  # currently not supported
@@ -286,7 +287,7 @@ def get_file_iterator(config):
     return PatternIterator(patterns)
 
 
-#.
+# .
 #   .--Filtering-----------------------------------------------------------.
 #   |                _____ _ _ _            _                              |
 #   |               |  ___(_) | |_ ___ _ __(_)_ __   __ _                  |
@@ -299,34 +300,36 @@ def get_file_iterator(config):
 #   '----------------------------------------------------------------------'
 
 
-class AbstractFilter(object):  # pylint: disable=useless-object-inheritance
+class AbstractFilter:
     """Abstract filter interface"""
+
     def matches(self, filestat):
         """return a boolean"""
         raise NotImplementedError()
 
 
 COMPARATORS = {
-    '<': operator.lt,
-    '<=': operator.le,
-    '>': operator.gt,
-    '>=': operator.ge,
-    '==': operator.eq,
+    "<": operator.lt,
+    "<=": operator.le,
+    ">": operator.gt,
+    ">=": operator.ge,
+    "==": operator.eq,
 }
 
 
-class AbstractNumericFilter(AbstractFilter):
+class AbstractNumericFilter:
     """Common code for filtering by comparing integers"""
+
     def __init__(self, spec_string):
-        super(AbstractNumericFilter, self).__init__()
+        super().__init__()
         match = FILTER_SPEC_PATTERN.match(spec_string)
         if match is None:
             raise ValueError("unable to parse filter spec: %r" % spec_string)
         spec = match.groupdict()
-        comp = COMPARATORS.get(spec['operator'])
+        comp = COMPARATORS.get(spec["operator"])
         if comp is None:
-            raise ValueError("unknown operator for numeric filter: %r" % spec['operator'])
-        reference = int(spec['value'])
+            raise ValueError("unknown operator for numeric filter: %r" % spec["operator"])
+        reference = int(spec["value"])
         self._matches_value = lambda actual: comp(int(actual), reference)
 
     def matches(self, filestat):
@@ -337,7 +340,7 @@ class SizeFilter(AbstractNumericFilter):
     def matches(self, filestat):
         """apply AbstractNumericFilter ti file size"""
         size = filestat.size
-        if size is not None:
+        if size is not None and size != "null":
             return self._matches_value(size)
         # Don't return vanished files.
         # Other cases are a problem, and should be included
@@ -348,30 +351,30 @@ class AgeFilter(AbstractNumericFilter):
     def matches(self, filestat):
         """apply AbstractNumericFilter ti file age"""
         age = filestat.age
-        if age is not None:
+        if age is not None and age != "null":
             return self._matches_value(age)
         # Don't return vanished files.
         # Other cases are a problem, and should be included
         return filestat.stat_status != "file vanished"
 
 
-class RegexFilter(AbstractFilter):
+class RegexFilter:
     def __init__(self, regex_pattern):
-        super(RegexFilter, self).__init__()
+        super().__init__()
         LOGGER.debug("initializing with pattern: %r", regex_pattern)
         self._regex = re.compile(ensure_text(regex_pattern), re.UNICODE)
 
     def matches(self, filestat):
-        return bool(self._regex.match(filestat.path))
+        return bool(self._regex.match(filestat.regex_matchable_path))
 
 
 class InverseRegexFilter(RegexFilter):
     def matches(self, filestat):
-        return not bool(self._regex.match(filestat.path))
+        return not self._regex.match(filestat.regex_matchable_path)
 
 
 def get_file_filters(config):
-    filter_specs = ((k[7:], v) for k, v in config.items() if k.startswith('filter_'))
+    filter_specs = ((k[7:], v) for k, v in config.items() if k.startswith("filter_"))
 
     filters = []
     for variety, spec_string in filter_specs:
@@ -398,7 +401,7 @@ def iter_filtered_files(file_filters, iterator):
             yield filestat
 
 
-#.
+# .
 #   .--Grouping------------------------------------------------------------.
 #   |               ____                       _                           |
 #   |              / ___|_ __ ___  _   _ _ __ (_)_ __   __ _               |
@@ -420,22 +423,22 @@ def parse_grouping_config(
     parent_group_name, child_group_name = raw_config_section_name.split(subgroups_delimiter, 1)
 
     for option in options:
-        if option.startswith('grouping_'):
-            grouping_type = option.split('_', 1)[1]
+        if option.startswith("grouping_"):
+            grouping_type = option.split("_", 1)[1]
             grouping_rule = config.get(raw_config_section_name, option)
 
-    LOGGER.info('found subgroup: %s', raw_config_section_name)
+    LOGGER.info("found subgroup: %s", raw_config_section_name)
     return parent_group_name, (
         child_group_name,
         {
-            'type': grouping_type,
-            'rule': grouping_rule,
+            "type": grouping_type,
+            "rule": grouping_rule,
         },
     )
 
 
-def _grouping_construct_group_name(parent_group_name, child_group_name):
-    '''allow the user to format the service name using '%s'.
+def _grouping_construct_group_name(parent_group_name, child_group_name=""):
+    """allow the user to format the service name using '%s'.
 
     >>> _grouping_construct_group_name('aard %s vark', 'banana')
     'aard banana vark'
@@ -444,28 +447,29 @@ def _grouping_construct_group_name(parent_group_name, child_group_name):
     'aard banana vark %s %s'
 
     >>> _grouping_construct_group_name('aard %s vark')
-    'aard  vark'
+    'aard %s vark'
 
     >>> _grouping_construct_group_name('aard %s', '')
-    'aard'
-    '''
+    'aard %s'
+    """
 
-    format_specifiers_count = parent_group_name.count('%s')
+    format_specifiers_count = parent_group_name.count("%s")
     if not format_specifiers_count:
-        return ('%s %s' % (parent_group_name, child_group_name)).strip()
-    return (parent_group_name % ((child_group_name,) + ('%s',) *
-                                 (format_specifiers_count - 1))).strip()
+        return ("%s %s" % (parent_group_name, child_group_name)).strip()
 
+    if not child_group_name:
+        return parent_group_name
 
-def _matches_regex(single_file, regex_pattern):
-    return bool(re.match(regex_pattern, single_file.path))
+    return (
+        parent_group_name % ((child_group_name,) + ("%s",) * (format_specifiers_count - 1))
+    ).strip()
 
 
 def _get_matching_child_group(single_file, grouping_conditions):
     for child_group_name, grouping_condition in grouping_conditions:
-        if _matches_regex(single_file, grouping_condition['rule']):
+        if re.match(grouping_condition["rule"], single_file.regex_matchable_path):
             return child_group_name
-    return ''
+    return ""
 
 
 def grouping_multiple_groups(config_section_name, files_iter, grouping_conditions):
@@ -476,8 +480,8 @@ def grouping_multiple_groups(config_section_name, files_iter, grouping_condition
     # Initalise dict with parent and child group because they should be in the section
     # with 0 count if there are no files for them.
     grouped_files = {
-        '': [],  # parent
-    }  # type: typing.Dict[str, typing.List[FileStat]]
+        "": [],  # parent
+    }  # type: dict[str, list[FileStat]]
     grouped_files.update({g[0]: [] for g in grouping_conditions})
     for single_file in files_iter:
         matching_child_group = _get_matching_child_group(single_file, grouping_conditions)
@@ -499,7 +503,7 @@ def get_grouper(grouping_conditions):
     return grouping_single_group
 
 
-#.
+# .
 #   .--Output--------------------------------------------------------------.
 #   |                    ___        _               _                      |
 #   |                   / _ \ _   _| |_ _ __  _   _| |_                    |
@@ -513,7 +517,7 @@ def get_grouper(grouping_conditions):
 
 
 def output_aggregator_count_only(group_name, files_iter):
-    yield '[[[count_only %s]]]' % group_name
+    yield "[[[count_only %s]]]" % group_name
     count = sum(1 for __ in files_iter)
     yield repr({"type": "summary", "count": count})
 
@@ -529,36 +533,43 @@ def output_aggregator_file_stats(group_name, files_iter):
 def output_aggregator_extremes_only(group_name, files_iter):
     yield "[[[extremes_only %s]]]" % group_name
 
-    count = 0
-    for count, filestat in enumerate(files_iter, 1):
-        if count == 1:  # init
-            min_age = max_age = min_size = max_size = filestat
-        if filestat.age < min_age.age:
+    files = list(files_iter)
+    count = len(files)
+
+    if not count:
+        yield repr({"type": "summary", "count": count})
+        return
+
+    min_age = max_age = min_size = max_size = files[0]
+
+    for filestat in files[1:]:
+        if filestat.age is None:
+            continue
+
+        if min_age.age is None or filestat.age < min_age.age:
             min_age = filestat
-        elif filestat.age > max_age.age:
+        if max_age.age is None or filestat.age > max_age.age:
             max_age = filestat
-        if filestat.size < min_size.size:
+        if min_size.size is None or filestat.size < min_size.size:
             min_size = filestat
-        elif filestat.size > max_size.size:
+        if max_size.size is None or filestat.size > max_size.size:
             max_size = filestat
 
-    extremes = set((min_age, max_age, min_size, max_size)) if count else ()
-    for extreme_file in extremes:
+    for extreme_file in set((min_age, max_age, min_size, max_size)):
         yield extreme_file.dumps()
     yield repr({"type": "summary", "count": count})
 
 
 def output_aggregator_single_file(group_name, files_iter):
-
     for lazy_file in files_iter:
-
         count_format_specifiers = group_name.count("%s")
 
         if count_format_specifiers == 0:
             subsection_name = group_name
         else:
-            subsection_name = group_name % ((lazy_file.path,) + (('%s',) *
-                                                                 (count_format_specifiers - 1)))
+            subsection_name = group_name % (
+                (lazy_file.writeable_path,) + (("%s",) * (count_format_specifiers - 1))
+            )
         yield "[[[single_file %s]]]" % subsection_name
         yield lazy_file.dumps()
 
@@ -582,7 +593,7 @@ def write_output(groups, output_aggregator):
             sys.stdout.write("%s\n" % line)
 
 
-#.
+# .
 #   .--Main----------------------------------------------------------------.
 #   |                        __  __       _                                |
 #   |                       |  \/  | __ _(_)_ __                           |
@@ -598,11 +609,11 @@ def write_output(groups, output_aggregator):
 def iter_config_section_dicts(cfg_file=None):
     if cfg_file is None:
         cfg_file = DEFAULT_CFG_FILE
-    # use OrderedDict for Python 2.6 compatibility: default type is a normal dict,
-    # which is unfortunately not insertion-ordered in Python 2.6
+    # FIXME: Python 2.6 has no OrderedDict at all, it is only available in a separate ordereddict
+    # package, but we simply can't assume that this is installed on the client!
     config = configparser.ConfigParser(
         DEFAULT_CFG_SECTION,
-        dict_type=OrderedDict,
+        dict_type=collections.OrderedDict,
     )
     LOGGER.debug("trying to read %r", cfg_file)
     files_read = config.read(cfg_file)
@@ -611,7 +622,7 @@ def iter_config_section_dicts(cfg_file=None):
     parsed_config = {}
     for raw_cfg_section_name in config.sections():
         options = config.options(raw_cfg_section_name)
-        subgroups_delimiter = config.get(raw_cfg_section_name, 'subgroups_delimiter')
+        subgroups_delimiter = config.get(raw_cfg_section_name, "subgroups_delimiter")
         if subgroups_delimiter not in raw_cfg_section_name:
             consolidated_cfg_section_name = raw_cfg_section_name
             parsed_config[consolidated_cfg_section_name] = {
@@ -629,34 +640,34 @@ def iter_config_section_dicts(cfg_file=None):
         # requires a more sophisticated type (perhaps a class) and a bigger refactoring to validate
         # the options and dispatch immediately after parsing is complete.
         parsed_config[consolidated_cfg_section_name].setdefault(
-            'grouping',
+            "grouping",
             [],  # type: ignore[arg-type]
-        ).append(parsed_grouping_config)  # type: ignore[attr-defined]
+        ).append(  # type: ignore[attr-defined]
+            parsed_grouping_config
+        )
 
     for consolidated_cfg_section_name, parsed_option in parsed_config.items():
         yield consolidated_cfg_section_name, parsed_option
 
 
 def main():
-
     args = parse_arguments()
 
-    sys.stdout.write('<<<filestats:sep(0)>>>\n')
-    for config_section_name, config in iter_config_section_dicts(args['cfg_file']):
-
-        #1 input
+    sys.stdout.write("<<<filestats:sep(0)>>>\n")
+    for config_section_name, config in iter_config_section_dicts(args["cfg_file"]):
+        # 1 input
         files_iter = get_file_iterator(config)
 
-        #2 filtering
+        # 2 filtering
         filters = get_file_filters(config)
         filtered_files = iter_filtered_files(filters, files_iter)
 
-        #3 grouping
-        grouping_conditions = config.get('grouping')
+        # 3 grouping
+        grouping_conditions = config.get("grouping")
         grouper = get_grouper(grouping_conditions)
         groups = grouper(config_section_name, filtered_files, grouping_conditions)
 
-        #4 output
+        # 4 output
         output_aggregator = get_output_aggregator(config)
         write_output(groups, output_aggregator)
 

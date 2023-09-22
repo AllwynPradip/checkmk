@@ -1,68 +1,60 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 import enum
 import inspect
-import sys
 import pathlib
+import sys
+from collections.abc import Callable, Mapping, Sequence
+from typing import Final, get_args, Literal, NoReturn, Union
 
-from typing import (
-    Callable,
-    Dict,
-    get_args,
-    List,
-    Literal,
-    Mapping,
-    NoReturn,
-    Optional,
-    Sequence,
-    Union,
-)
-
-from cmk.utils.type_defs import (
-    CheckPluginName,
-    InventoryPluginName,
-    ParsedSectionName,
-    RuleSetName,
-)
+from cmk.utils.check_utils import ParametersTypeAlias
 from cmk.utils.paths import agent_based_plugins_dir
+from cmk.utils.rulesets import RuleSetName
+from cmk.utils.version import Edition
+
+from cmk.checkengine.checking import CheckPluginName
+from cmk.checkengine.inventory import InventoryPluginName
+from cmk.checkengine.sectionparser import ParsedSectionName
 
 from cmk.base.api.agent_based.checking_classes import CheckPlugin
-from cmk.base.api.agent_based.type_defs import ParametersTypeAlias
 
 TypeLabel = Literal["check", "cluster_check", "discovery", "host_label", "inventory"]
 
-ITEM_VARIABLE = "%s"
+ITEM_VARIABLE: Final = "%s"
 
-_NONE_TYPE = type(None)
+_ALLOWED_EDITION_FOLDERS: Final = {e.short for e in Edition}
 
 
-def get_validated_plugin_module_name() -> Optional[str]:
+def get_validated_plugin_module_name() -> str:
     """Find out which module registered the plugin and make sure its in the right place"""
     # We used this before, but it was a performance killer. The method below is a lot faster.
     # calling_from = inspect.stack()[2].filename
-    frame = sys._getframe(2)
-    if not frame:
-        return None
-    calling_from = frame.f_code.co_filename
+    calling_from = sys._getframe(2).f_code.co_filename
 
     path = pathlib.Path(calling_from)
-    if not path.parent.parts[-3:] == agent_based_plugins_dir.parts[-3:]:
-        raise ImportError("do not register from %r" % path)
 
-    return path.stem
+    # watch out: this has to work in the git repo!
+    allowed_path_segment = agent_based_plugins_dir.parts[-3:]
+    if path.parent.parts[-len(allowed_path_segment) :] == allowed_path_segment:
+        return path.stem
+
+    if path.parent.parts[-len(allowed_path_segment) - 1 : -1] == allowed_path_segment:
+        if (edition := path.parent.parts[-1]) in _ALLOWED_EDITION_FOLDERS:
+            return f"{edition}.{path.stem}"
+
+    raise ImportError("do not register from %r" % path)
 
 
 def create_subscribed_sections(
-    sections: Optional[List[str]],
-    plugin_name: Union[InventoryPluginName, CheckPluginName],
-) -> List[ParsedSectionName]:
+    sections: list[str] | None,
+    plugin_name: InventoryPluginName | CheckPluginName,
+) -> list[ParsedSectionName]:
     if sections is None:
         return [ParsedSectionName(str(plugin_name))]
     if not isinstance(sections, list):
-        raise TypeError("'sections' must be a list of str, got %r" % (sections,))
+        raise TypeError(f"'sections' must be a list of str, got {sections!r}")
     if not sections:
         raise ValueError("'sections' must not be empty")
     return [ParsedSectionName(n) for n in sections]
@@ -73,8 +65,8 @@ def validate_function_arguments(
     type_label: TypeLabel,
     function: Callable,
     has_item: bool,
-    default_params: Optional[ParametersTypeAlias],
-    sections: List[ParsedSectionName],
+    default_params: ParametersTypeAlias | None,
+    sections: list[ParsedSectionName],
 ) -> None:
     """Validate the functions signature and type"""
     if not inspect.isgeneratorfunction(function):
@@ -82,13 +74,13 @@ def validate_function_arguments(
 
     expected_params = []
     if has_item:
-        expected_params.append('item')
+        expected_params.append("item")
     if default_params is not None:
-        expected_params.append('params')
+        expected_params.append("params")
     if len(sections) == 1:
-        expected_params.append('section')
+        expected_params.append("section")
     else:
-        expected_params.extend('section_%s' % s for s in sections)
+        expected_params.extend(f"section_{s}" for s in sections)
 
     parameters = inspect.signature(function).parameters
     present_params = list(parameters)
@@ -113,10 +105,10 @@ def _raise_appropriate_type_error(
     type_label: TypeLabel,
     has_item: bool,
 ) -> NoReturn:
-    # We know we must raise. Dispatch for a better error message:
+    """Raise with appropriate error message:"""
 
     if set(expected_params) == set(present_params):  # not len()!
-        exp_str = ', '.join(expected_params)
+        exp_str = ", ".join(expected_params)
         raise TypeError(f"{type_label}_function: wrong order of arguments. Expected: {exp_str}")
 
     symm_diff = set(expected_params).symmetric_difference(present_params)
@@ -126,13 +118,37 @@ def _raise_appropriate_type_error(
         raise TypeError(f"{type_label}_function: {missing_or_unexpected} 'item' argument")
 
     if "params" in symm_diff:
-        raise TypeError(f"{type_label}_function: 'params' argument expected if "
-                        "and only if default parameters are not None")
+        raise TypeError(
+            f"{type_label}_function: 'params' argument expected if "
+            "and only if default parameters are not None"
+        )
 
-    exp_str = ', '.join(expected_params)
-    act_str = ', '.join(present_params)
+    exp_str = ", ".join(expected_params)
+    act_str = ", ".join(present_params)
     raise TypeError(
-        f"{type_label}_function: expected arguments: '{exp_str}', actual arguments: '{act_str}'")
+        f"{type_label}_function: expected arguments: '{exp_str}', actual arguments: '{act_str}'"
+    )
+
+
+# Note: The concrete union type parameters below don't matter, we are just interested in the type
+# constructors of the new & old-skool unions.
+_UNION_TYPES: Final = (type(int | str), type(Union[int, str]))
+
+
+# Poor man's pattern matching on generic types ahead! Note that we see Optional as a union at
+# runtime, so no special handling is needed for it.
+def _is_optional(annotation: object) -> bool:
+    return issubclass(type(annotation), _UNION_TYPES) and type(None) in get_args(annotation)
+
+
+# Check if the given parameter has a type of the form 'Mapping[str, T | None]' for any T.
+def _is_valid_cluster_section_parameter(p: inspect.Parameter) -> bool:
+    return (
+        any(map(str(p.annotation).startswith, ("collections.abc.Mapping[", "typing.Mapping[")))
+        and (len(args := get_args(p.annotation)) == 2)
+        and issubclass(args[0], str)
+        and _is_optional(args[1])
+    )
 
 
 def _validate_optional_section_annotation(
@@ -140,27 +156,26 @@ def _validate_optional_section_annotation(
     parameters: Mapping[str, inspect.Parameter],
     type_label: TypeLabel,
 ) -> None:
-    """Validate that the section annotation is correct, if present.
+    section_parameters = [p for n, p in parameters.items() if n.startswith("section")]
 
-    We know almost nothing about the type of the section argument(s). Check the few things we know:
-
-        * If we have more than one section, all of them must be `Optional`.
-
-    """
-    section_args = [p for n, p in parameters.items() if n.startswith("section")]
-    if all(p.annotation == p.empty for p in section_args):
-        return  # no typing used in plugin
+    def validate_with(pred: Callable[[inspect.Parameter], bool], msg: str) -> None:
+        if not all(p.annotation == p.empty or pred(p) for p in section_parameters):
+            raise TypeError(f"Wrong type annotation: {msg}")
 
     if type_label == "cluster_check":
-        return  # TODO
+        validate_with(
+            _is_valid_cluster_section_parameter,
+            "cluster sections must be of type `Mapping[str, <NodeSection> | None]`",
+        )
+    elif len(section_parameters) > 1:
+        validate_with(
+            lambda p: _is_optional(p.annotation),
+            "multiple sections must be of type `<NodeSection> | None`",
+        )
 
-    if len(section_args) <= 1:
-        return  # we know nothing in this case
 
-    if any(_NONE_TYPE not in get_args(p.annotation) for p in section_args):
-        raise TypeError("Wrong type annotation: multiple sections must be `Optional`")
-
-    return
+def _value_type(annotation: inspect.Parameter) -> bytes:
+    return get_args(annotation)[1]
 
 
 class RuleSetType(enum.Enum):
@@ -169,6 +184,7 @@ class RuleSetType(enum.Enum):
     Discovery and host label functions may either use all rules of a rule set matching
     the current host, or the merged rules.
     """
+
     MERGED = enum.auto()
     ALL = enum.auto()
 
@@ -181,25 +197,24 @@ def validate_ruleset_type(ruleset_type: RuleSetType) -> None:
 
 def validate_default_parameters(
     params_type: Literal["check", "discovery", "host_label", "inventory"],
-    ruleset_name: Optional[str],
-    default_parameters: Optional[ParametersTypeAlias],
+    ruleset_name: str | None,
+    default_parameters: ParametersTypeAlias | None,
 ) -> None:
     if default_parameters is None:
         if ruleset_name is None:
             return
-        raise TypeError("missing default %s parameters for ruleset %s" %
-                        (params_type, ruleset_name))
+        raise TypeError(f"missing default {params_type} parameters for ruleset {ruleset_name}")
 
     if not isinstance(default_parameters, dict):
-        raise TypeError("default %s parameters must be dict" % (params_type,))
+        raise TypeError(f"default {params_type} parameters must be dict")
 
-    if ruleset_name is None and params_type != 'check':
-        raise TypeError("missing ruleset name for default %s parameters" % (params_type))
+    if ruleset_name is None and params_type != "check":
+        raise TypeError(f"missing ruleset name for default {params_type} parameters")
 
 
 def validate_check_ruleset_item_consistency(
     check_plugin: CheckPlugin,
-    check_plugins_by_ruleset_name: Dict[Optional[RuleSetName], List[CheckPlugin]],
+    check_plugins_by_ruleset_name: dict[RuleSetName | None, list[CheckPlugin]],
 ) -> None:
     """Validate check plugins sharing a check_ruleset_name have either all or none an item.
 
@@ -213,7 +228,7 @@ def validate_check_ruleset_item_consistency(
     if not present_check_plugins:
         return
 
-    # Trying to detect whether or not the check has an item. But this mechanism is not
+    # Try to detect whether the check has an item. But this mechanism is not
     # 100% reliable since Checkmk appends an item to the service_description when "%s"
     # is not in the checks service_description template.
     # Maybe we need to define a new rule which enforces the developer to use the %s in
@@ -226,4 +241,5 @@ def validate_check_ruleset_item_consistency(
         raise ValueError(
             f"Check ruleset {check_plugin.check_ruleset_name} has checks with and without item! "
             "At least one of the checks in this group needs to be changed "
-            f"(offending plugin: {check_plugin.name}, present_plugins: {present_plugins}).")
+            f"(offending plugin: {check_plugin.name}, present_plugins: {present_plugins})."
+        )

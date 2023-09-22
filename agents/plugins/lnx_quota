@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,20 +9,20 @@
 
 # Disable unused variable error (needed to keep track of version)
 # shellcheck disable=SC2034
-CMK_VERSION="2.1.0i1"
+CMK_VERSION="2.3.0b1"
 
-if type repquota >/dev/null ; then
+if type repquota >/dev/null; then
     echo "<<<lnx_quota>>>"
 
     # User Quota
-    for VOL in $(grep -E usr[j]?quota /etc/fstab | tr -s '\t' ' ' | cut -d' ' -f2); do
+    for VOL in $(grep -E "usr[j]?quota" /etc/fstab | tr -s '\t' ' ' | cut -d' ' -f2); do
         echo "[[[usr:$VOL]]]"
-        repquota -up $VOL | tail -n +6 | head -n -2
+        repquota -up "$VOL" | tail -n +6 | head -n -2
     done
 
     # Group Quota
-    for VOL in $(grep -E grp[j]?quota /etc/fstab | tr -s '\t' ' ' | cut -d' ' -f2); do
+    for VOL in $(grep -E "grp[j]?quota" /etc/fstab | tr -s '\t' ' ' | cut -d' ' -f2); do
         echo "[[[grp:$VOL]]]"
-        repquota -gp $VOL | tail -n +6 | head -n -2
+        repquota -gp "$VOL" | tail -n +6 | head -n -2
     done
 fi

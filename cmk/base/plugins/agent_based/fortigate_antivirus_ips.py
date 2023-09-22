@@ -1,28 +1,21 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+from collections.abc import Mapping
 from time import time
-from typing import (
-    Mapping,
-    Tuple,
-)
+
 from .agent_based_api.v1 import (
-    OIDEnd,
-    SNMPTree,
-    Service,
     check_levels,
     get_rate,
     get_value_store,
+    OIDEnd,
     register,
+    Service,
+    SNMPTree,
 )
-from .agent_based_api.v1.type_defs import (
-    DiscoveryResult,
-    CheckResult,
-    StringTable,
-)
+from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult, StringTable
 from .utils.fortinet import DETECT_FORTIGATE
 
 Section = Mapping[str, Mapping[str, int]]
@@ -37,7 +30,8 @@ def parse_fortigate_antivirus_ips(string_table: StringTable) -> Section:
         sub_table[0]: {
             "detected": int(sub_table[1]),
             "blocked": int(sub_table[2]),
-        } for sub_table in string_table
+        }
+        for sub_table in string_table
     }
 
 
@@ -47,7 +41,7 @@ def discover_fortigate_antivirus_ips(section: Section) -> DiscoveryResult:
 
 def check_fortigate_antivirus_ips(
     item: str,
-    params: Mapping[str, Tuple[float, float]],
+    params: Mapping[str, tuple[float, float]],
     section: Section,
 ) -> CheckResult:
     if item not in section:

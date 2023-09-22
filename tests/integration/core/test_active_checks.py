@@ -1,93 +1,88 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import logging
-import collections
+from collections.abc import Iterator
+
 import pytest
 
-from testlib.fixtures import web  # noqa: F401 # pylint: disable=unused-import
-
-DefaultConfig = collections.namedtuple("DefaultConfig", ["core"])
+from tests.testlib.site import Site
 
 logger = logging.getLogger(__name__)
 
 
-@pytest.fixture(name="test_cfg", scope="module", params=["nagios", "cmc"])
-def test_cfg_fixture(request, web, site):  # noqa: F811 # pylint: disable=redefined-outer-name
-    config = DefaultConfig(core=request.param)
-    site.set_config("CORE", config.core, with_restart=True)
-
+@pytest.fixture(name="test_cfg", scope="module", autouse=True)
+def test_cfg_fixture(site: Site) -> Iterator[None]:
     print("Applying default config")
-    web.add_host("test-host", attributes={
-        "ipaddress": "127.0.0.1",
-        "tag_agent": "no-agent",
-    })
+    site.openapi.create_host(
+        "test-host",
+        attributes={
+            "ipaddress": "127.0.0.1",
+            "tag_agent": "no-agent",
+        },
+    )
 
-    web.activate_changes()
-    yield config
-
-    #
-    # Cleanup code
-    #
-    print("Cleaning up test config")
-
-    web.delete_host("test-host")
-
-
-def test_active_check_execution(test_cfg, site, web):  # noqa: F811 # pylint: disable=redefined-outer-name
+    site.activate_changes_and_wait_for_core_reload()
     try:
-        web.set_ruleset(
-            "custom_checks",
-            {
-                "ruleset": {
-                    # Main folder
-                    "": [{
-                        "value": {
-                            'service_description': '\xc4ctive-Check',
-                            'command_line': 'echo "123"'
-                        },
-                        "condition": {},
-                        "options": {},
-                    },],
-                }
-            })
-        web.activate_changes()
+        yield
+    finally:
+        print("Cleaning up test config")
+        site.openapi.delete_host("test-host")
+        site.activate_changes_and_wait_for_core_reload()
 
-        site.schedule_check("test-host", u'\xc4ctive-Check', 0)
+
+@pytest.mark.usefixtures("web")
+def test_active_check_execution(site: Site) -> None:
+    rule_id = site.openapi.create_rule(
+        ruleset_name="custom_checks",
+        value={
+            "service_description": "\xc4ctive-Check",
+            "command_line": 'echo "123"',
+        },
+    )
+    try:
+        site.activate_changes_and_wait_for_core_reload()
+
+        site.schedule_check("test-host", "\xc4ctive-Check", 0)
 
         result = site.live.query_row(
-            u"GET services\nColumns: host_name description state plugin_output has_been_checked\nFilter: host_name = test-host\nFilter: description = \xc4ctive-Check"
+            "GET services\nColumns: host_name description state plugin_output has_been_checked\nFilter: host_name = test-host\nFilter: description = \xc4ctive-Check"
         )
         print("Result: %r" % result)
         assert result[4] == 1
         assert result[0] == "test-host"
-        assert result[1] == u'\xc4ctive-Check'
+        assert result[1] == "\xc4ctive-Check"
         assert result[2] == 0
         assert result[3] == "123"
     finally:
-        web.set_ruleset(
-            "custom_checks",
-            {
-                "ruleset": {
-                    "": [],  # -> folder
-                }
-            })
-        web.activate_changes()
+        site.openapi.delete_rule(rule_id)
+        site.activate_changes_and_wait_for_core_reload()
 
 
-def test_active_check_macros(test_cfg, site, web):  # noqa: F811 # pylint: disable=redefined-outer-name
+@pytest.mark.usefixtures("web")
+@pytest.mark.usefixtures("test_cfg")
+def test_active_check_macros(site: Site) -> None:
     macros = {
         "$HOSTADDRESS$": "127.0.0.1",
         "$HOSTNAME$": "test-host",
         "$_HOSTTAGS$": " ".join(
-            sorted([
-                "/wato/", "auto-piggyback", "ip-v4", "ip-v4-only", "lan", "no-agent", "no-snmp",
-                "ping", "prod",
-                "site:%s" % site.id
-            ])),
+            sorted(
+                [
+                    "/wato/",
+                    "auto-piggyback",
+                    "ip-v4",
+                    "ip-v4-only",
+                    "lan",
+                    "no-agent",
+                    "no-snmp",
+                    "ping",
+                    "prod",
+                    "site:%s" % site.id,
+                ]
+            )
+        ),
         "$_HOSTADDRESS_4$": "127.0.0.1",
         "$_HOSTADDRESS_6$": "",
         "$_HOSTADDRESS_FAMILY$": "4",
@@ -100,26 +95,19 @@ def test_active_check_macros(test_cfg, site, web):  # noqa: F811 # pylint: disab
     def descr(var):
         return "Macro %s" % var.strip("$")
 
-    ruleset = []
-    for var, value in macros.items():
-        ruleset.append({
-            "value": {
-                'service_description': descr(var),
-                'command_line': 'echo "Output: %s"' % var,
-            },
-            "condition": {},
-        })
-
+    rule_ids = []
     try:
-        web.set_ruleset(
-            "custom_checks",
-            {
-                "ruleset": {
-                    # Main folder
-                    "": ruleset,
-                }
-            })
-        web.activate_changes()
+        for var, value in macros.items():
+            rule_ids.append(
+                site.openapi.create_rule(
+                    ruleset_name="custom_checks",
+                    value={
+                        "service_description": descr(var),
+                        "command_line": 'echo "Output: %s"' % var,
+                    },
+                )
+            )
+        site.activate_changes_and_wait_for_core_reload()
 
         for var, value in macros.items():
             description = descr(var)
@@ -131,7 +119,8 @@ def test_active_check_macros(test_cfg, site, web):  # noqa: F811 # pylint: disab
                 "GET services\n"
                 "Columns: host_name description state plugin_output has_been_checked\n"
                 "Filter: host_name = test-host\n"
-                "Filter: description = %s\n" % description)
+                "Filter: description = %s\n" % description
+            )
 
             logger.info(row)
             name, description, state, plugin_output, has_been_checked = row
@@ -142,21 +131,17 @@ def test_active_check_macros(test_cfg, site, web):  # noqa: F811 # pylint: disab
 
             expected_output = "Output: %s" % value
             # TODO: Cleanup difference between nagios/cmc
-            if test_cfg.core == "nagios":
+            if site.core_name() == "nagios":
                 expected_output = expected_output.strip()
                 if var == "$_HOSTTAGS$":
                     splitted_output = plugin_output.split(" ")
                     plugin_output = splitted_output[0] + " " + " ".join(sorted(splitted_output[1:]))
 
-            assert expected_output == plugin_output, \
-                "Macro %s has wrong value (%r instead of %r)" % (var, plugin_output, expected_output)
+            assert (
+                expected_output == plugin_output
+            ), f"Macro {var} has wrong value ({plugin_output!r} instead of {expected_output!r})"
 
     finally:
-        web.set_ruleset(
-            "custom_checks",
-            {
-                "ruleset": {
-                    "": [],  # -> folder
-                }
-            })
-        web.activate_changes()
+        for rule_id in rule_ids:
+            site.openapi.delete_rule(rule_id)
+        site.activate_changes_and_wait_for_core_reload()

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """F5-BIGIP Commons
@@ -20,12 +19,11 @@ False
 True
 """
 
-from ..agent_based_api.v1 import (
-    all_of,
-    contains,
-    matches,
-    not_matches,
-)
+from typing import Literal
+
+from typing_extensions import TypedDict
+
+from ..agent_based_api.v1 import all_of, contains, matches, not_matches
 
 OID_sysObjectID = ".1.3.6.1.2.1.1.2.0"
 OID_F5_BIG_IP_bigipTrafficMgmt = ".1.3.6.1.4.1.3375.2"
@@ -50,3 +48,13 @@ VERSION_V11_PLUS = matches(OID_F5_BIG_IP_sysProductVersion, VERSION_GE_V11_PATTE
 F5_BIGIP_CLUSTER_CHECK_DEFAULT_PARAMETERS = {
     "type": "active_standby",
 }
+
+AllStates = Literal[0, 1, 2, 3, 4]
+
+
+class _F5BigipClusterStatusVSResultRequired(TypedDict, total=False):
+    type: Literal["active_standby", "active_active"]
+
+
+class F5BigipClusterStatusVSResult(_F5BigipClusterStatusVSResultRequired):
+    v11_2_states: dict[AllStates, AllStates]

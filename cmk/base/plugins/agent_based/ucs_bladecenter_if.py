@@ -1,21 +1,11 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import (
-    Dict,
-    Union,
-)
-from .agent_based_api.v1 import (
-    register,
-    type_defs,
-)
-from .utils import (
-    interfaces,
-    ucs_bladecenter,
-)
+
+from .agent_based_api.v1 import register, type_defs
+from .utils import interfaces, ucs_bladecenter
 
 # <<ucs_bladecenter_if:sep(9)>>>
 # fcStats Dn sys/switch-A/slot-1/switch-fc/port-37/stats  BytesRx 2411057759048   BytesTx 1350394110752   Suspect no
@@ -95,70 +85,70 @@ from .utils import (
 # Specify which values are to put into the resulting interface
 _UCS_FIELDS_TO_IF_FIELDS = {
     "fibrechannel": {
-        'in_octets': [("fcStats", "BytesRx")],
-        'in_ucast': [("fcStats", "PacketsRx")],
-        'in_discards': [("fcErrStats", "DiscardRx")],
-        'in_errors': [("fcErrStats", "Rx"), ("fcErrStats", "CrcRx")],
-        'out_octets': [("fcStats", "BytesTx")],
-        'out_ucast': [("fcStats", "PacketsTx")],
-        'out_discards': [("fcErrStats", "DiscardTx")],
-        'out_errors': [("fcErrStats", "Tx")]
+        "in_octets": [("fcStats", "BytesRx")],
+        "in_ucast": [("fcStats", "PacketsRx")],
+        "in_disc": [("fcErrStats", "DiscardRx")],
+        "in_err": [("fcErrStats", "Rx"), ("fcErrStats", "CrcRx")],
+        "out_octets": [("fcStats", "BytesTx")],
+        "out_ucast": [("fcStats", "PacketsTx")],
+        "out_disc": [("fcErrStats", "DiscardTx")],
+        "out_err": [("fcErrStats", "Tx")],
     },
     "ethernet": {
-        'in_octets': [("etherRxStats", "TotalBytes")],
-        'in_ucast': [("etherRxStats", "UnicastPackets")],
-        'in_mcast': [("etherRxStats", "MulticastPackets")],
-        'in_bcast': [("etherRxStats", "BroadcastPackets")],
-        'in_errors': [("etherErrStats", "Rcv")],
-        'out_octets': [("etherTxStats", "TotalBytes")],
-        'out_ucast': [("etherTxStats", "UnicastPackets")],
-        'out_mcast': [("etherTxStats", "MulticastPackets")],
-        'out_bcast': [("etherTxStats", "BroadcastPackets")],
-        'out_discards': [("etherErrStats", "OutDiscard")],
+        "in_octets": [("etherRxStats", "TotalBytes")],
+        "in_ucast": [("etherRxStats", "UnicastPackets")],
+        "in_mcast": [("etherRxStats", "MulticastPackets")],
+        "in_bcast": [("etherRxStats", "BroadcastPackets")],
+        "in_err": [("etherErrStats", "Rcv")],
+        "out_octets": [("etherTxStats", "TotalBytes")],
+        "out_ucast": [("etherTxStats", "UnicastPackets")],
+        "out_mcast": [("etherTxStats", "MulticastPackets")],
+        "out_bcast": [("etherTxStats", "BroadcastPackets")],
+        "out_disc": [("etherErrStats", "OutDiscard")],
     },
     "interconnect": {
-        'in_octets': [("etherRxStats", "TotalBytes")],
-        'in_ucast': [("etherRxStats", "UnicastPackets")],
-        'in_mcast': [("etherRxStats", "MulticastPackets")],
-        'in_bcast': [("etherRxStats", "BroadcastPackets")],
-        'in_errors': [("etherErrStats", "Rcv")],
-        'out_octets': [("etherTxStats", "TotalBytes")],
-        'out_ucast': [("etherTxStats", "UnicastPackets")],
-        'out_mcast': [("etherTxStats", "MulticastPackets")],
-        'out_bcast': [("etherTxStats", "BroadcastPackets")],
-        'out_discards': [("etherErrStats", "OutDiscard")],
-    }
+        "in_octets": [("etherRxStats", "TotalBytes")],
+        "in_ucast": [("etherRxStats", "UnicastPackets")],
+        "in_mcast": [("etherRxStats", "MulticastPackets")],
+        "in_bcast": [("etherRxStats", "BroadcastPackets")],
+        "in_err": [("etherErrStats", "Rcv")],
+        "out_octets": [("etherTxStats", "TotalBytes")],
+        "out_ucast": [("etherTxStats", "UnicastPackets")],
+        "out_mcast": [("etherTxStats", "MulticastPackets")],
+        "out_bcast": [("etherTxStats", "BroadcastPackets")],
+        "out_disc": [("etherErrStats", "OutDiscard")],
+    },
 }
 
 
-def parse_ucs_bladecenter_if(string_table: type_defs.StringTable) -> interfaces.Section:
-    """
-    >>> from pprint import pprint
-    >>> pprint(parse_ucs_bladecenter_if([
-    ... ['fcStats', 'Dn sys/switch-B/slot-1/switch-fc/port-5/stats', 'BytesRx 6000859585097280', 'BytesTx 11433477817196880', 'PacketsRx 3199011900400260', 'PacketsTx 2858352274430040', 'Suspect no'],
-    ... ['fcStats', 'Dn sys/switch-A/slot-1/switch-fc/port-5/stats', 'BytesRx 6269002983258720', 'BytesTx 11970108210903360', 'PacketsRx 3349919871277380', 'PacketsTx 2992509872856660', 'Suspect no'],
-    ... ['fcErrStats', 'Dn sys/switch-B/slot-1/switch-fc/port-5/err-stats', 'Rx 714588068607510', 'Tx 0', 'CrcRx 0', 'DiscardRx 0', 'DiscardTx 0'],
-    ... ['fcErrStats', 'Dn sys/switch-A/slot-1/switch-fc/port-5/err-stats', 'Rx 748131763181460', 'Tx 0', 'CrcRx 0', 'DiscardRx 0', 'DiscardTx 0'],
-    ... ['fabricFcSanEp', 'Dn fabric/san/A/phys-slot-1-port-5', 'EpDn sys/switch-A/slot-1/switch-fc/port-5', 'AdminState disabled', 'OperState up', 'PortId 5', 'SwitchId A', 'SlotId 1'],
-    ... ['fabricFcSanEp', 'Dn fabric/san/B/phys-slot-1-port-5', 'EpDn sys/switch-B/slot-1/switch-fc/port-5', 'AdminState disabled', 'OperState up', 'PortId 5', 'SwitchId B', 'SlotId 1'],
-    ... ]))
-    [Interface(index='0', descr='Slot 1 FC-Switch A Port 5', alias='Slot 1 FC-Switch A Port 5', type='6', speed=0, oper_status='2', in_octets=6269002983258720, in_ucast=3349919871277380, in_mcast=0, in_bcast=0, in_discards=0, in_errors=748131763181460, out_octets=11970108210903360, out_ucast=2992509872856660, out_mcast=0, out_bcast=0, out_discards=0, out_errors=0, out_qlen=0, phys_address='', oper_status_name='down', speed_as_text='', group=None, node=None, admin_status=None, total_octets=18239111194162080),
-     Interface(index='1', descr='Slot 1 FC-Switch B Port 5', alias='Slot 1 FC-Switch B Port 5', type='6', speed=0, oper_status='2', in_octets=6000859585097280, in_ucast=3199011900400260, in_mcast=0, in_bcast=0, in_discards=0, in_errors=714588068607510, out_octets=11433477817196880, out_ucast=2858352274430040, out_mcast=0, out_bcast=0, out_discards=0, out_errors=0, out_qlen=0, phys_address='', oper_status_name='down', speed_as_text='', group=None, node=None, admin_status=None, total_octets=17434337402294160)]
-    """
+def parse_ucs_bladecenter_if(
+    string_table: type_defs.StringTable,
+) -> interfaces.Section[interfaces.InterfaceWithCounters]:
     data = ucs_bladecenter.generic_parse(string_table)
     converted = []
     last_index = 0
     for what, group_prefix, ifaces, item_template in [
-        ("fibrechannel", "Fibrechannel-Group", _parse_fc_interfaces(data),
-         "Slot %s FC-Switch %s Port %s"),
+        (
+            "fibrechannel",
+            "Fibrechannel-Group",
+            _parse_fc_interfaces(data),
+            "Slot %s FC-Switch %s Port %s",
+        ),
         ("ethernet", "Ethernet-Group", _parse_eth_interfaces(data), "Slot %s Switch %s Port %s"),
-        ("interconnect", "Interconnect-Group", _parse_icnt_interfaces(data),
-         "Slot %s IC-Switch %s Port %s"),
+        (
+            "interconnect",
+            "Interconnect-Group",
+            _parse_icnt_interfaces(data),
+            "Slot %s IC-Switch %s Port %s",
+        ),
     ]:
         index = 0
         for index, (_name, values) in enumerate(ifaces.items()):
-            item = item_template % (values.get("SlotId"), values.get("SwitchId"),
-                                    values.get("PortId"))
+            item = item_template % (
+                values.get("SlotId"),
+                values.get("SwitchId"),
+                values.get("PortId"),
+            )
             iface_index = str(last_index + index)
 
             # Interfaces in portchannels are grouped by setting the group-attribute of
@@ -170,37 +160,48 @@ def parse_ucs_bladecenter_if(string_table: type_defs.StringTable) -> interfaces.
 
                 group = group_prefix + " " + port_name
                 speed = values["portchannel"].get("AdminSpeed") or values["portchannel"].get(
-                    "OperSpeed", "")
+                    "OperSpeed", ""
+                )
                 # It looks like that the AdminSpeed of a portchannel is the speed of one member
                 # speed = str(int(float(speed.replace("gbps", "000000000")) / values["portchannel"]["members"]))
-                is_up = values["portchannel"].get(
-                    "AdminState", "disabled") == "enabled" and values["portchannel"].get(
-                        "OperState", "down") == "up"
+                is_up = (
+                    values["portchannel"].get("AdminState", "disabled") == "enabled"
+                    and values["portchannel"].get("OperState", "down") == "up"
+                )
             else:
                 group = None
                 speed = values.get("AdminSpeed", "")
-                is_up = values.get("AdminState", "disabled") == "enabled" and values.get(
-                    "OperState", "down") == "up"
+                is_up = (
+                    values.get("AdminState", "disabled") == "enabled"
+                    and values.get("OperState", "down") == "up"
+                )
 
             speed = speed.replace("gbps", "000000000")
 
-            iface = interfaces.Interface(
-                index=iface_index,
-                descr=item,
-                alias=item,
-                # This means Ethernet. We should set the real type here, but 56 is currently not
-                # supported.
-                type='6',
-                speed=interfaces.saveint(speed),
-                oper_status=is_up and "1" or "2",
-                group=group,
+            iface = interfaces.InterfaceWithCounters(
+                interfaces.Attributes(
+                    index=iface_index,
+                    descr=item,
+                    alias=item,
+                    # This means Ethernet. We should set the real type here, but 56 is currently not
+                    # supported.
+                    type="6",
+                    speed=interfaces.saveint(speed),
+                    oper_status=is_up and "1" or "2",
+                    group=group,
+                ),
                 # On summing keys there is a possiblility to overlook some counter wraps.
                 # Right now, it's only Recv-Errors (therefore unlikely). We can live with that
-                **{  # type: ignore[arg-type]
-                    iface_field: sum(
-                        int(values[ctr_class].get(ctr_key, "0")) for ctr_class, ctr_key in ctr_keys)
-                    for iface_field, ctr_keys in _UCS_FIELDS_TO_IF_FIELDS[what].items()
-                })
+                interfaces.Counters(
+                    **{
+                        iface_field: sum(
+                            int(values[ctr_class].get(ctr_key, "0"))
+                            for ctr_class, ctr_key in ctr_keys
+                        )
+                        for iface_field, ctr_keys in _UCS_FIELDS_TO_IF_FIELDS[what].items()
+                    },
+                ),
+            )
 
             converted.append(iface)
 
@@ -224,7 +225,7 @@ def _extract_counters(
     return ifaces
 
 
-PleaseDont = Dict[str, Dict[str, Union[str, Dict[str, str]]]]
+PleaseDont = dict[str, dict[str, str | dict[str, str]]]
 
 
 def _parse_fc_interfaces(data):
@@ -298,7 +299,7 @@ def _parse_icnt_interfaces(data):
 
 
 register.agent_section(
-    name='ucs_bladecenter_if',
+    name="ucs_bladecenter_if",
     parse_function=parse_ucs_bladecenter_if,
     parsed_section_name="interfaces",
 )

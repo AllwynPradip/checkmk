@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -18,22 +17,16 @@
 
 # <<<chrony>>>
 # 506 Cannot talk to daemon
-from typing import Any, Dict
+from calendar import timegm
+from time import strptime, time
+from typing import Any
 
-from .agent_based_api.v1 import check_levels, register, Result, Service, State as state
+from .agent_based_api.v1 import check_levels, register, render, Result, Service, State
 
 
 def parse_chrony(string_table):
     """
     parse info list into dictionary
-
-    >>> import pprint
-    >>> pprint.pprint(parse_chrony([
-    ...     ['Reference', 'ID', ':', '0.0.0.0', '()'],
-    ...     ['Stratum', ':', '0'],
-    ...     ['Ref', 'time', '(UTC)', ':', 'Thu', 'Jan', '1', '00:00:00', '1970'],
-    ... ]))
-    {'Reference ID': '0.0.0.0 ()', 'Stratum': 0, 'address': '()'}
 
     :param string_table: chrony output as lists
     :return: dictionary
@@ -41,19 +34,19 @@ def parse_chrony(string_table):
     if is_error_message(string_table):
         return {"error": " ".join(string_table[0])}
 
-    parsed: Dict[str, Any] = {}
+    parsed: dict[str, Any] = {}
     for line in string_table:
         if ":" in line:
-            key, value = [e.strip() for e in " ".join(line).split(":", 1)]
+            key, value = (e.strip() for e in " ".join(line).split(":", 1))
             if key == "Reference ID":
                 parsed[key] = value
                 try:
-                    parsed['address'] = value.split(' ')[1]
+                    parsed["address"] = value.split(" ")[1]
                 except IndexError:
                     pass
             elif key == "System time":
                 try:
-                    parsed[key] = float(value.split(' ')[0]) * 1000
+                    parsed[key] = float(value.split(" ")[0]) * 1000
                 except ValueError:
                     pass
             elif key == "Stratum":
@@ -61,11 +54,16 @@ def parse_chrony(string_table):
                     parsed[key] = int(value)
                 except ValueError:
                     pass
+            elif key == "Ref time (UTC)":
+                try:
+                    parsed["last_sync"] = time() - timegm(strptime(value))
+                except ValueError:
+                    pass
 
     return parsed or None
 
 
-def is_error_message(info):
+def is_error_message(info) -> bool:  # type: ignore[no-untyped-def]
     return len(info) == 1 and isinstance(info[0], list) and ":" not in info[0][0]
 
 
@@ -91,32 +89,26 @@ def check_chrony(params, section_chrony, section_ntp):
     check if sys_time_offset_offset is in range
     check if stratum is too high
     """
-    if "error" in section_chrony:
-        yield Result(state=state.CRIT, summary="%s" % section_chrony["error"])
+    if not section_chrony:
         return
 
-    if isinstance(params, tuple):
-        params = {
-            "ntp_levels": params,
-            "alert_delay": (300, 3600),
-        }
-    crit_stratum, warn, crit = params["ntp_levels"]
+    if "error" in section_chrony:
+        yield Result(state=State.CRIT, summary="%s" % section_chrony["error"])
+        return
 
-    ref_id = section_chrony.get("Reference ID")
     address = section_chrony.get("address")
-    sys_time_offset = section_chrony.get("System time")
-    stratum = section_chrony.get("Stratum")
-
     if address in (None, "", "()"):
         # if brackets are empty, NTP servers are unreachable
         address = "unreachable"
-
+    ref_id = section_chrony.get("Reference ID")
     yield Result(
-        state=state.WARN if address == "unreachable" else state.OK,
+        state=State.WARN if address == "unreachable" else State.OK,
         notice=f"NTP servers: {address}\nReference ID: {ref_id}",
     )
 
-    if sys_time_offset is not None:
+    crit_stratum, warn, crit = params["ntp_levels"]
+
+    if (sys_time_offset := section_chrony.get("System time")) is not None:
         yield from check_levels(
             abs(sys_time_offset),
             levels_upper=(warn, crit),
@@ -126,7 +118,7 @@ def check_chrony(params, section_chrony, section_ntp):
             boundaries=(0, None),
         )
 
-    if stratum is not None:
+    if (stratum := section_chrony.get("Stratum")) is not None:
         yield from check_levels(
             stratum,
             levels_upper=(crit_stratum, crit_stratum),
@@ -134,6 +126,24 @@ def check_chrony(params, section_chrony, section_ntp):
             label="Stratum",
             boundaries=(0, None),
         )
+
+    if (last_sync := section_chrony.get("last_sync")) is not None:
+        if last_sync >= 0:
+            yield from check_levels(
+                last_sync,
+                levels_upper=params["alert_delay"],
+                render_func=render.timespan,
+                label="Time since last sync",
+                boundaries=(0, None),
+            )
+        else:
+            yield Result(
+                state=State.OK,
+                summary=(
+                    f"Last synchronization appears to be {render.timespan(-last_sync)}"
+                    " in the future (check your system time)"
+                ),
+            )
 
 
 register.check_plugin(
@@ -144,7 +154,7 @@ register.check_plugin(
     check_function=check_chrony,
     check_default_parameters={
         "ntp_levels": (10, 200.0, 500.0),
-        "alert_delay": (300, 3600),
+        "alert_delay": (1800, 3600),  # chronys default maxpoll is 10 (1024s)
     },
     check_ruleset_name="ntp_time",
 )

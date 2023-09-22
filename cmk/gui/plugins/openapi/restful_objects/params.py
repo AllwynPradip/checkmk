@@ -1,29 +1,30 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2020 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2020 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import re
-import warnings
 from collections import abc
-from typing import Dict, ItemsView, List, Optional, Sequence, Type, Union
+from collections.abc import ItemsView, Sequence
 
-from marshmallow import fields, Schema
+from marshmallow import Schema
 
-from cmk.gui.plugins.openapi.restful_objects.datastructures import denilled
+from cmk.utils.datastructures import denilled
+
+from cmk.gui.fields.utils import BaseSchema
 from cmk.gui.plugins.openapi.restful_objects.type_defs import (
     LocationType,
     OpenAPIParameter,
     RawParameter,
     translate_to_openapi_keys,
 )
-from cmk.gui.plugins.openapi.utils import BaseSchema
+
+from cmk import fields
 
 PARAM_RE = re.compile(r"{([a-z][a-z0-9_]*)}")
 
 
-def path_parameters(path: str) -> List[str]:
+def path_parameters(path: str) -> list[str]:
     """Give all variables from a path-template.
 
     Examples:
@@ -43,7 +44,7 @@ def path_parameters(path: str) -> List[str]:
 
 
 def to_openapi(
-    params: Optional[Union[RawParameter, Sequence[RawParameter]]],
+    params: RawParameter | Sequence[RawParameter] | None,
     location: LocationType,
 ) -> Sequence[OpenAPIParameter]:
     """Put the 'in' key into a all parameters in a list.
@@ -100,16 +101,16 @@ def to_openapi(
     if not isinstance(params, list):
         raise ValueError("Needs to be a sequence of parameters.")
 
-    def _is_field_param(dict_):
+    def _is_field_param(dict_) -> bool:  # type: ignore[no-untyped-def]
         return all(isinstance(value, fields.Field) for value in dict_.values())
 
-    def _is_schema_class(klass):
+    def _is_schema_class(klass) -> bool:  # type: ignore[no-untyped-def]
         try:
             return issubclass(klass, Schema)
         except TypeError:
             return False
 
-    result: List[OpenAPIParameter] = []
+    result: list[OpenAPIParameter] = []
     _fields: ItemsView[str, fields.Field]
     for raw_param in params:
         if _is_schema_class(raw_param):
@@ -123,28 +124,32 @@ def to_openapi(
             raise ValueError(f"Don't recognize parameter of form: {raw_param!r}")
 
         for name, field in _fields:
-            metadata = denilled({
-                'description': field.metadata.get('description'),
-                'example': field.metadata.get('example'),
-                'required': field.required,
-                'allow_empty': field.allow_none,
-                'schema_enum': field.metadata.get('enum'),
-                'schema_string_format': field.metadata.get('format'),
-                'schema_string_pattern': field.metadata.get('pattern'),
-                'schema_num_minimum': field.metadata.get('minimum'),
-                'schema_num_maximum': field.metadata.get('maximum'),
-            })
+            metadata = denilled(
+                {
+                    "description": field.metadata.get("description"),
+                    "example": field.metadata.get("example"),
+                    "required": field.required,
+                    "allow_empty": field.allow_none,
+                    "schema_enum": field.metadata.get("enum"),
+                    "schema_string_format": field.metadata.get("format"),
+                    "schema_string_pattern": field.metadata.get("pattern"),
+                    "schema_num_minimum": field.metadata.get("minimum"),
+                    "schema_num_maximum": field.metadata.get("maximum"),
+                }
+            )
+            # Waiting for:
+            # PEP 692 – Using TypedDict for more precise **kwargs typing
+            # https://peps.python.org/pep-0692/
             param = translate_to_openapi_keys(
                 name=name,
                 location=location,
-                **metadata,
+                **metadata,  # type: ignore[arg-type]
             )
             result.append(param)
     return result
 
 
-def to_schema(
-        params: Optional[Union[Sequence[RawParameter], RawParameter]]) -> Optional[Type[Schema]]:
+def to_schema(params: Sequence[RawParameter] | RawParameter | None) -> type[Schema] | None:
     """
     Examples:
 
@@ -192,15 +197,17 @@ def to_schema(
         A marshmallow schema with all the fields unified
 
     """
+
     def _validate_fields(name, dict_):
         for key, field in dict_.items():
-            if 'description' not in field.metadata:
-                if name.startswith("BI"):
-                    warnings.warn(f"{name}: field {key} has no description.")
-                else:
-                    raise ValueError(f"{name}: field {key} has no description."
-                                     f"\n\n{field.metadata!r}"
-                                     f"\n\n{dict_!r}")
+            if "description" not in field.metadata:
+                # FIXME: Add descriptions to all BI fields and schemas
+                if not name.startswith("BI"):
+                    raise ValueError(
+                        f"{name}: field {key} has no description."
+                        f"\n\n{field.metadata!r}"
+                        f"\n\n{dict_!r}"
+                    )
 
     def _from_dict(dict_):
         needs_validating = False
@@ -209,7 +216,7 @@ def to_schema(
                 needs_validating = True
 
         if needs_validating:
-            _validate_fields('dict', dict_)
+            _validate_fields("dict", dict_)
         schema_class = BaseSchema.from_dict(dict_)
         assert issubclass(schema_class, BaseSchema)
         return schema_class
@@ -218,7 +225,7 @@ def to_schema(
         return None
 
     if isinstance(params, abc.Sequence):
-        p: Dict[str, fields.Field] = {}
+        p: dict[str, fields.Field] = {}
         for entry in params:
             if isinstance(entry, abc.Mapping):
                 p.update(entry)
@@ -236,7 +243,7 @@ def to_schema(
 
 def fill_out_path_template(
     orig_path: str,
-    parameters: Dict[str, OpenAPIParameter],
+    parameters: dict[str, OpenAPIParameter],
 ) -> str:
     """Fill out a simple template.
 
@@ -263,8 +270,8 @@ def fill_out_path_template(
             raise ValueError(f"Parameter {path_param!r} needed, but not supplied in {parameters!r}")
 
         param_spec = parameters[path_param]
-        if 'example' not in param_spec:
+        if "example" not in param_spec:
             raise ValueError(f"Parameter {path_param!r} of path {orig_path!r} has no example.")
 
-        path = path.replace("{" + path_param + "}", param_spec['example'])
+        path = path.replace("{" + path_param + "}", param_spec["example"])
     return path

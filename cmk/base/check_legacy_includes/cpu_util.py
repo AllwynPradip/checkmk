@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# type: ignore[list-item,import,assignment,misc,operator]  # TODO: see which are needed in this file
 import time
 
-from cmk.base.check_api import clear_item_state
-from cmk.base.check_api import MKCounterWrapped
-from cmk.base.check_api import get_age_human_readable
-from cmk.base.check_api import get_percent_human_readable
-from cmk.base.check_api import get_average
-from cmk.base.check_api import get_rate
-from cmk.base.check_api import set_item_state, get_item_state
-from cmk.base.check_api import check_levels
+import cmk.base.plugins.agent_based.utils.cpu_util as cpu_util
+from cmk.base.check_api import check_levels, get_age_human_readable
+from cmk.base.plugins.agent_based.agent_based_api.v1 import (
+    get_average,
+    get_value_store,
+    IgnoreResultsError,
+    render,
+)
+
 # Common file for all (modern) checks that check CPU utilization (not load!)
 
 # Example for check parameters:
@@ -37,8 +36,6 @@ from cmk.base.check_api import check_levels
 #     THERE ARE MORE FUNCTIONS IN IT THAT THE ONES USED BELOW!                           #
 #                                                                                        #
 
-import cmk.base.plugins.agent_based.utils.cpu_util as cpu_util
-
 cpu_util_core_name = cpu_util.core_name
 CPUInfo = cpu_util.CPUInfo
 
@@ -50,13 +47,14 @@ CPUInfo = cpu_util.CPUInfo
 
 # ALREADY MIGRATED
 def util_counter(stats: CPUInfo, this_time: float) -> CPUInfo:
+    value_store = get_value_store()
     # Compute jiffi-differences of all relevant counters
     diff_values = []
     for n, v in enumerate(stats[1:], start=1):
         countername = "cpu.util.%d" % n
-        last_val = get_item_state(countername, (0, 0))[1]
+        last_val = value_store.get(countername, (0, 0))[1]
         diff_values.append(v - last_val)
-        set_item_state(countername, (this_time, v))
+        value_store[countername] = this_time, v
 
     return CPUInfo(stats.name, *diff_values)
 
@@ -77,7 +75,7 @@ def check_cpu_util(util, params, this_time=None, cores=None, perf_max=100):
     # 'levels is None' means: Do not impose levels
     # 'util' from default levels
     if "levels" in params and "util" in params:
-        levels = params.get('levels')
+        levels = params.get("levels")
     else:
         levels = params.get("util")
         if levels is None:  # legacy rules before 1.6
@@ -88,47 +86,66 @@ def check_cpu_util(util, params, this_time=None, cores=None, perf_max=100):
 
     # Averaging
     if "average" in params:
-        util_avg = get_average("cpu_utilization.avg", this_time, util, params["average"])
+        util_avg = get_average(
+            get_value_store(), "cpu_utilization.avg", this_time, util, params["average"]
+        )
         perfdata.append(("util_average", util_avg, warn, crit, 0, perf_max))
-        state, infotext, extraperf = check_levels(util_avg,
-                                                  "util_average",
-                                                  levels,
-                                                  human_readable_func=get_percent_human_readable,
-                                                  infoname="Total CPU (%dmin average)" %
-                                                  params["average"])
+        state, infotext, extraperf = check_levels(
+            util_avg,
+            "util_average",
+            levels,
+            human_readable_func=render.percent,
+            infoname="Total CPU (%dmin average)" % params["average"],
+        )
     else:
-        state, infotext, extraperf = check_levels(util,
-                                                  "util",
-                                                  levels,
-                                                  human_readable_func=get_percent_human_readable,
-                                                  infoname="Total CPU")
+        state, infotext, extraperf = check_levels(
+            util,
+            "util",
+            levels,
+            human_readable_func=render.percent,
+            infoname="Total CPU",
+        )
 
-    perfdata += extraperf[1:]  # reference curve for predictive levels
+    perfdata += extraperf[1:]  # type: ignore[arg-type] # reference curve for predictive levels
     yield state, infotext, perfdata
 
     if "core_util_time_total" in params:
         threshold, warn, crit = params["core_util_time_total"]
         yield cpu_util_time(this_time, "total", util, threshold, warn, crit)
 
-    if cores and any(x in params for x in [
+    if cores and any(
+        x in params
+        for x in [
             "average_single",
             "core_util_graph",
             "core_util_time",
             "levels_single",
-    ]):
+        ]
+    ):
         for core_index, (core, total_perc) in enumerate(cores):
             yield from _util_perfdata(core, total_perc, core_index, this_time, params)
 
 
 # ALREADY MIGRATED
-def check_cpu_util_unix(values: CPUInfo, params, cores=None, values_counter=True):
+def check_cpu_util_unix(  # type: ignore[no-untyped-def]
+    values: CPUInfo, params, cores=None, values_counter=True
+):
     this_time = time.time()
+    value_store = get_value_store()
+
     if values_counter:
         diff_values = util_counter(values, this_time)
         sum_jiffies = diff_values.total_sum
         if sum_jiffies == 0:
-            raise MKCounterWrapped("Too short time difference since last check")
-        user_perc, system_perc, wait_perc, steal_perc, guest_perc, util_total_perc = diff_values.utils_perc
+            raise IgnoreResultsError("Too short time difference since last check")
+        (
+            user_perc,
+            system_perc,
+            wait_perc,
+            steal_perc,
+            guest_perc,
+            util_total_perc,
+        ) = diff_values.utils_perc
     else:
         user_perc = values.user
         system_perc = values.system
@@ -137,56 +154,55 @@ def check_cpu_util_unix(values: CPUInfo, params, cores=None, values_counter=True
         guest_perc = values.guest
         util_total_perc = values.util_total
 
-    yield check_levels(user_perc,
-                       'user',
-                       None,
-                       human_readable_func=get_percent_human_readable,
-                       infoname="User")
-    yield check_levels(system_perc,
-                       'system',
-                       None,
-                       human_readable_func=get_percent_human_readable,
-                       infoname="System")
-    yield check_levels(wait_perc,
-                       'wait',
-                       params.get('iowait'),
-                       human_readable_func=get_percent_human_readable,
-                       infoname="Wait")
+    yield check_levels(user_perc, "user", None, human_readable_func=render.percent, infoname="User")
+    yield check_levels(
+        system_perc,
+        "system",
+        None,
+        human_readable_func=render.percent,
+        infoname="System",
+    )
+    yield check_levels(
+        wait_perc,
+        "wait",
+        params.get("iowait"),
+        human_readable_func=render.percent,
+        infoname="Wait",
+    )
 
     # Compute values used in virtualized environments (Xen, etc.)
     # Only do this for counters that have counted at least one tick
     # since the system boot. This avoids silly output in systems
     # where these counters are not being used
     if values.steal:
-        yield check_levels(steal_perc,
-                           "steal",
-                           params.get('steal'),
-                           human_readable_func=get_percent_human_readable,
-                           infoname="Steal")
+        yield check_levels(
+            steal_perc,
+            "steal",
+            params.get("steal"),
+            human_readable_func=render.percent,
+            infoname="Steal",
+        )
 
     if values.guest:
-        yield check_levels(guest_perc,
-                           'guest',
-                           None,
-                           human_readable_func=get_percent_human_readable,
-                           infoname="Guest")
+        yield check_levels(
+            guest_perc,
+            "guest",
+            None,
+            human_readable_func=render.percent,
+            infoname="Guest",
+        )
 
     summary_cores = []
     if cores:
         for core in cores:
-            prev_total = get_item_state("cpu.util.%s.total" % core.name, 0)
+            prev_total = value_store.get("cpu.util.%s.total" % core.name, 0)
             util_total = core.util_total
             total_diff = util_total - prev_total
-            set_item_state("cpu.util.%s.total" % core.name, util_total)
+            value_store[f"cpu.util.{core.name}.total"] = util_total
             total_perc = (100.0 * total_diff / sum_jiffies) * len(cores)
             summary_cores.append((core.name, total_perc))
 
-    for check_result in check_cpu_util(util_total_perc,
-                                       params,
-                                       this_time,
-                                       summary_cores,
-                                       perf_max=None):
-        yield check_result
+    yield from check_cpu_util(util_total_perc, params, this_time, summary_cores, perf_max=None)
 
 
 # ALREADY MIGRATED
@@ -195,7 +211,7 @@ def _check_single_core_util(util, metric, levels, infoname):
         util,
         metric,
         levels,
-        human_readable_func=get_percent_human_readable,
+        human_readable_func=render.percent,
         infoname=infoname,
     )
     if not state:
@@ -206,24 +222,25 @@ def _check_single_core_util(util, metric, levels, infoname):
 
 # ALREADY MIGRATED
 def _util_perfdata(core, total_perc, core_index, this_time, params):
-
     if "core_util_time" in params:
         threshold, warn, crit = params["core_util_time"]
         yield cpu_util_time(this_time, core, total_perc, threshold, warn, crit)
 
-    config_single_avg = params.get('average_single', {})
+    config_single_avg = params.get("average_single", {})
 
+    metric_raw: str | None
+    metric_avg: str | None
     metric_raw, metric_avg = cpu_util_core_name(core, core_index)
     if not params.get("core_util_graph"):
         metric_raw = None
-    if not config_single_avg.get('show_graph'):
+    if not config_single_avg.get("show_graph"):
         metric_avg = None
 
-    if config_single_avg.get('apply_levels'):
+    if config_single_avg.get("apply_levels"):
         levels_raw = None
-        levels_avg = params.get('levels_single')
+        levels_avg = params.get("levels_single")
     else:
-        levels_raw = params.get('levels_single')
+        levels_raw = params.get("levels_single")
         levels_avg = None
 
     yield from _check_single_core_util(
@@ -233,10 +250,11 @@ def _util_perfdata(core, total_perc, core_index, this_time, params):
         "Core %s" % core,
     )
 
-    time_avg = config_single_avg.get('time_average')
+    time_avg = config_single_avg.get("time_average")
     if time_avg:
         yield from _check_single_core_util(
             get_average(
+                get_value_store(),
                 "cpu_utilization_%d.avg" % core_index,
                 this_time,
                 total_perc,
@@ -246,21 +264,6 @@ def _util_perfdata(core, total_perc, core_index, this_time, params):
             levels_avg,
             "Core %s (%d-min average)" % (core, time_avg),
         )
-
-
-# not yet migrated!
-def check_cpu_util_linux_container(_no_item, params, parsed):
-    con_ticks = parsed.get("container_ticks")
-    sys_ticks = parsed.get("system_ticks")
-    num_cpus = parsed.get("num_cpus")
-    if None in (con_ticks, sys_ticks, num_cpus):
-        return
-
-    cpu_tick_rate = get_rate("container_ticks", sys_ticks, con_ticks)
-
-    cpu_usage = cpu_tick_rate * num_cpus * 100.0
-
-    return check_cpu_util(cpu_usage, params, perf_max=num_cpus * 100)
 
 
 #   .--helper--------------------------------------------------------------.
@@ -276,20 +279,22 @@ def check_cpu_util_linux_container(_no_item, params, parsed):
 # ALREADY MIGRATED
 def cpu_util_time(this_time, core, perc, threshold, warn_core, crit_core):
     core_state_name = "cpu.util.core.high.%s" % core
+    value_store = get_value_store()
     if perc > threshold:
-        timestamp = get_item_state(core_state_name, 0)
-        high_load_duration = (this_time - timestamp)
+        timestamp = value_store.get(core_state_name, 0)
+        high_load_duration = this_time - timestamp
         state, infotext, _ = check_levels(
             high_load_duration,
             "%s_is_under_high_load_for" % core,  # Not used
             (warn_core, crit_core),
             human_readable_func=get_age_human_readable,
-            infoname="%s is under high load for" % core)
+            infoname="%s is under high load for" % core,
+        )
         if timestamp == 0:
-            set_item_state(core_state_name, this_time)
+            value_store[core_state_name] = this_time
         elif state:
             return state, infotext, []
         return 0, "", []
 
-    clear_item_state(core_state_name)
+    value_store.pop(core_state_name, None)
     return 0, "", []

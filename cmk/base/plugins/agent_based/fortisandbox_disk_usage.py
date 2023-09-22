@@ -1,43 +1,37 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import (
-    Any,
-    Mapping,
-    Optional,
-)
-from .agent_based_api.v1 import (
-    SNMPTree,
-    Service,
-    register,
-    get_value_store,
-)
-from .agent_based_api.v1.type_defs import (
-    DiscoveryResult,
-    CheckResult,
-    StringTable,
-)
-from .utils.df import (
-    df_check_filesystem_single,
-    FILESYSTEM_DEFAULT_LEVELS,
-)
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
+
+from .agent_based_api.v1 import get_value_store, register, Service, SNMPTree
+from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult, StringTable
+from .utils.df import df_check_filesystem_single, FILESYSTEM_DEFAULT_PARAMS
 from .utils.fortinet import DETECT_FORTISANDBOX
 
-Section = Mapping[str, int]
+
+@dataclass(frozen=True)
+class Section:
+    used: int
+    cap: int
 
 
-def parse_fortisandbox_disk(string_table: StringTable) -> Optional[Section]:
+def parse_fortisandbox_disk(string_table: StringTable) -> Section | None:
     """
     >>> parse_fortisandbox_disk([["1000", "2000"]])
-    {'used': 1000, 'cap': 2000}
+    Section(used=1000, cap=2000)
     """
-    return {
-        "used": int(string_table[0][0]),
-        "cap": int(string_table[0][1]),
-    } if string_table else None
+    return (
+        Section(
+            used=int(string_table[0][0]),
+            cap=int(string_table[0][1]),
+        )
+        if string_table
+        else None
+    )
 
 
 def discover_fortisandbox_disk(section: Section) -> DiscoveryResult:
@@ -52,9 +46,9 @@ def check_fortisandbox_disk(
     yield from df_check_filesystem_single(
         value_store=get_value_store(),
         mountpoint=item,
-        size_mb=section["cap"],
-        avail_mb=section["cap"] - section["disk_used"],
-        reserved_mb=0,
+        filesystem_size=section.cap,
+        free_space=section.cap - section.used,
+        reserved_space=0,
         inodes_total=None,
         inodes_avail=None,
         params=params,
@@ -79,6 +73,6 @@ register.check_plugin(
     service_name="Disk usage %s",
     discovery_function=discover_fortisandbox_disk,
     check_function=check_fortisandbox_disk,
-    check_default_parameters=FILESYSTEM_DEFAULT_LEVELS,
+    check_default_parameters=FILESYSTEM_DEFAULT_PARAMS,
     check_ruleset_name="filesystem",
 )

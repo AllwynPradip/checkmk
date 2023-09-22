@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 from ..agent_based_api.v1 import (
     all_of,
     any_of,
-    exists,
-    not_exists,
-    equals,
-    not_equals,
     contains,
+    equals,
+    exists,
     not_contains,
-    startswith,
+    not_equals,
+    not_exists,
     not_startswith,
+    startswith,
 )
 
 # We are not sure how to safely detect the UCD SNMP Daemon. We know that
@@ -42,6 +41,7 @@ UCD = any_of(
     contains(".1.3.6.1.2.1.1.1.0", "pfsense"),
     contains(".1.3.6.1.2.1.1.1.0", "genugate"),
     contains(".1.3.6.1.2.1.1.1.0", "bomgar"),
+    contains(".1.3.6.1.2.1.1.1.0", "beyondtrust"),
     contains(".1.3.6.1.2.1.1.1.0", "pulse secure"),
     contains(".1.3.6.1.2.1.1.1.0", "microsens"),
     all_of(  # Artec email archive appliances
@@ -52,7 +52,8 @@ UCD = any_of(
     all_of(
         equals(".1.3.6.1.2.1.1.1.0", ""),
         exists(".1.3.6.1.4.1.2021.*"),
-    ))
+    ),
+)
 
 _NOT_UCD = all_of(
     # This is an explicit negation of the constant above.
@@ -67,15 +68,21 @@ _NOT_UCD = all_of(
     not_contains(".1.3.6.1.2.1.1.1.0", "pfsense"),
     not_contains(".1.3.6.1.2.1.1.1.0", "genugate"),
     not_contains(".1.3.6.1.2.1.1.1.0", "bomgar"),
+    not_contains(".1.3.6.1.2.1.1.1.0", "beyondtrust"),
     not_contains(".1.3.6.1.2.1.1.1.0", "pulse secure"),
     not_contains(".1.3.6.1.2.1.1.1.0", "microsens"),
     any_of(  # Artec email archive appliances
         not_equals(".1.3.6.1.2.1.1.2.0", ".1.3.6.1.4.1.8072.3.2.10"),
         not_contains(".1.3.6.1.2.1.1.1.0", "version"),
         not_contains(".1.3.6.1.2.1.1.1.0", "serial"),
-    ))
+    ),
+)
 
-PREFER_HR_ELSE_UCD = all_of(UCD, _NOT_HR)
+# PhotonOS has a HR identifier MIB but only uses UCD ¯\_(ツ)_/¯
+PREFER_HR_ELSE_UCD = any_of(
+    all_of(UCD, _NOT_HR),
+    contains(".1.3.6.1.2.1.1.1.0", "photon"),
+)
 
 #   ---helper---------------------------------------------------------------
 
@@ -89,12 +96,17 @@ _UCD_MEM = any_of(
         contains(".1.3.6.1.2.1.1.1.0", "pfsense"),
         not_exists(".1.3.6.1.2.1.25.1.1.0"),
     ),
+    contains(".1.3.6.1.2.1.1.1.0", "photon"),
     all_of(
         contains(".1.3.6.1.2.1.1.1.0", "ironport model c3"),
         not_exists(".1.3.6.1.2.1.25.1.1.0"),
     ),
     all_of(
         contains(".1.3.6.1.2.1.1.1.0", "bomgar"),
+        not_exists(".1.3.6.1.2.1.25.1.1.0"),
+    ),
+    all_of(
+        contains(".1.3.6.1.2.1.1.1.0", "beyondtrust"),
         not_exists(".1.3.6.1.2.1.25.1.1.0"),
     ),
     all_of(
@@ -123,6 +135,10 @@ _NOT_UCD_MEM = all_of(
     ),
     any_of(
         not_contains(".1.3.6.1.2.1.1.1.0", "bomgar"),
+        exists(".1.3.6.1.2.1.25.1.1.0"),
+    ),
+    any_of(
+        not_contains(".1.3.6.1.2.1.1.1.0", "beyondtrust"),
         exists(".1.3.6.1.2.1.25.1.1.0"),
     ),
     any_of(

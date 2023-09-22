@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# type: ignore[list-item,import,assignment,misc,operator]  # TODO: see which are needed in this file
+
 from .cpu_util import check_cpu_util
 
 
-def inventory_fortigate_cpu(info, default_levels):
-    return [(None, default_levels)]
+def inventory_fortigate_cpu(info):
+    yield None, {}
 
 
 def check_fortigate_cpu(item, params, info):
@@ -19,9 +18,9 @@ def check_fortigate_cpu(item, params, info):
         util += int(line[0])
         num_cpus += 1
     if num_cpus == 0:
-        return
+        return None
 
-    util = float(util) / num_cpus
+    util = float(util) / num_cpus  # type: ignore[assignment]
 
     state, infotext, perfdata = next(check_cpu_util(util, params))
     infotext += " at %d CPUs" % num_cpus

@@ -18,8 +18,14 @@ $(OMD_INSTALL): omdlib-install
 	$(MKDIR) $(DESTDIR)$(OMD_ROOT)/bin
 	install -m 755 $(PACKAGE_DIR)/$(OMD)/omd.bin $(DESTDIR)$(OMD_ROOT)/bin/omd
 	sed -i 's|###OMD_VERSION###|$(OMD_VERSION)|g' $(DESTDIR)$(OMD_ROOT)/bin/omd
-	$(MKDIR) $(DESTDIR)$(OMD_ROOT)/share/omd/htdocs
-	install -m 644 $(PACKAGE_DIR)/$(OMD)/logout.php $(DESTDIR)$(OMD_ROOT)/share/omd/htdocs
+# SUP-10161: our openssl is incompatible with some system executables on various sles15sp*
+ifneq ($(filter $(DISTRO_CODE), sles15sp3 sles15sp4 sles15sp5),)
+	install -m 755 $(PACKAGE_DIR)/$(OMD)/use_system_openssl $(DESTDIR)$(OMD_ROOT)/bin/ssh
+endif
+ifneq ($(filter $(DISTRO_CODE),centos8 sles15sp4 sles15sp5),)
+	install -m 755 $(PACKAGE_DIR)/$(OMD)/use_system_openssl $(DESTDIR)$(OMD_ROOT)/bin/pdftoppm
+	install -m 755 $(PACKAGE_DIR)/$(OMD)/use_system_openssl $(DESTDIR)$(OMD_ROOT)/bin/curl
+endif
 	$(MKDIR) $(DESTDIR)$(OMD_ROOT)/share/man/man8
 	install -m 644 $(PACKAGE_DIR)/$(OMD)/omd.8 $(DESTDIR)$(OMD_ROOT)/share/man/man8
 	gzip -f $(DESTDIR)$(OMD_ROOT)/share/man/man8/omd.8
@@ -30,7 +36,7 @@ $(OMD_INSTALL): omdlib-install
 	install -m 644 $(PACKAGE_DIR)/$(OMD)/README $(PACKAGE_DIR)/$(OMD)/COPYING $(DESTDIR)$(OMD_ROOT)/share/doc/$(NAME)
 	$(MKDIR) $(DESTDIR)$(OMD_ROOT)/lib/omd
 	install -m 644 $(PACKAGE_DIR)/$(OMD)/init_profile $(DESTDIR)$(OMD_ROOT)/lib/omd/
-	install -m 755 $(PACKAGE_DIR)/$(OMD)/port_is_used $(DESTDIR)$(OMD_ROOT)/lib/omd/
+	install -m 755 $(PACKAGE_DIR)/$(OMD)/next_free_port $(DESTDIR)$(OMD_ROOT)/lib/omd/
 	install -m 644 $(PACKAGE_DIR)/$(OMD)/bash_completion $(DESTDIR)$(OMD_ROOT)/lib/omd/
 	$(MKDIR) $(DESTDIR)$(OMD_ROOT)/lib/omd/scripts/post-create
 	$(MKDIR) $(DESTDIR)$(OMD_ROOT)/lib/omd/scripts/post-update
@@ -39,10 +45,8 @@ $(OMD_INSTALL): omdlib-install
 	$(MKDIR) $(SKEL)/etc/bash_completion.d
 	$(TOUCH) $@
 
-omdlib-install: $(PYTHON3_CACHE_PKG_PROCESS)
+omdlib-install: $(PACKAGE_PYTHON3_MODULES_PYTHON_DEPS)
 	$(MKDIR) $(DESTDIR)$(OMD_ROOT)/lib/python3/omdlib
 	install -m 644 $(PACKAGE_DIR)/$(OMD)/omdlib/*.py $(DESTDIR)$(OMD_ROOT)/lib/python3/omdlib/
 	sed -i 's|###OMD_VERSION###|$(OMD_VERSION)|g' $(DESTDIR)$(OMD_ROOT)/lib/python3/omdlib/__init__.py
-	LD_LIBRARY_PATH="$(PACKAGE_PYTHON3_LD_LIBRARY_PATH)" \
-	    $(PACKAGE_PYTHON3_EXECUTABLE) -m py_compile \
-	    $(DESTDIR)$(OMD_ROOT)/lib/python3/omdlib/*.py
+	$(PACKAGE_PYTHON3_MODULES_PYTHON) -m py_compile $(DESTDIR)$(OMD_ROOT)/lib/python3/omdlib/*.py

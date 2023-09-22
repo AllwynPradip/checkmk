@@ -1,5 +1,5 @@
 @charset "UTF-8";
-// Copyright (C) 2019 tribe29 GmbH - License: Check_MK Enterprise License
+// Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 // This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 // conditions defined in the file COPYING, which is part of this source code package.
 
@@ -42,7 +42,7 @@ div.graph {
 
   div.title {
     margin-bottom: 1ex;
-    font-weight: bold;
+    font-weight: $font-weight-bold;
     text-align: center;
   }
 
@@ -101,7 +101,7 @@ div.graph {
     th,
     th.scalar {
       padding-bottom: 3px;
-      font-weight: bold;
+      font-weight: $font-weight-bold;
       text-align: right;
       background-color: transparent;
       border-style: none;
@@ -179,7 +179,7 @@ div.graph {
       z-index: 10;
       width: 100%;
       font-size: $font-size-large;
-      font-weight: normal;
+      font-weight: $font-weight-default;
     }
   }
 
@@ -189,7 +189,7 @@ div.graph {
     top: 10px;
     z-index: 10;
     margin: 0;
-    font-weight: bold;
+    font-weight: $font-weight-bold;
     text-align: center;
   }
 
@@ -224,10 +224,55 @@ div.color {
 /* Graphs with timerange selection */
 div.graph_with_timeranges {
   display: block;
+  margin-bottom: 32px;
   white-space: nowrap;
+
+  div.graph {
+    border: 1px solid $color-table-border;
+    box-shadow: none;
+
+    div.title {
+      display: block;
+    }
+
+    canvas {
+      margin-bottom: 8px;
+    }
+
+    &.preview canvas {
+      margin-bottom: 0;
+    }
+
+    &.preview .title {
+      top: 12px;
+      width: calc(100% - 16px);
+      padding: 8px 0;
+      font-weight: $font-weight-default;
+      color: $font-color;
+      text-shadow: none;
+      box-sizing: border-box;
+    }
+
+    table.legend {
+      margin-top: 32px;
+
+      th.scalar {
+        text-align: right;
+      }
+
+      td {
+        background: transparent;
+      }
+    }
+  }
 
   > div.graph_container {
     display: inline-block;
+
+    div.popup_menu {
+      max-height: 35vh;
+      overflow: auto;
+    }
   }
 
   tr.data > td > div.timerange {
@@ -243,5 +288,17 @@ div.graph_with_timeranges {
       cursor: pointer;
       opacity: 0.75;
     }
+
+    > tbody > tr > td {
+      padding: 0 8px 4px;
+    }
+  }
+
+  table.data td > div:first-child & {
+    margin-top: 8px;
+  }
+
+  table.data td > div:last-child & {
+    margin-bottom: 8px;
   }
 }

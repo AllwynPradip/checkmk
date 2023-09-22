@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import sys
-from typing import Iterable, Optional, Sequence, Tuple
-from xml.etree import ElementTree as etree
 import urllib.parse
+from collections.abc import Iterable, Sequence
+from xml.etree import ElementTree as etree
+
 import requests
 
-from cmk.special_agents.utils.argument_parsing import (
-    Args,
-    create_default_argument_parser,
-)
 import cmk.utils.password_store
+
+from cmk.special_agents.utils.argument_parsing import Args, create_default_argument_parser
 
 
 class InnovaphoneConnection:
-    def __init__(self, *, host, protocol, user, password, verify_ssl):
+    def __init__(  # type: ignore[no-untyped-def]
+        self, *, host, protocol, user, password, verify_ssl
+    ) -> None:
         self._base_url = f"{protocol}://{host}"
         self._user = user
         self._password = password
@@ -42,11 +42,14 @@ class InnovaphoneConnection:
 
         if response.status_code != 200:
             sys.stderr.write(
-                f"ERROR while processing request [{response.status_code}]: {response.reason}\n")
+                f"ERROR while processing request [{response.status_code}]: {response.reason}\n"
+            )
         return response.text
 
 
-def get_informations(connection: InnovaphoneConnection, name, xml_id, org_name):
+def get_informations(  # type: ignore[no-untyped-def]
+    connection: InnovaphoneConnection, name, xml_id, org_name
+):
     url = "LOG0/CNT/mod_cmd.xml?cmd=xml-count&x=%s" % (xml_id)
     response = connection.get(url)
     if response is None:
@@ -58,8 +61,8 @@ def get_informations(connection: InnovaphoneConnection, name, xml_id, org_name):
     c = None
     for line in data:
         for child in line:
-            if child.get('c'):
-                c = child.get('c')
+            if child.get("c"):
+                c = child.get("c")
     if c:
         print("<<<%s>>>" % name)
         print(org_name + " " + c)
@@ -78,7 +81,7 @@ def pri_channels_section(
 def _pri_channels_fetch_data(
     connection: InnovaphoneConnection,
     channels: Sequence[str],
-) -> Iterable[Tuple[str, etree.Element]]:
+) -> Iterable[tuple[str, etree.Element]]:
     for channel_name in channels:
         url = "%s/mod_cmd.xml" % channel_name
         response = connection.get(url)
@@ -95,18 +98,18 @@ def _pri_channels_fetch_data(
 
 
 def _pri_channel_format_line(channel_name: str, data: etree.Element) -> str:
-    link = data.get('link')
-    physical = data.get('physical')
+    link = data.get("link")
+    physical = data.get("physical")
     if link != "Up" or physical != "Up":
-        return "%s %s %s 0 0" % (channel_name, link, physical)
+        return f"{channel_name} {link} {physical} 0 0"
     idle = 0
     total = 0
-    for channel in data.findall('ch'):
-        if channel.get('state') == 'Idle':
+    for channel in data.findall("ch"):
+        if channel.get("state") == "Idle":
             idle += 1
         total += 1
     total -= 1
-    return "%s %s %s %s %s" % (channel_name, link, physical, idle, total)
+    return f"{channel_name} {link} {physical} {idle} {total}"
 
 
 def licenses_section(connection: InnovaphoneConnection) -> Iterable[str]:
@@ -120,15 +123,15 @@ def licenses_section(connection: InnovaphoneConnection) -> Iterable[str]:
         return
 
     yield "<<<innovaphone_licenses>>>"
-    for child in data.findall('lic'):
-        if child.get('name') == "Port":
-            count = child.get('count')
-            used = child.get('used')
+    for child in data.findall("lic"):
+        if child.get("name") == "Port":
+            count = child.get("count")
+            used = child.get("used")
             yield f"{count} {used}"
             return
 
 
-def _get_element(text: str) -> Optional[etree.Element]:
+def _get_element(text: str) -> etree.Element | None:
     try:
         return etree.fromstring(text)
     except etree.ParseError as e:
@@ -137,7 +140,7 @@ def _get_element(text: str) -> Optional[etree.Element]:
     return None
 
 
-def parse_arguments(argv: Optional[Sequence[str]]) -> Args:
+def parse_arguments(argv: Sequence[str] | None) -> Args:
     parser = create_default_argument_parser(description=__doc__)
     parser.add_argument("host", metavar="HOST")
     parser.add_argument("user", metavar="USER")
@@ -145,16 +148,16 @@ def parse_arguments(argv: Optional[Sequence[str]]) -> Args:
     parser.add_argument(
         "--protocol",
         choices=[
-            'http',
-            'https',
+            "http",
+            "https",
         ],
         default="https",
-        help='specify the connection protocol (default: https)',
+        help="specify the connection protocol (default: https)",
     )
     parser.add_argument(
-        '--no-cert-check',
-        action='store_true',
-        help='Disable certificate verification',
+        "--no-cert-check",
+        action="store_true",
+        help="Disable certificate verification",
     )
     return parser.parse_args(argv)
 
@@ -181,8 +184,8 @@ def main(sys_argv=None):
 
     informations = {}
     for entry in root_data:
-        n = entry.get('n')
-        x = entry.get('x')
+        n = entry.get("n")
+        x = entry.get("x")
         informations[n] = x
 
     for what in ["CPU", "MEM", "TEMP"]:
@@ -190,13 +193,17 @@ def main(sys_argv=None):
             section_name = "innovaphone_" + what.lower()
             get_informations(connection, section_name, informations[what], what)
 
-    sys.stdout.writelines(f"{line}\n" for line in pri_channels_section(
-        connection=connection,
-        # TODO: do we really need to guess at the channels?!
-        channels=("PRI1", "PRI2", "PRI3", "PRI4"),
-    ))
+    sys.stdout.writelines(
+        f"{line}\n"
+        for line in pri_channels_section(
+            connection=connection,
+            # TODO: do we really need to guess at the channels?!
+            channels=("PRI1", "PRI2", "PRI3", "PRI4"),
+        )
+    )
 
     sys.stdout.writelines(f"{line}\n" for line in licenses_section(connection))
+    return None
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 title: 3Com and H3C Switches: Fan and Power Supply
 agents: snmp
 catalog: hw/network/h3c
-license: GPL
+license: GPLv2
 distribution: check_mk
 description:
 
@@ -20,10 +20,10 @@ description:
  {UNKNOWN} if the queried sensor is not found.
 
  Please note: some of these switches don't handle SNMP well and might generate
- up to 90% CPU load while queried.  To accomodate for this you should lower
+ up to 90% CPU load while queried.  To accommodate for this you should lower
  the frequency of SNMP based checks with them.
 
-inventory:
+discovery:
  One service is created for each sensor.
 
 item:

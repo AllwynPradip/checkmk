@@ -3,17 +3,22 @@
 //
 #include "pch.h"
 
-#include "carrier.h"
-#include "cfg.h"
+#include <numeric>
+#include <ranges>
+
 #include "common/wtools.h"
-#include "service_processor.h"
-#include "test_tools.h"
 #include "tools/_misc.h"
-#include "tools/_process.h"
+#include "tools/_raii.h"
+#include "watest/test_tools.h"
+#include "wnx/carrier.h"
+#include "wnx/cfg.h"
+#include "wnx/service_processor.h"
 using namespace std::chrono_literals;
+namespace rs = std::ranges;
+namespace fs = std::filesystem;
 
 namespace cma::provider {
-class Empty : public Synchronous {
+class Empty final : public Synchronous {
 public:
     Empty() : Synchronous("empty") {}
     std::string makeBody() override { return "****"; }
@@ -22,96 +27,150 @@ public:
 
 namespace cma::srv {
 
-TEST(AsyncAnswerTest, Base) {
+TEST(AsyncAnswerTest, Ctor) {
     AsyncAnswer aa;
-    EXPECT_EQ(aa.order_, AsyncAnswer::Order::plugins_last);
-    EXPECT_EQ(aa.sw_.isStarted(), false);
-    aa.prepareAnswer("aaa");
-    EXPECT_EQ(aa.sw_.isStarted(), true);
+    EXPECT_EQ(aa.getStopWatch().isStarted(), false);
+    EXPECT_EQ(aa.awaitingSegments(), 0);
+    EXPECT_EQ(aa.receivedSegments(), 0);
+    EXPECT_FALSE(aa.isAnswerInUse());
+    EXPECT_EQ(aa.getIp(), std::string{});
+    EXPECT_GT(aa.getId().time_since_epoch().count(), 1000);
+}
 
-    EXPECT_EQ(aa.external_ip_, "aaa");
-    EXPECT_EQ(aa.awaited_segments_, 0);
-    EXPECT_EQ(aa.received_segments_, 0);
-    EXPECT_TRUE(aa.data_.empty());
-    EXPECT_TRUE(aa.segments_.empty());
-    EXPECT_TRUE(aa.plugins_.empty());
-    EXPECT_TRUE(aa.local_.empty());
+TEST(AsyncAnswerTest, Prepare) {
+    AsyncAnswer aa;
+    auto id = aa.getId();
+    EXPECT_TRUE(aa.prepareAnswer("aaa"));
+    EXPECT_NE(aa.getId(), id);
+    EXPECT_EQ(aa.getIp(), "aaa");
     EXPECT_FALSE(aa.prepareAnswer("aaa"));
-    aa.external_ip_ = "";
-    aa.awaited_segments_ = 1;
-    EXPECT_FALSE(aa.prepareAnswer("aaa"));
-    aa.external_ip_ = "";
-    aa.awaited_segments_ = 0;
-    aa.received_segments_ = 1;
-    EXPECT_FALSE(aa.prepareAnswer("aaa"));
+}
+
+TEST(AsyncAnswerTest, Run) {
+    AsyncAnswer aa;
+    aa.prepareAnswer("aaa");
+    aa.exeKickedCount(2);
+    EXPECT_EQ(aa.getStopWatch().isStarted(), true);
+    EXPECT_TRUE(aa.isAnswerInUse());
+    EXPECT_EQ(aa.awaitingSegments(), 2);
+    EXPECT_EQ(aa.receivedSegments(), 0);
+}
+
+TEST(AsyncAnswerTest, Timeout) {
+    AsyncAnswer aa;
+    EXPECT_GT(aa.timeout(), 0);
+    aa.newTimeout(1000);
+    EXPECT_EQ(aa.timeout(), 1000);
+    aa.newTimeout(90);
+    EXPECT_EQ(aa.timeout(), 1000);
+}
+
+class AsyncAnswerTestFixture : public ::testing::Test {
+public:
+    const int kicked_count{2};
+    const std::string segment_name{"A"};
+    void SetUp() override {
+        aa.prepareAnswer("aaa");
+        aa.exeKickedCount(kicked_count);
+        aa.addSegment(segment_name, aa.getId(), db);
+    }
+    AsyncAnswer aa;
+    AsyncAnswer::DataBlock db{0, 1};
+    AsyncAnswer::DataBlock db_result{0, 1, '\n'};
+    const std::vector<std::string> segments{segment_name};
+};
+
+TEST_F(AsyncAnswerTestFixture, Start) {
+    EXPECT_EQ(aa.awaitingSegments(), kicked_count);
+    EXPECT_EQ(aa.receivedSegments(), 1);
+    EXPECT_EQ(aa.segmentNameList(), segments);
+}
+
+TEST_F(AsyncAnswerTestFixture, Receive) {
+    EXPECT_EQ(aa.getDataAndClear(), db_result);
+    EXPECT_EQ(aa.awaitingSegments(), 0);
+    EXPECT_EQ(aa.receivedSegments(), 0);
+    EXPECT_EQ(aa.getIp(), "");
+}
+
+TEST_F(AsyncAnswerTestFixture, Drop) {
+    aa.dropAnswer();
+    EXPECT_EQ(aa.getDataAndClear(), AsyncAnswer::DataBlock{});
+    EXPECT_EQ(aa.awaitingSegments(), 0);
+    EXPECT_EQ(aa.receivedSegments(), 0);
+    EXPECT_EQ(aa.getIp(), "");
+}
+
+TEST_F(AsyncAnswerTestFixture, WaitFail) {
+    EXPECT_FALSE(aa.waitAnswer(1ms));  // one segment should miss
+}
+
+TEST_F(AsyncAnswerTestFixture, WaitSuccess) {
+    aa.addSegment("B", aa.getId(), db);
+    EXPECT_TRUE(aa.waitAnswer(1ms));
 }
 
 TEST(ServiceProcessorTest, Generate) {
     ServiceProcessor sp;
-    auto s1 = sp.generate<cma::provider::CheckMk>();
-    auto t1 = cma::tools::SplitString(s1, "\n");
-    ASSERT_FALSE(t1.empty());
+    auto s1 = sp.generate<provider::CheckMk>();
+    auto t1 = tools::SplitString(s1, "\n");
+    EXPECT_FALSE(t1.empty());
 
-    auto s2 = sp.generate<cma::provider::SystemTime>();
-    auto t2 = cma::tools::SplitString(s2, "\n");
-    ASSERT_FALSE(t2.empty());
+    auto s2 = sp.generate<provider::SystemTime>();
+    auto t2 = tools::SplitString(s2, "\n");
+    EXPECT_FALSE(t2.empty());
 
-    auto s3 = sp.generate<cma::provider::Empty>();
-    auto t3 = cma::tools::SplitString(s3, "\n");
-    ASSERT_TRUE(t3.empty());
+    auto s3 = sp.generate<provider::Empty>();
+    auto t3 = tools::SplitString(s3, "\n");
+    EXPECT_TRUE(t3.empty());
 
     AsyncAnswer::DataBlock db;
     auto ret = sp.wrapResultWithStaticSections(db);
     ret.push_back(0);
-    std::string data = reinterpret_cast<const char*>(ret.data());
+    std::string data = reinterpret_cast<const char *>(ret.data());
     ASSERT_TRUE(ret.size() > 5);
-    auto t = cma::tools::SplitString(data, "\n");
-    EXPECT_EQ(t[0] + "\n", cma::section::MakeHeader(cma::section::kCheckMk));
-    EXPECT_EQ(t[t.size() - 2] + "\n",
-              cma::section::MakeHeader(cma::section::kSystemTime))
+    auto t = tools::SplitString(data, "\n");
+    EXPECT_EQ(t[0] + "\n", section::MakeHeader(section::kCheckMk));
+    EXPECT_EQ(t[t.size() - 2] + "\n", section::MakeHeader(section::kSystemTime))
         << "data:\n"
         << data;
 }
 
 TEST(ServiceProcessorTest, StartStopExe) {
-    using namespace cma::cfg;
     int counter = 0;
     auto temp_fs{tst::TempCfgFs::CreateNoIo()};
     ASSERT_TRUE(temp_fs->loadContent(tst::GetFabricYmlContent()));
 
-    auto processor =
-        new ServiceProcessor(100ms, [&counter](const void* Processor) {
-            xlog::l("pip").print();
-            counter++;
-            return true;
-        });
-    ON_OUT_OF_SCOPE(delete processor;);
+    auto processor = new ServiceProcessor(100ms, [&counter] {
+        counter++;
+        return true;
+    });
+    ON_OUT_OF_SCOPE(delete processor);
 
-    cma::MailSlot mailbox(kTestingMailSlot, 0);
+    mailslot::Slot mailbox(cfg::kTestingMailSlot, 0);
     mailbox.ConstructThread(SystemMailboxCallback, 20, processor,
                             wtools::SecurityLevel::admin);
     ON_OUT_OF_SCOPE(mailbox.DismantleThread());
-    using namespace cma::carrier;
-    processor->internal_port_ =
-        BuildPortName(kCarrierMailslotName, mailbox.GetName());
+    processor->internal_port_ = carrier::BuildPortName(
+        carrier::kCarrierMailslotName, mailbox.GetName());
 
     auto tp = processor->openAnswer("127.0.0.1");
 
     // make command line
-    auto cmd_line = groups::winperf.buildCmdLine();
+    auto cmd_line = cfg::groups::g_winperf.buildCmdLine();
     ASSERT_TRUE(!cmd_line.empty());
-    auto count = groups::winperf.countersCount();
-    auto count_of_colon = std::count(cmd_line.begin(), cmd_line.end(), L':');
-    auto count_of_spaces = std::count(cmd_line.begin(), cmd_line.end(), L' ');
+    auto count = cfg::groups::g_winperf.countersCount();
+    auto count_of_colon = rs::count(cmd_line, L':');
+    auto count_of_spaces = rs::count(cmd_line, L' ');
     ASSERT_TRUE(count_of_colon == count);
     ASSERT_EQ(count_of_spaces, count - 1);
 
-    auto exe_name = groups::winperf.exe();
+    auto exe_name = cfg::groups::g_winperf.exe();
     ASSERT_TRUE(!exe_name.empty());
-    auto wide_exe_name = wtools::ConvertToUTF16(exe_name);
-    auto prefix = groups::winperf.prefix();
+    auto wide_exe_name = wtools::ConvertToUtf16(exe_name);
+    auto prefix = cfg::groups::g_winperf.prefix();
     ASSERT_TRUE(!prefix.empty());
-    auto wide_prefix = wtools::ConvertToUTF16(prefix);
+    auto wide_prefix = wtools::ConvertToUtf16(prefix);
 
     processor->kickExe(true, wide_exe_name, tp.value(), processor, wide_prefix,
                        10, cmd_line);
@@ -120,8 +179,19 @@ TEST(ServiceProcessorTest, StartStopExe) {
     EXPECT_TRUE(!result.empty());
 }
 
+namespace {
+void DisableUptime() {
+    auto cfg = cfg::GetLoadedConfig();
+    cfg["global"]["disabled_sections"] = YAML::Load("[uptime]");
+    cfg::ProcessKnownConfigGroups();
+}
+}  // namespace
+
 TEST(ServiceProcessorTest, Base) {
-    OnStartTest();
+    const tst::TempFolder folder{test_info_->name()};
+    auto tmp = folder.path();
+    tmp /= "out.txt";
+
     ServiceProcessor sp;
     EXPECT_TRUE(sp.max_wait_time_ == 0);
     sp.updateMaxWaitTime(-1);
@@ -134,111 +204,171 @@ TEST(ServiceProcessorTest, Base) {
     EXPECT_TRUE(sp.max_wait_time_ == 20);
     sp.updateMaxWaitTime(0);
     EXPECT_TRUE(sp.max_wait_time_ == 20);
-    {
-        ServiceProcessor sp;
-        EXPECT_TRUE(sp.max_wait_time_ == 0);
-        sp.checkMaxWaitTime();
-        EXPECT_EQ(sp.max_wait_time_, cma::cfg::kDefaultAgentMinWait);
-    }
+    ServiceProcessor sp_2;
+    EXPECT_TRUE(sp_2.max_wait_time_ == 0);
+    sp_2.checkMaxWaitTime();
+    EXPECT_EQ(sp_2.max_wait_time_, cfg::kDefaultAgentMinWait);
 
-    using namespace cma::section;
-    using namespace cma::provider;
-    tst::SafeCleanTempDir();
-    ON_OUT_OF_SCOPE(tst::SafeCleanTempDir(););
-    ON_OUT_OF_SCOPE(OnStartTest(););
-    {
-        std::filesystem::path tmp = cma::cfg::GetTempDir();
-        tmp /= "out.txt";
+    auto temp_fs{tst::TempCfgFs::CreateNoIo()};
+    ASSERT_TRUE(temp_fs->loadContent(tst::GetFabricYmlContent()));
 
-        SectionProvider<provider::UptimeSync> uptime_provider;
-        AsyncAnswer a;
-        a.prepareAnswer("aaa");
-        sp.internal_port_ = cma::carrier::BuildPortName(
-            cma::carrier::kCarrierFileName, tmp.u8string());
-        sp.tryToDirectCall(uptime_provider, a.getId(), "0");
-        auto table = tst::ReadFileAsTable(tmp.u8string());
-        ASSERT_EQ(table.size(), 2);
-        EXPECT_EQ(table[0] + "\n", MakeHeader(cma::section::kUptimeName));
-    }
+    SectionProvider<provider::UptimeSync> uptime_provider;
+    AsyncAnswer a;
+    a.prepareAnswer("aaa");
 
-    {
-        std::filesystem::path tmp = cma::cfg::GetTempDir();
-        tmp /= "out.txt";
-        std::error_code ec;
-        std::filesystem::remove(tmp, ec);
-
-        auto cfg = cma::cfg::GetLoadedConfig();
-        cfg["global"]["disabled_sections"] = YAML::Load("[uptime]");
-        cfg::ProcessKnownConfigGroups();
-
-        SectionProvider<provider::UptimeSync> uptime_provider;
-        AsyncAnswer a;
-        a.prepareAnswer("aaa");
-        sp.internal_port_ = cma::carrier::BuildPortName(
-            cma::carrier::kCarrierFileName, tmp.u8string());
-        sp.tryToDirectCall(uptime_provider, a.getId(), "0");
-        auto table = tst::ReadFileAsTable(tmp.u8string());
-        EXPECT_TRUE(table.empty());
-    }
+    // STEP 1
+    sp.internal_port_ = carrier::BuildPortName(carrier::kCarrierFileName,
+                                               wtools::ToUtf8(tmp.wstring()));
+    sp.tryToDirectCall(uptime_provider, a.getId(), "0");
+    auto table = tst::ReadFileAsTable(wtools::ToUtf8(tmp.wstring()));
+    ASSERT_EQ(table.size(), 2);
+    EXPECT_EQ(table[0] + "\n", section::MakeHeader(section::kUptimeName));
+    fs::remove(tmp);
+    // STEP 2
+    DisableUptime();
+    sp.internal_port_ = carrier::BuildPortName(carrier::kCarrierFileName,
+                                               wtools::ToUtf8(tmp.wstring()));
+    sp.tryToDirectCall(uptime_provider, a.getId(), "0");
+    EXPECT_TRUE(tst::ReadFileAsTable(wtools::ToUtf8(tmp.wstring())).empty());
 }
 
-TEST(ServiceProcessorTest, DirectCall) {
-    using namespace cma::section;
-    using namespace cma::provider;
-    OnStartTest();
-    tst::SafeCleanTempDir();
-    ON_OUT_OF_SCOPE(tst::SafeCleanTempDir(););
+namespace {
+struct MailData {
+    std::vector<char> data;
+};
 
-    std::filesystem::path tmp = cma::cfg::GetTempDir();
-    tmp /= "out.txt";
-    {
-        SectionProvider<provider::UptimeSync> uptime_provider;
-        AsyncAnswer a;
-        a.prepareAnswer("aaa");
-        uptime_provider.directCall(
-            "0", a.getId(),
-            cma::carrier::BuildPortName(cma::carrier::kCarrierFileName,
-                                        tmp.u8string()));
-        auto table = tst::ReadFileAsTable(tmp.u8string());
-        EXPECT_EQ(table.size(), 2);
-        EXPECT_EQ(table[0] + "\n", MakeHeader(cma::section::kUptimeName));
-    }
+bool MailboxCallback(const cma::mailslot::Slot *slot, const void *data, int len,
+                     void *context) {
+    auto mail_data = static_cast<MailData *>(context);
+    mail_data->data =
+        std::vector(static_cast<const char *>(data),
+                    static_cast<const char *>(data) + static_cast<size_t>(len));
+    return true;
+}
+}  // namespace
 
-    {
-        SectionProvider<provider::Wmi> wmi_cpuload_provider{kWmiCpuLoad,
-                                                            wmi::kSepChar};
-        AsyncAnswer a;
-        a.prepareAnswer("aaa");
-        std::vector<std::string> table;
-        for (int i = 0; i < 3; i++) {
-            wmi_cpuload_provider.directCall(
-                "0", a.getId(),
-                cma::carrier::BuildPortName(cma::carrier::kCarrierFileName,
-                                            tmp.u8string()));
-            table = tst::ReadFileAsTable(tmp.u8string());
-
-            if (table.size() < 7) {
-                using namespace std::chrono;
-                XLOG::SendStringToStdio("?", XLOG::Colors::pink);
-                cma::tools::sleep(1000ms);
-                continue;
-            }
-
-            EXPECT_EQ(table[0] + "\n",
-                      cma::section::MakeHeader(cma::provider::kWmiCpuLoad,
-                                               cma::provider::wmi::kSepChar));
-
-            EXPECT_EQ(table[1] + "\n",
-                      cma::section::MakeSubSectionHeader(
-                          cma::provider::kSubSectionSystemPerf));
-            EXPECT_EQ(table[4] + "\n",
-                      cma::section::MakeSubSectionHeader(
-                          cma::provider::kSubSectionComputerSystem));
-            return;
+// TODO(sk): move this function in test_tools
+/// Not easy to test
+std::optional<uint16_t> findFreePort(uint16_t start, uint16_t range) {
+    for (auto port_num = start; port_num < start + range; ++port_num) {
+        asio::ip::tcp::endpoint ep(asio::ip::address_v6::any(), port_num);
+        asio::io_context context;
+        try {
+            asio::ip::tcp::acceptor acceptor(context, ep.protocol());
+            acceptor.bind(ep);
+            return port_num;
+        } catch (std::exception &) {
+            // not available
         }
-        EXPECT_TRUE(false) << "CpuLoad returns not enough data, size = "
-                           << table.size();
     }
+
+    return {};
+}
+
+class ServiceProcessorTestFixture : public ::testing::Test {
+public:
+    void SetUp() override {
+        temp_fs = tst::TempCfgFs::CreateNoIo();
+        const auto port = findFreePort(21550, 100);
+        ASSERT_TRUE(port.has_value());
+        ASSERT_TRUE(
+            temp_fs->loadContent(fmt::format("global:\n"
+                                             "  enabled: yes\n"
+                                             "  sections: check_mk\n"
+                                             "  port: {}\n"
+                                             "system:\n"
+                                             "  controller:\n"
+                                             "    agent_channel: mailslot\n",
+                                             *port)));
+        mailbox.ConstructThread(MailboxCallback, 20, &md,
+                                wtools::SecurityLevel::standard);
+        sp.startService();
+        ASSERT_TRUE(
+            tst::WaitForSuccessSilent(1000ms, [this] { return ready; }));
+    }
+    void TearDown() override {
+        cc.shutdownCommunication();
+        sp.stopService(wtools::StopMode::ignore);
+        mailbox.DismantleThread();
+    }
+    tst::TempCfgFs::ptr temp_fs;
+    MailData md;
+    mailslot::Slot mailbox{mailslot::BuildMailSlotNameRoot() + "local_test"};
+    const std::string cmd{
+        fmt::format("monitoring_request:\n"
+                    "  text: '127.0.0.1 {}'\n"
+                    "  id: 0\n",
+                    "local_test")};
+    bool ready{false};
+    ServiceProcessor sp{100ms, [this] {
+                            ready = true;
+                            return true;
+                        }};
+    carrier::CoreCarrier cc;
+};
+TEST_F(ServiceProcessorTestFixture, YamlOverMailSlotComponent) {
+    ASSERT_TRUE(cc.establishCommunication(sp.getInternalPort()));
+    cc.sendYaml("TestSite", cmd);
+    tst::WaitForSuccessSilent(2000ms, [this] { return !md.data.empty(); });
+    EXPECT_GE(md.data.size(), 100U);
+    std::string s{md.data.data(), md.data.size()};
+    EXPECT_TRUE(s.starts_with("<<<check_mk>>>"));
+}
+
+TEST(ServiceProcessorTest, DirectCallUptime) {
+    const tst::TempFolder folder{test_info_->name()};
+    auto tmp = folder.path();
+    tmp /= "out.txt";
+
+    SectionProvider<provider::UptimeSync> uptime_provider;
+    AsyncAnswer a;
+    a.prepareAnswer("aaa");
+    uptime_provider.directCall(
+        "0", a.getId(),
+        carrier::BuildPortName(carrier::kCarrierFileName,
+                               wtools::ToUtf8(tmp.wstring())));
+    const auto table = tst::ReadFileAsTable(wtools::ToUtf8(tmp.wstring()));
+    EXPECT_EQ(table.size(), 2);
+    EXPECT_EQ(table[0] + "\n", section::MakeHeader(section::kUptimeName));
+}
+
+std::vector<std::string> getWmiCpuLoad(
+    SectionProvider<provider::Wmi> &wmi_cpuload_provider, const fs::path &tmp,
+    int attempts) {
+    AsyncAnswer a;
+    a.prepareAnswer("aaa");
+    // In Windows wmi access to CPU data may fail we retry it three times
+    for (int i = 0; i < attempts; i++) {
+        wmi_cpuload_provider.directCall(
+            "0", a.getId(),
+            carrier::BuildPortName(carrier::kCarrierFileName,
+                                   wtools::ToUtf8(tmp.wstring())));
+        auto table = tst::ReadFileAsTable(wtools::ToUtf8(tmp.wstring()));
+        if (table.size() >= 7) {
+            return table;
+        }
+        XLOG::SendStringToStdio("?", XLOG::Colors::pink);
+        tools::sleep(1000ms);
+    }
+
+    return {};
+}
+
+TEST(ServiceProcessorTest, DirectCallWmi) {
+    const tst::TempFolder folder{test_info_->name()};
+    auto tmp = folder.path();
+    tmp /= "out.txt";
+
+    SectionProvider<provider::Wmi> wmi_cpuload_provider{
+        provider::kWmiCpuLoad, provider::wmi::kSepChar};
+    const auto table = getWmiCpuLoad(wmi_cpuload_provider, tmp, 3);
+
+    EXPECT_EQ(table[0] + "\n", section::MakeHeader(provider::kWmiCpuLoad,
+                                                   provider::wmi::kSepChar));
+    EXPECT_EQ(table[1] + "\n",
+              section::MakeSubSectionHeader(provider::kSubSectionSystemPerf));
+    EXPECT_EQ(table[4] + "\n", section::MakeSubSectionHeader(
+                                   provider::kSubSectionComputerSystem));
 }
 
 }  // namespace cma::srv

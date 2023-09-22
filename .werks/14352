@@ -1,0 +1,23 @@
+Title: use sentence case for local check metric labels
+Class: fix
+Compatible: compat
+Component: checks
+Date: 1654849424
+Edition: cre
+Knowledge: doc
+Level: 1
+State: unknown
+Version: 2.2.0b1
+
+Since werk 12185 we automatically show metrics in the output of local checks.
+The metric names are now consistently converted to sentence case.
+Below are examples for the automatic conversion
+
+<tt>LONG_METRIC_NAME</tt> -> <i>Long metric name</i>
+
+<tt>recommendation4WHO</tt> -> <i>Recommendation 4 WHO</i>
+
+<tt>weekIncidence</tt> -> <i>Week incidence</i>
+
+<tt>zombie_apocalypse</tt> -> <i>Zombie apocalypse</i>
+

@@ -1,30 +1,39 @@
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+#!/usr/bin/env python3
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
+from __future__ import annotations
+
 import pathlib
-from typing import Optional
-
-from werkzeug.wrappers import Request
-
-import cmk.gui.config
-import cmk.utils.paths
-import cmk.utils.log
+import typing
+from typing import Literal
 
 from repoze.profile import ProfileMiddleware  # type: ignore[import]
 from repoze.profile.compat import profile  # type: ignore[import]
+from werkzeug.wrappers import Request
+
+import cmk.utils.log
+import cmk.utils.paths
+
+from cmk.gui.wsgi.applications.utils import load_single_global_wato_setting
+from cmk.gui.wsgi.type_defs import WSGIResponse
+
+if typing.TYPE_CHECKING:
+    # TODO: Directly import from wsgiref.types in Python 3.11, without any import guard
+    from _typeshed.wsgi import StartResponse, WSGIApplication, WSGIEnvironment
 
 
 class ProfileSwitcher:
     """Profile a WSGI application, configurable
 
-    The behaviour can be changed upon setting config.profile to either
+    The behaviour can be changed upon setting `config.profile` to either
         * True: profiling always enabled
         * False: profiling always off
         * "enable_by_var":  profiling enabled when "_profile" query parameter present in request
 
     """
-    def __init__(self, app, profile_file: Optional[pathlib.Path] = None):
+
+    def __init__(self, app: WSGIApplication, profile_file: pathlib.Path | None = None) -> None:
         self.app = app
         if profile_file is None:
             profile_file = pathlib.Path(cmk.utils.paths.var_dir) / "multisite.profile"
@@ -33,8 +42,8 @@ class ProfileSwitcher:
         # on every request.
         self.accumulate = False
         self.profile_file = profile_file
-        self.cachegrind_file = profile_file.with_suffix('.cachegrind')
-        self.script_file = self.profile_file.with_suffix('.py')
+        self.cachegrind_file = profile_file.with_suffix(".cachegrind")
+        self.script_file = self.profile_file.with_suffix(".py")
         self.profiled_app = ProfileMiddleware(
             app,
             log_filename=profile_file,
@@ -45,19 +54,24 @@ class ProfileSwitcher:
     def _create_dump_script(self):
         if not self.script_file.exists():
             with self.script_file.open("w", encoding="utf-8") as f:
-                f.write("#!/usr/bin/env python3\n"
-                        "import pstats\n"
-                        f'stats = pstats.Stats("{self.profile_file}")\n'
-                        "stats.sort_stats('time').print_stats()\n")
+                f.write(
+                    "#!/usr/bin/env python3\n"
+                    "import pstats\n"
+                    f'stats = pstats.Stats("{self.profile_file}")\n'
+                    "stats.sort_stats('cumtime').print_stats()\n"
+                )
             self.script_file.chmod(0o755)
-            cmk.utils.log.logger.info(f"Created profile dump script: {self.script_file}")
+            cmk.utils.log.logger.info("Created profile dump script: %s", self.script_file)
 
     def reset_profiler(self):
         self.profile_file.unlink(missing_ok=True)
         self.cachegrind_file.unlink(missing_ok=True)
         self.profiled_app.profiler = profile.Profile()
 
-    def __call__(self, environ, start_response):
+    def __call__(self, environ: WSGIEnvironment, start_response: StartResponse) -> WSGIResponse:
+        return self.wsgi_app(environ, start_response)
+
+    def wsgi_app(self, environ: WSGIEnvironment, start_response: StartResponse) -> WSGIResponse:
         if _profiling_enabled(environ):
             self._create_dump_script()
             if not self.accumulate:
@@ -69,16 +83,22 @@ class ProfileSwitcher:
         return app(environ, start_response)
 
 
-def _profiling_enabled(environ):
-    if not cmk.gui.config.profile:
+def _profiling_enabled(environ: WSGIEnvironment) -> bool:
+    profile_setting = _load_profiling_setting()
+    if not profile_setting:
         return False
 
-    if cmk.gui.config.profile == "enable_by_var":
+    if profile_setting == "enable_by_var":
         req = Request(environ)
-        if '_profile' not in req.args:
+        if "_profile" not in req.args:
             return False
 
     return True
 
 
-__all__ = ['ProfileSwitcher']
+def _load_profiling_setting() -> bool | Literal["enable_by_var"]:
+    """Load the profiling global setting from the Setup GUI config"""
+    return load_single_global_wato_setting("profile", deflt=False)
+
+
+__all__ = ["ProfileSwitcher"]

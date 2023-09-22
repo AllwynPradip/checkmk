@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import List, Optional, Pattern
+from collections.abc import Iterable, Sequence
+from re import Pattern
 
 import cmk.utils.debug
-from cmk.utils.regex import regex
 import cmk.utils.paths
 from cmk.utils.exceptions import MKGeneralException
+from cmk.utils.regex import regex
+from cmk.utils.tags import TagID
 
 # Conveniance macros for legacy tuple based host and service rules
-PHYSICAL_HOSTS = ['@physical']  # all hosts but not clusters
-CLUSTER_HOSTS = ['@cluster']  # all cluster hosts
-ALL_HOSTS = ['@all']  # physical and cluster hosts
+PHYSICAL_HOSTS = ["@physical"]  # all hosts but not clusters
+CLUSTER_HOSTS = ["@cluster"]  # all cluster hosts
+ALL_HOSTS = ["@all"]  # physical and cluster hosts
 ALL_SERVICES = [""]  # optical replacement"
-NEGATE = '@negate'  # negation in boolean lists
+NEGATE = "@negate"  # negation in boolean lists
 
 # TODO: We could make some more optimizations to host/item list matching:
 # - Is it worth to detect matches that are no regex matches?
@@ -35,7 +36,7 @@ def get_rule_options(entry):
     return entry, {}
 
 
-def in_extraconf_hostlist(hostlist, hostname):
+def in_extraconf_hostlist(hostlist, hostname):  # pylint: disable=too-many-branches
     """Whether or not the given host matches the hostlist.
 
     Entries in list are hostnames that must equal the hostname.
@@ -56,29 +57,29 @@ def in_extraconf_hostlist(hostlist, hostname):
         pass  # Empty list, no problem.
 
     for hostentry in hostlist:
-        if hostentry == '':
-            raise MKGeneralException('Empty hostname in host list %r' % hostlist)
+        if hostentry == "":
+            raise MKGeneralException("Empty hostname in host list %r" % hostlist)
         negate = False
         use_regex = False
-        if hostentry[0] == '@':
-            if hostentry == '@all':
+        if hostentry[0] == "@":
+            if hostentry == "@all":
                 return True
             # TODO: Is not used anymore for a long time. Will be cleaned up
             # with 1.6 tuple ruleset cleanup
-            #ic = is_cluster(hostname)
-            #if hostentry == '@cluster' and ic:
+            # ic = is_cluster(hostname)
+            # if hostentry == '@cluster' and ic:
             #    return True
-            #elif hostentry == '@physical' and not ic:
+            # elif hostentry == '@physical' and not ic:
             #    return True
 
         # Allow negation of hostentry with prefix '!'
         else:
-            if hostentry[0] == '!':
+            if hostentry[0] == "!":
                 hostentry = hostentry[1:]
                 negate = True
 
             # Allow regex with prefix '~'
-            if hostentry[0] == '~':
+            if hostentry[0] == "~":
                 hostentry = hostentry[1:]
                 use_regex = True
 
@@ -96,7 +97,7 @@ def in_extraconf_hostlist(hostlist, hostname):
     return False
 
 
-def hosttags_match_taglist(hosttags, required_tags):
+def hosttags_match_taglist(hosttags: Sequence[TagID], required_tags: Iterable[TagID]) -> bool:
     """Check if a host fulfills the requirements of a tag list.
 
     The host must have all tags in the list, except
@@ -104,8 +105,8 @@ def hosttags_match_taglist(hosttags, required_tags):
     A trailing + means a prefix match."""
     for tag in required_tags:
         negate, tag = _parse_negated(tag)
-        if tag and tag[-1] == '+':
-            tag = tag[:-1]
+        if tag and tag[-1] == "+":
+            tag = TagID(tag[:-1])
             matches = False
             for t in hosttags:
                 if t.startswith(tag):
@@ -121,7 +122,7 @@ def hosttags_match_taglist(hosttags, required_tags):
     return True
 
 
-def convert_pattern_list(patterns: List[str]) -> Optional[Pattern[str]]:
+def convert_pattern_list(patterns: list[str]) -> Pattern[str] | None:
     """Compiles a list of service match patterns to a single regex
 
     Reducing the number of individual regex matches improves the performance dramatically.
@@ -148,7 +149,7 @@ def convert_pattern_list(patterns: List[str]) -> Optional[Pattern[str]]:
 def _parse_negated(pattern):
     # Allow negation of pattern with prefix '!'
     try:
-        negate = pattern[0] == '!'
+        negate = pattern[0] == "!"
         if negate:
             pattern = pattern[1:]
     except IndexError:

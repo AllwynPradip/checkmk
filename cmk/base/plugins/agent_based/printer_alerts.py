@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import List, NamedTuple, Final, Sequence
+from collections.abc import Sequence
+from typing import Final, NamedTuple
 
+from .agent_based_api.v1 import register, Result, Service, SNMPTree, State
+from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult, StringTable
 from .utils.printer import DETECT_PRINTER
-from .agent_based_api.v1 import State, Service, register, SNMPTree, Result
-from .agent_based_api.v1.type_defs import StringTable, DiscoveryResult, CheckResult
 
 
 class Alert(NamedTuple):
@@ -148,8 +148,18 @@ PRINTER_ALERTS_TEXT_MAP: Final = {
 }
 
 
-def parse_printer_alerts(string_table: List[StringTable]) -> Section:
-    return [Alert(*s) for s in string_table[0] if s[1:5] != ["0", "0", "0", ""]]
+def parse_printer_alerts(string_table: list[StringTable]) -> Section:
+    return [
+        Alert(
+            severity=s[0],
+            group=s[1],
+            group_index=s[2],
+            code=s[3],
+            description=s[4].replace("-\n", "").replace("\n", " "),
+        )
+        for s in string_table[0]
+        if s[1:5] != ["0", "0", "0", ""]
+    ]
 
 
 register.snmp_section(
@@ -157,13 +167,16 @@ register.snmp_section(
     detect=DETECT_PRINTER,
     parse_function=parse_printer_alerts,
     fetch=[
-        SNMPTree(base=".1.3.6.1.2.1.43.18.1.1", oids=[
-            "2",
-            "4",
-            "5",
-            "7",
-            "8",
-        ]),
+        SNMPTree(
+            base=".1.3.6.1.2.1.43.18.1.1",
+            oids=[
+                "2",
+                "4",
+                "5",
+                "7",
+                "8",
+            ],
+        ),
     ],
 )
 

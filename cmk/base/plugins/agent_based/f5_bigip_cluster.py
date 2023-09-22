@@ -1,30 +1,21 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """F5-BIGIP-Cluster Config Sync - SNMP sections and Checks
 """
-from typing import Any, List, Mapping, Optional
-from collections import namedtuple
+from collections.abc import Mapping
+from typing import Any, NamedTuple
 
-from .agent_based_api.v1 import (
-    SNMPTree,
-    register,
-    Service,
-    Result,
-    State as state,
-    all_of,
-)
-from .agent_based_api.v1.type_defs import (
-    StringTable,
-    CheckResult,
-    DiscoveryResult,
-)
-
+from .agent_based_api.v1 import all_of, register, Result, Service, SNMPTree, State
+from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult, StringTable
 from .utils.f5_bigip import F5_BIGIP, VERSION_PRE_V11, VERSION_V11_PLUS
 
-State = namedtuple("State", ["state", "description"])
+
+class NodeState(NamedTuple):
+    state: str
+    description: str
+
 
 CONFIG_SYNC_DEFAULT_PARAMETERS = {
     "0": 3,
@@ -40,32 +31,32 @@ CONFIG_SYNC_DEFAULT_PARAMETERS = {
 }
 
 CONFIG_SYNC_STATE_NAMES = {
-    '0': "Unknown",
-    '1': "Syncing",
-    '2': "Need Manual Sync",
-    '3': "In Sync",
-    '4': "Sync Failed",
-    '5': "Sync Disconnected",
-    '6': "Standalone",
-    '7': "Awaiting Initial Sync",
-    '8': "Incompatible Version",
-    '9': "Partial Sync",
+    "0": "Unknown",
+    "1": "Syncing",
+    "2": "Need Manual Sync",
+    "3": "In Sync",
+    "4": "Sync Failed",
+    "5": "Sync Disconnected",
+    "6": "Standalone",
+    "7": "Awaiting Initial Sync",
+    "8": "Incompatible Version",
+    "9": "Partial Sync",
 }
 
 
-def discover_f5_bigip_config_sync(section: State) -> DiscoveryResult:
+def discover_f5_bigip_config_sync(section: NodeState) -> DiscoveryResult:
     # run inventory unless we found a device in unconfigured state
     # don't need to loop over the input as there's only one status
     if not section.state == "-1":
         yield Service()
 
 
-def parse_f5_bigip_config_sync_pre_v11(string_table: List[StringTable]) -> Optional[State]:
+def parse_f5_bigip_config_sync_pre_v11(string_table: list[StringTable]) -> NodeState | None:
     """Read a node status encoded as stringified int
     >>> parse_f5_bigip_config_sync_pre_v11([[["0 - Synchronized"]]])
-    State(state='0', description='Synchronized')
+    NodeState(state='0', description='Synchronized')
     """
-    return State(*string_table[0][0][0].split(" - ", 1)) if string_table[0] else None
+    return NodeState(*string_table[0][0][0].split(" - ", 1)) if string_table[0] else None
 
 
 # see: 1.3.6.1.4.1.3375.2.1.1.1.1.6.0
@@ -75,7 +66,7 @@ def parse_f5_bigip_config_sync_pre_v11(string_table: List[StringTable]) -> Optio
 # F5 nodes need to be ntp synced otherwise status reports might be wrong.
 
 
-def check_f5_bigip_config_sync_pre_v11(section: State) -> CheckResult:
+def check_f5_bigip_config_sync_pre_v11(section: NodeState) -> CheckResult:
     # possible state values:
     #  -1   unconfigured,           ok only if original status
     #                               otherwise this would mean something is heavily broken?
@@ -83,14 +74,16 @@ def check_f5_bigip_config_sync_pre_v11(section: State) -> CheckResult:
     # 1/2   one system outdated,    warn
     #   3   both systems outdated,  crit   (config split brain)
     if section.state == "0":
-        yield Result(state=state.OK, summary=section.description)
+        yield Result(state=State.OK, summary=section.description)
     elif section.state in {"-1", "3"}:
-        yield Result(state=state.CRIT, summary=section.description)
+        yield Result(state=State.CRIT, summary=section.description)
     elif section.state in {"1", "2"}:
-        yield Result(state=state.WARN, summary=section.description)
+        yield Result(state=State.WARN, summary=section.description)
     else:
-        yield Result(state=state.UNKNOWN,
-                     summary="unexpected output from SNMP Agent %r" % section.description)
+        yield Result(
+            state=State.UNKNOWN,
+            summary="unexpected output from SNMP Agent %r" % section.description,
+        )
 
 
 register.snmp_section(
@@ -118,28 +111,30 @@ register.check_plugin(
 # F5 nodes need to be ntp synced otherwise status reports might be wrong.
 
 
-def parse_f5_bigip_config_sync_v11_plus(string_table: List[StringTable]) -> Optional[State]:
+def parse_f5_bigip_config_sync_v11_plus(string_table: list[StringTable]) -> NodeState | None:
     """Read a node status encoded as stringified int
     >>> parse_f5_bigip_config_sync_v11_plus([[['3', 'In Sync']]])
-    State(state='3', description='In Sync')
+    NodeState(state='3', description='In Sync')
     """
-    return State(*string_table[0][0]) if string_table[0] else None
+    return NodeState(*string_table[0][0]) if string_table[0] else None
 
 
-def check_f5_bigip_config_sync_v11_plus(params: Mapping[str, Any], section: State) -> CheckResult:
+def check_f5_bigip_config_sync_v11_plus(
+    params: Mapping[str, Any], section: NodeState
+) -> CheckResult:
     """
     >> for r in check_f5_bigip_config_sync_v11_plus(
     ...         params=CONFIG_SYNC_DEFAULT_PARAMETERS,
     ...         section={"node1": 0, "node2": 3}):
     ...     print(r)
-    Result(state=<state.OK: 0>, summary='Node [node1] is standby')
+    Result(state=<State.OK: 0>, summary='Node [node1] is standby')
     """
     status = params[section.state]
     status_name = CONFIG_SYNC_STATE_NAMES[section.state]
     infotext = status_name
     if status_name != section.description:
-        infotext += ' - ' + section.description
-    yield Result(state=state(status), summary=infotext)
+        infotext += " - " + section.description
+    yield Result(state=State(status), summary=infotext)
 
 
 register.snmp_section(
@@ -152,7 +147,8 @@ register.snmp_section(
             oids=[
                 "1.0",  # sysCmSyncStatusId
                 "2.0",  # sysCmSyncStatusStatus
-            ]),
+            ],
+        ),
     ],
 )
 

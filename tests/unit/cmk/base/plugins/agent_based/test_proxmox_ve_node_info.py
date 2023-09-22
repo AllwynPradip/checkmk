@@ -1,33 +1,48 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+import json
+from collections.abc import Mapping
+
 import pytest
 
+from cmk.base.api.agent_based.checking_classes import CheckResult
 from cmk.base.plugins.agent_based.agent_based_api.v1 import Result, State
 from cmk.base.plugins.agent_based.proxmox_ve_node_info import (
-    parse_proxmox_ve_node_info,
     check_proxmox_ve_node_info,
+    parse_proxmox_ve_node_info,
+    Section,
 )
 
-NODE_DATA = parse_proxmox_ve_node_info([[
-    '{'
-    ' "lxc": ["103", "101", "108", "105", "104"],'
-    ' "proxmox_ve_version": {"release": "6.2", "repoid": "48bd51b6", "version": "6.2-15"},'
-    ' "qemu": ["102", "9000", "106", "109"],'
-    ' "status": "online",'
-    ' "subscription": {'
-    '     "checktime": "1607143921",'
-    '     "key": "pve2c-be9cadf297",'
-    '     "level": "c",'
-    '     "nextduedate": "2021-07-03",'
-    '     "productname": "Proxmox VE Community Subscription 2 CPUs/year",'
-    '     "regdate": "2020-07-03 00:00:00",'
-    '     "status": "Active"'
-    '}}'
-]])
+NODE_DATA = parse_proxmox_ve_node_info(
+    [
+        [
+            json.dumps(
+                {
+                    "lxc": ["103", "101", "108", "105", "104"],
+                    "proxmox_ve_version": {
+                        "release": "6.2",
+                        "repoid": "48bd51b6",
+                        "version": "6.2-15",
+                    },
+                    "qemu": ["102", "9000", "106", "109"],
+                    "status": "online",
+                    "subscription": {
+                        "checktime": "1607143921",
+                        "key": "pve2c-be9cadf297",
+                        "level": "c",
+                        "nextduedate": "2021-07-03",
+                        "productname": "Proxmox VE Community Subscription 2 CPUs/year",
+                        "regdate": "2020-07-03 00:00:00",
+                        "status": "Active",
+                    },
+                }
+            )
+        ]
+    ]
+)
 
 
 @pytest.mark.parametrize(
@@ -69,8 +84,11 @@ NODE_DATA = parse_proxmox_ve_node_info([[
                 Result(state=State.OK, summary="Hosted VMs: 5x LXC, 4x Qemu"),
             ),
         ),
-    ])
-def test_check_proxmox_ve_node_info(params, section, expected_results) -> None:
+    ],
+)
+def test_check_proxmox_ve_node_info(
+    params: Mapping[str, object], section: Section, expected_results: CheckResult
+) -> None:
     results = tuple(check_proxmox_ve_node_info(params, section))
     print("\n" + "\n".join(map(str, results)))
     assert results == expected_results
@@ -80,9 +98,13 @@ if __name__ == "__main__":
     # Please keep these lines - they make TDD easy and have no effect on normal test runs.
     # Just run this file from your IDE and dive into the code.
     import os
-    from testlib.utils import cmk_path
-    assert not pytest.main([
-        "--doctest-modules",
-        os.path.join(cmk_path(), "cmk/base/plugins/agent_based/proxmox_ve_node_info.py")
-    ])
+
+    from tests.testlib.utils import cmk_path
+
+    assert not pytest.main(
+        [
+            "--doctest-modules",
+            os.path.join(cmk_path(), "cmk/base/plugins/agent_based/proxmox_ve_node_info.py"),
+        ]
+    )
     pytest.main(["-T=unit", "-vvsx", __file__])

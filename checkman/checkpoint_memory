@@ -1,15 +1,15 @@
-title: Checkpoint Firewalls: Memory Usage
+title: Check Point Firewalls: Memory Usage
 agents: snmp
 catalog: hw/network/checkpoint
-license: GPL
+license: GPLv2
 distribution: check_mk
 
 description:
- This check monitors the current memory usage on a Checkpoint Firewall.
+ This check monitors the current memory usage on a Check Point Firewall.
  Warning and critical levels may be configured via WATO.
 
 item:
  The fixed statement {{System}}
 
-inventory:
+discovery:
  One service is created.

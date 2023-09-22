@@ -4,7 +4,7 @@ SETLOCAL EnableDelayedExpansion
 @rem Installs all required packages GLOBALLY
 
 if "%1"=="" (
-set ppath=C:\Python27.32\Scripts
+set ppath=C:\Python310\Scripts
 powershell Write-Host "Using default directory !ppath!" -Foreground Green
 ) else (
 set ppath=%1\Scripts
@@ -19,17 +19,12 @@ powershell Write-Host "Pip Upgraded" -Foreground Green
 ) else (
   powershell Write-Host "Pip Upgrade Failed"  -Foreground Red
 )
+
 @!ppath!\pip install pyinstaller > nul 2>&1 
 if "%errorlevel%" == "0" (
 powershell Write-Host "pyinstaller installed" -Foreground Green 
 ) else (
   powershell Write-Host "pyinstaller install Failed"  -Foreground Red
-)
-@!ppath!\pip install yapf > nul 2>&1 
-if "%errorlevel%" == "0" (
-powershell Write-Host "yapf installed" -Foreground Green 
-) else (
-  powershell Write-Host "yapf install Failed"  -Foreground Red
 )
 
 @!ppath!\pip install future> nul 2>&1 
@@ -57,3 +52,8 @@ call python_package_install !ppath! typing
 call python_package_install !ppath! pytest
 call python_package_install !ppath! freezegun
 call python_package_install !ppath! bs4
+call python_package_install !ppath! black
+call python_package_install !ppath! isort
+call python_package_install !ppath! pytest-mock
+call python_package_install !ppath! telnetlib3
+call python_package_install !ppath! asyncio

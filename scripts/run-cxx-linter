@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -26,6 +26,7 @@ execute_test() {
     # names into --what-if=... options for make and do a dry run with them. This
     # outputs the compilation commands needed, which we massage a bit with grep and
     # sed to finally find out which C/C++ we need to check. Brilliant!  :-D  ;-)
+    # shellcheck disable=SC2046
     FILES_TO_CHECK=$(make --dry-run \
         $(git diff-tree --no-commit-id --name-only -r --relative "${PATCHSET_REVISION}" |
             sed 's/\(.*\)/--what-if=\1/') \
@@ -45,11 +46,12 @@ execute_test() {
     echo "${FILES_TO_CHECK}"
 
     echo "==================== ${TARGET}"
+    # shellcheck disable=SC2086,SC2116
     make "${TARGET}" FILES_TO_CHECK="$(echo $FILES_TO_CHECK)"
 }
 
-if [ "$PWD" != "$REPO_DIR/livestatus/src" ] && [ "$PWD" != "$REPO_DIR/enterprise/core/src" ]; then
-    echo "ERROR: Wrong working directory (go to $REPO_DIR/livestatus/src or $REPO_DIR/enterprise/core/src)"
+if [ "$PWD" != "$REPO_DIR/packages/cmc" ]; then
+    echo "ERROR: Wrong working directory (go to $REPO_DIR/packages/cmc)"
     exit 1
 fi
 

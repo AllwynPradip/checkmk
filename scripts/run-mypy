@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -7,7 +7,10 @@
 # tell mypy about the relevant paths using the MYPYPATH environment variable
 set -e
 
-REPO_PATH=$(dirname $(dirname $(realpath "$0")))
+REPO_PATH="$(dirname "$(dirname "$(realpath "$0")")")"
+
+# --no-print-directory prevents make dir change messages in the output
+PYTHON_MAJOR_DOT_MINOR=$(make --no-print-directory -f "$REPO_PATH/defines.make" print-PYTHON_MAJOR_DOT_MINOR)
 
 # Detect whether or not mypy is available and print out an error that is in the
 # same format as mypy issues. This message is understood by e.g. vims ALE and
@@ -16,7 +19,7 @@ VENV_MYPY_PATH="$REPO_PATH/.venv/bin/mypy"
 if [ ! -f "$VENV_MYPY_PATH" ]; then
     # Try to fix this first
     rm -rf "$REPO_PATH/.venv"
-    make --silent -C "$REPO_PATH" .venv 1>&2
+    make -C "$REPO_PATH" .venv 1>&2
 
     if [ ! -f "$VENV_MYPY_PATH" ]; then
         for LAST_ARG; do :; done
@@ -27,14 +30,15 @@ fi
 
 # NOTE: We should NOT run this in "$REPO_PATH", otherwise mypy will make paths
 # in messages relative, which will confuse e.g. Emacs' flycheck mode.
-MYPYPATH="$REPO_PATH:$REPO_PATH/livestatus/api/python:$REPO_PATH/omd/packages/omd:$REPO_PATH/tests:$REPO_PATH/tests/typeshed" \
+# shellcheck disable=SC2086
+MYPYPATH="$REPO_PATH:\
+$REPO_PATH/tests/typeshed:\
+$REPO_PATH/livestatus/api/python:\
+$REPO_PATH/enterprise:\
+$REPO_PATH/omd/packages/omd" \
     exec "$REPO_PATH/scripts/run-pipenv" run mypy \
-    --python-version 3.8 \
+    --python-version "${PYTHON_MAJOR_DOT_MINOR}" \
     --scripts-are-modules \
     --show-error-codes \
-    --check-untyped-defs \
-    --strict-equality \
-    --no-implicit-optional \
-    --cache-dir=/dev/null \
     ${JUNIT_XML} \
     "$@"

@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import json
 import re
+from collections.abc import Container, Iterable, Mapping
 from dataclasses import dataclass
-from typing import Container, Iterable, Mapping, TypedDict
+
+from typing_extensions import TypedDict
 
 from .agent_based_api.v1 import register, Result, Service, State
 from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult, StringTable
@@ -75,9 +76,11 @@ def discover_datadog_monitors(
     params: DiscoveryParams,
     section: Section,
 ) -> DiscoveryResult:
-    yield from (Service(item=name)
-                for name, monitor in section.items()
-                if monitor.state in params["states_discover"])
+    yield from (
+        Service(item=name)
+        for name, monitor in section.items()
+        if monitor.state in params["states_discover"]
+    )
 
 
 def check_datadog_monitors(
@@ -87,22 +90,27 @@ def check_datadog_monitors(
 ) -> CheckResult:
     if not (monitor := section.get(item)):
         return
+    monitor_message = monitor.message if monitor.message else "No message"
     yield Result(
-        state=State(params["state_mapping"].get(
-            monitor.state,
-            State.UNKNOWN,
-        )),
+        state=State(
+            params["state_mapping"].get(
+                monitor.state,
+                State.UNKNOWN,
+            )
+        ),
         summary=f"Overall state: {monitor.state}",
-        details=monitor.message,
+        details=monitor_message,
     )
     if datadog_thresholds := ", ".join(f"{k}: {v}" for k, v in sorted(monitor.thresholds.items())):
         yield Result(
             state=State.OK,
             summary=f"Datadog thresholds: {datadog_thresholds}",
         )
-    if datadog_tags := ', '.join(  #
-            tag for tag in monitor.tags  #
-            if any(re.match(tag_regex, tag) for tag_regex in params["tags_to_show"])):
+    if datadog_tags := ", ".join(  #
+        tag
+        for tag in monitor.tags  #
+        if any(re.match(tag_regex, tag) for tag_regex in params["tags_to_show"])
+    ):
         yield Result(
             state=State.OK,
             summary=f"Datadog tags: {datadog_tags}",

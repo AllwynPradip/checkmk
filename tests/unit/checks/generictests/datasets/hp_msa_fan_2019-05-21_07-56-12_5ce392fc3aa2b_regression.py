@@ -1,61 +1,69 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# yapf: disable
-# type: ignore
+# fmt: off
+# mypy: disable-error-code=var-annotated
 
 
-
-checkname = u'hp_msa_fan'
-
-
-parsed = {u'Enclosure 1 Left': {u'extended-status': u'16',
-                                u'fw-revision': '',
-                                u'health': u'OK',
-                                u'health-numeric': u'0',
-                                u'health-reason': '',
-                                u'health-recommendation': '',
-                                u'hw-revision': '',
-                                'item_type': u'fan',
-                                u'location': u'Enclosure 1 - Left',
-                                u'locator-led': u'Aus',
-                                u'locator-led-numeric': u'0',
-                                u'name': u'Fan Loc:left-PSU 1',
-                                u'position': u'Links',
-                                u'position-numeric': u'0',
-                                u'serial-number': '',
-                                u'speed': u'3950',
-                                u'status': u'Aktiv',
-                                u'status-numeric': u'0',
-                                u'status-ses': u'OK',
-                                u'status-ses-numeric': u'1'},
-          u'Enclosure 1 Right': {u'extended-status': u'16',
-                                 u'fw-revision': '',
-                                 u'health': u'OK',
-                                 u'health-numeric': u'0',
-                                 u'health-reason': '',
-                                 u'health-recommendation': '',
-                                 u'hw-revision': '',
-                                 'item_type': u'fan',
-                                 u'location': u'Enclosure 1 - Right',
-                                 u'locator-led': u'Aus',
-                                 u'locator-led-numeric': u'0',
-                                 u'name': u'Fan Loc:right-PSU 2',
-                                 u'position': u'Rechts',
-                                 u'position-numeric': u'1',
-                                 u'serial-number': '',
-                                 u'speed': u'4020',
-                                 u'status': u'Aktiv',
-                                 u'status-numeric': u'0',
-                                 u'status-ses': u'OK',
-                                 u'status-ses-numeric': u'1'}}
+checkname = "hp_msa_fan"
 
 
-discovery = {'': [(u'Enclosure 1 Left', None), (u'Enclosure 1 Right', None)]}
+parsed = {
+    "Enclosure 1 Left": {
+        "extended-status": "16",
+        "fw-revision": "",
+        "health": "OK",
+        "health-numeric": "0",
+        "health-reason": "",
+        "health-recommendation": "",
+        "hw-revision": "",
+        "item_type": "fan",
+        "location": "Enclosure 1 - Left",
+        "locator-led": "Aus",
+        "locator-led-numeric": "0",
+        "name": "Fan Loc:left-PSU 1",
+        "position": "Links",
+        "position-numeric": "0",
+        "serial-number": "",
+        "speed": "3950",
+        "status": "Aktiv",
+        "status-numeric": "0",
+        "status-ses": "OK",
+        "status-ses-numeric": "1",
+    },
+    "Enclosure 1 Right": {
+        "extended-status": "16",
+        "fw-revision": "",
+        "health": "OK",
+        "health-numeric": "0",
+        "health-reason": "",
+        "health-recommendation": "",
+        "hw-revision": "",
+        "item_type": "fan",
+        "location": "Enclosure 1 - Right",
+        "locator-led": "Aus",
+        "locator-led-numeric": "0",
+        "name": "Fan Loc:right-PSU 2",
+        "position": "Rechts",
+        "position-numeric": "1",
+        "serial-number": "",
+        "speed": "4020",
+        "status": "Aktiv",
+        "status-numeric": "0",
+        "status-ses": "OK",
+        "status-ses-numeric": "1",
+    },
+}
 
 
-checks = {'': [(u'Enclosure 1 Left', {}, [(0, 'Status: up, speed: 3950 RPM', [])]),
-               (u'Enclosure 1 Right', {}, [(0, 'Status: up, speed: 4020 RPM', [])])]}
+discovery = {"": [("Enclosure 1 Left", None), ("Enclosure 1 Right", None)]}
+
+
+checks = {
+    "": [
+        ("Enclosure 1 Left", {}, [(0, "Status: up, speed: 3950 RPM", [])]),
+        ("Enclosure 1 Right", {}, [(0, "Status: up, speed: 4020 RPM", [])]),
+    ]
+}

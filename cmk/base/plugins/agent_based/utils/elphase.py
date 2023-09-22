@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2021 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2021 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Any, Mapping, Optional, Tuple
-from ..agent_based_api.v1 import render, check_levels, Result, State, type_defs
+from collections.abc import Mapping
+from typing import Any
 
-CheckParams = Optional[Mapping[str, Any]]
+from ..agent_based_api.v1 import check_levels, render, Result, State, type_defs
+
+CheckParams = Mapping[str, Any] | None
 Sensor = Mapping[str, Any]
 Section = Mapping[str, Sensor]
 
@@ -20,7 +21,11 @@ Section = Mapping[str, Sensor]
 #        "current" : 12.0,                                # without device state
 #     }
 # }
-def check_elphase(item: str, params: CheckParams, section: Section) -> type_defs.CheckResult:
+def check_elphase(  # pylint: disable=too-many-branches
+    item: str,
+    params: CheckParams,
+    section: Section,
+) -> type_defs.CheckResult:
     if item not in section:
         return  # Item not found in SNMP data
 
@@ -29,6 +34,18 @@ def check_elphase(item: str, params: CheckParams, section: Section) -> type_defs
 
     if params is None:
         params = {}
+
+    if "name" in section[item]:
+        yield Result(
+            state=State.OK,
+            summary="Name: %s" % section[item]["name"],
+        )
+
+    if "type" in section[item]:
+        yield Result(
+            state=State.OK,
+            summary="Type: %s" % section[item]["type"],
+        )
 
     if "device_state" in section[item]:
         device_state, device_state_readable = section[item]["device_state"]
@@ -42,8 +59,10 @@ def check_elphase(item: str, params: CheckParams, section: Section) -> type_defs
                 state = 0
         else:
             state = device_state
-        yield Result(state=State(state),
-                     summary="Device status: %s(%s)" % (device_state_readable, device_state))
+        yield Result(
+            state=State(state),
+            summary=f"Device status: {device_state_readable}({device_state})",
+        )
 
     for quantity, title, render_func, bound, factor in [
         ("voltage", "Voltage", lambda x: f"{x:.1f} V", Bounds.Lower, 1),
@@ -53,10 +72,20 @@ def check_elphase(item: str, params: CheckParams, section: Section) -> type_defs
         ("appower", "Apparent Power", lambda x: f"{x:.1f} VA", Bounds.Upper, 1),
         ("energy", "Energy", lambda x: f"{x:.1f} Wh", Bounds.Upper, 1),
         ("frequency", "Frequency", lambda x: f"{x:.1f} hz", Bounds.Both, 1),
-        ("differential_current_ac", "Differential current AC", lambda x: f"{(x * 1000):.1f} mA",
-         Bounds.Upper, 0.001),
-        ("differential_current_dc", "Differential current DC", lambda x: f"{(x * 1000):.1f} mA",
-         Bounds.Upper, 0.001),
+        (
+            "differential_current_ac",
+            "Differential current AC",
+            lambda x: f"{(x * 1000):.1f} mA",
+            Bounds.Upper,
+            0.001,
+        ),
+        (
+            "differential_current_dc",
+            "Differential current DC",
+            lambda x: f"{(x * 1000):.1f} mA",
+            Bounds.Upper,
+            0.001,
+        ),
     ]:
         if quantity not in section[item]:
             continue
@@ -68,8 +97,8 @@ def check_elphase(item: str, params: CheckParams, section: Section) -> type_defs
             value = entry  # 12.0
             state_info = None
 
-        levels_upper: Optional[Tuple[float, float]] = None
-        levels_lower: Optional[Tuple[float, float]] = None
+        levels_upper: tuple[float, float] | None = None
+        levels_lower: tuple[float, float] | None = None
         if quantity in params:
             if bound == Bounds.Both:
                 levels = params[quantity]

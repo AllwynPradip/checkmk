@@ -7,16 +7,17 @@
 #include <fstream>
 
 #include "common/wtools.h"
-#include "install_api.h"
-#include "service_processor.h"
-#include "test_tools.h"
+#include "watest/test_tools.h"
+#include "wnx/install_api.h"
+#include "wnx/service_processor.h"
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
+using namespace std::string_literals;
 
 namespace cma::install {
 
-TEST(InstallAuto, FileControlIntegration) {
+TEST(InstallAuto, FileControlComponent) {
     tst::TempDirPair dirs{test_info_->name()};
     auto in = dirs.in();
     auto out = dirs.out();
@@ -54,7 +55,14 @@ TEST(InstallAuto, FileControlIntegration) {
     EXPECT_TRUE(fs::exists(path, ec));
 
     EXPECT_FALSE(NeedInstall(path, out));
+    tools::sleep(100ms);  // guarantee that file will be new
     tst::CreateTextFile(path, "-----\n");
+    // Typical windows code below: wait for file, because on heavy load file may
+    // not be created quick enough. WTF Microsoft?
+    tst::WaitForSuccessSilent(1000ms, [path] {
+        std::error_code code;
+        return fs::exists(path, code);
+    });
     EXPECT_TRUE(NeedInstall(path, out));
     BackupFile(path, out);
     EXPECT_FALSE(NeedInstall(path, out));
@@ -130,24 +138,28 @@ protected:
                             "This is  script");
     }
 
+    [[nodiscard]] tst::TempCfgFs *fs() const { return fs_.get(); }
+    [[nodiscard]] ExecuteUpdate *eu() const { return eu_.get(); }
+
+private:
     std::unique_ptr<tst::TempCfgFs> fs_;
     std::unique_ptr<ExecuteUpdate> eu_;
 };
 
-TEST_F(InstallAutoSimulationFixture, BackupLogIntegration) {
-    fs::path log_bak_file{eu_->getLogFileName()};
+TEST_F(InstallAutoSimulationFixture, BackupLogComponent) {
+    fs::path log_bak_file{eu()->getLogFileName()};
     log_bak_file.replace_extension(".log.bak");
 
     // perform backup of the log action
-    eu_->backupLog();
+    eu()->backupLog();
 
     // expected copy of log
     EXPECT_TRUE(fs::exists(log_bak_file));
 }
 
-TEST_F(InstallAutoSimulationFixture, CopyScriptToTempIntegration) {
-    eu_->copyScriptToTemp();
-    EXPECT_TRUE(fs::exists(eu_->getTempScriptFile()));
+TEST_F(InstallAutoSimulationFixture, CopyScriptToTempComponent) {
+    EXPECT_TRUE(eu()->copyScriptToTemp());
+    EXPECT_TRUE(fs::exists(eu()->getTempScriptFile()));
 }
 
 extern bool g_use_script_to_install;
@@ -185,7 +197,7 @@ TEST(InstallAuto, PrepareExecutionFallback) {
     EXPECT_EQ(fs::path(msi_log_file).filename().u8string(), kMsiLogFileName);
 }
 
-TEST(InstallAuto, CheckForUpdateFileIntegration) {
+TEST(InstallAuto, CheckForUpdateFileComponent) {
     namespace fs = std::filesystem;
     auto msi = cma::cfg::GetMsiExecPath();
     ASSERT_TRUE(!msi.empty());
@@ -214,8 +226,8 @@ TEST(InstallAuto, CheckForUpdateFileIntegration) {
     {
         auto path = in / name;
         tst::CreateTextFile(path, "-----\n");
-        auto [command, result] = CheckForUpdateFile(
-            name, in.wstring(), UpdateProcess::skip, out.wstring());
+        auto [command, result] =
+            CheckForUpdateFile(name, in.wstring(), UpdateProcess::skip);
         EXPECT_TRUE(result);
 
         EXPECT_TRUE(!fs::exists(path, ec));
@@ -230,8 +242,8 @@ TEST(InstallAuto, CheckForUpdateFileIntegration) {
         ASSERT_TRUE(temp_fs->createRootFile(
             fs::path(cfg::dirs::kAgentUtils) / cfg::files::kExecuteUpdateFile,
             "rem echo nothing\n"));
-        auto [command, result] = CheckForUpdateFile(
-            name, in.wstring(), UpdateProcess::skip, out.wstring());
+        auto [command, result] =
+            CheckForUpdateFile(name, in.wstring(), UpdateProcess::skip);
         EXPECT_TRUE(result);
 
         EXPECT_TRUE(!fs::exists(path, ec));
@@ -249,19 +261,64 @@ TEST(InstallAuto, FindAgentMsiSkippable) {
     ASSERT_TRUE(fs::exists(*agent_msi));
 }
 
-TEST(InstallAuto, FindProductMsi) {
-    auto msi = FindProductMsi(L"MSI Development Tools");
+TEST(InstallAuto, FindProductMsiComponent) {
+    const auto msi = FindProductMsi(L"MSI Development Tools");
     ASSERT_TRUE(msi);
     ASSERT_TRUE(fs::exists(*msi));
 }
 
-TEST(InstallAuto, LastInstallFailReason) {
+TEST(InstallAuto, LastMsiFailReason) {
     auto temp_fs = tst::TempCfgFs::Create();
-    EXPECT_FALSE(GetLastInstallFailReason());
+    EXPECT_FALSE(GetLastMsiFailReason());
     tst::misc::CopyFailedPythonLogFileToLog(temp_fs->data());
-    auto result = GetLastInstallFailReason();
+    auto result = GetLastMsiFailReason();
     EXPECT_TRUE(result);
     EXPECT_NE(result->find(L"This version supports only"), std::wstring::npos);
+}
+
+class InstallAutoFixture : public testing::Test {
+protected:
+    void SetUp() override {
+        fs_ = tst::TempCfgFs::Create();
+        log_file_ = fs::path{cfg::GetLogDir()} / api_err::kLogFileName;
+        bak_file_ = log_file_;
+        bak_file_ += ".bak";
+    }
+
+    [[nodiscard]] const auto &logFile() const noexcept { return log_file_; }
+    [[nodiscard]] bool existsBak() const noexcept {
+        std::error_code ec;
+        return fs::exists(bak_file_, ec);
+    }
+
+    void createLogFile(std::string_view text) const {
+        tst::CreateTextFile(logFile(), text);
+    }
+
+private:
+    std::unique_ptr<tst::TempCfgFs> fs_;
+    fs::path log_file_;
+    fs::path bak_file_;
+};
+
+TEST_F(InstallAutoFixture, InstallApiError) {
+    EXPECT_FALSE(api_err::Get());
+    createLogFile("failed x");
+    EXPECT_FALSE(api_err::Get());
+
+    createLogFile("x\n"s + std::string{api_err::kFailMarker} + "failed x\nx\n");
+    auto result = api_err::Get();
+    EXPECT_TRUE(result);
+    EXPECT_EQ(*result, L"failed x"s);
+
+    api_err::Register("zzz");
+    result = api_err::Get();
+    EXPECT_TRUE(result);
+    EXPECT_EQ(*result, L"zzz"s);
+    EXPECT_TRUE(existsBak());
+
+    api_err::Clean();
+    EXPECT_FALSE(api_err::Get());
 }
 
 }  // namespace cma::install

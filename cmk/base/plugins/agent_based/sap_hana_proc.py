@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
+from .agent_based_api.v1 import IgnoreResultsError, register, Result, Service, State
+from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult, StringTable
 from .utils import sap_hana
-from .agent_based_api.v1 import register, Service, Result, State
-from .agent_based_api.v1.type_defs import (
-    DiscoveryResult,
-    StringTable,
-    CheckResult,
-)
 
 
 def parse_sap_hana_proc(string_table: StringTable) -> sap_hana.ParsedSection:
@@ -24,13 +20,15 @@ def parse_sap_hana_proc(string_table: StringTable) -> sap_hana.ParsedSection:
                 continue
 
             inst = section.setdefault(
-                "%s - %s" % (sid_instance, line[1]), {
+                f"{sid_instance} - {line[1]}",
+                {
                     "port": line[0],
                     "pid": line[2],
                     "detail": line[3],
                     "acting": line[4],
                     "coordin": line[6],
-                })
+                },
+            )
             try:
                 inst["sql_port"] = int(line[5])
             except ValueError:
@@ -49,18 +47,19 @@ def discovery_sap_hana_proc(section: sap_hana.ParsedSection) -> DiscoveryResult:
         yield Service(item=sid_instance, parameters={"coordin": data["coordin"]})
 
 
-def check_sap_hana_proc(item: str, params: Mapping[str, Any],
-                        section: sap_hana.ParsedSection) -> CheckResult:
+def check_sap_hana_proc(
+    item: str, params: Mapping[str, Any], section: sap_hana.ParsedSection
+) -> CheckResult:
     data = section.get(item)
     if data is None:
-        return
+        raise IgnoreResultsError("Login into database failed.")
 
-    yield Result(state=State.OK, summary="Port: %s, PID: %s" % (data["port"], data["pid"]))
+    yield Result(state=State.OK, summary="Port: {}, PID: {}".format(data["port"], data["pid"]))
 
     p_coordin = params["coordin"]
     coordin = data["coordin"]
     if p_coordin != coordin:
-        yield Result(state=State.WARN, summary="Role: changed from %s to %s" % (p_coordin, coordin))
+        yield Result(state=State.WARN, summary=f"Role: changed from {p_coordin} to {coordin}")
     elif coordin.lower() != "none":
         yield Result(state=State.OK, summary="Role: %s" % coordin)
 
@@ -76,6 +75,6 @@ register.check_plugin(
     service_name="SAP HANA Process %s",
     discovery_function=discovery_sap_hana_proc,
     check_function=check_sap_hana_proc,
+    check_ruleset_name="sap_hana_proc",
     check_default_parameters={},
-    cluster_check_function=sap_hana.get_cluster_check_with_params(check_sap_hana_proc),
 )

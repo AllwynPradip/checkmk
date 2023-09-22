@@ -1,54 +1,37 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Any, Dict, List, Tuple, Optional, MutableMapping
-from .utils.liebert import (
-    DETECT_LIEBERT,
-    parse_liebert,
-)
-from .utils.temperature import (
-    check_temperature,
-    TempParamType,
-    to_celsius,
-)
-from .agent_based_api.v1 import (
-    register,
-    SNMPTree,
-    Service,
-    Result,
-    get_value_store,
-    State as state,
-)
-from .agent_based_api.v1.type_defs import (
-    StringTable,
-    CheckResult,
-    DiscoveryResult,
-)
+from collections.abc import Mapping, MutableMapping
+from typing import Any
 
-ParsedSection = Dict[str, Any]
+from .agent_based_api.v1 import get_value_store, register, Result, Service, SNMPTree, State
+from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult, StringTable
+from .utils.liebert import DETECT_LIEBERT, parse_liebert, SystemSection, temperature_to_celsius
+from .utils.temperature import check_temperature, TempParamType
+
+ParsedSection = Mapping[str, tuple[str, str]]
 
 
 def _get_item_from_key(key: str) -> str:
     return key.replace(" Air Temperature", "")
 
 
-def _get_item_data(item: str, section_liebert_temp_air: ParsedSection) -> Tuple:
+def _get_item_data(item: str, section_liebert_temp_air: ParsedSection) -> tuple[str, str] | None:
     for key, data in section_liebert_temp_air.items():
         if _get_item_from_key(key) == item:
             return data
-    return (None, None)
+    return None
 
 
-def parse_liebert_temp_air(string_table: List[StringTable]) -> ParsedSection:
+def parse_liebert_temp_air(string_table: list[StringTable]) -> ParsedSection:
     return parse_liebert(string_table, str)
 
 
 def discover_liebert_temp_air(
-    section_liebert_temp_air: Optional[ParsedSection],
-    section_liebert_system: Optional[Dict[str, str]],
+    section_liebert_temp_air: ParsedSection | None,
+    section_liebert_system: SystemSection | None,
 ) -> DiscoveryResult:
     if not section_liebert_temp_air:
         return
@@ -60,8 +43,8 @@ def discover_liebert_temp_air(
 def check_liebert_temp_air(
     item: str,
     params: TempParamType,
-    section_liebert_temp_air: Optional[ParsedSection],
-    section_liebert_system: Optional[Dict[str, str]],
+    section_liebert_temp_air: ParsedSection | None,
+    section_liebert_system: SystemSection | None,
 ) -> CheckResult:
     value_store = get_value_store()
     yield from _check_liebert_temp_air(
@@ -76,32 +59,30 @@ def check_liebert_temp_air(
 def _check_liebert_temp_air(
     item: str,
     params: TempParamType,
-    section_liebert_temp_air: Optional[ParsedSection],
-    section_liebert_system: Optional[Dict[str, str]],
+    section_liebert_temp_air: ParsedSection | None,
+    section_liebert_system: SystemSection | None,
     value_store: MutableMapping[str, Any],
 ) -> CheckResult:
-
     if section_liebert_temp_air is None or section_liebert_system is None:
         return
 
-    value, unit = _get_item_data(item, section_liebert_temp_air)
-    if value is None:
+    if not (item_data := _get_item_data(item, section_liebert_temp_air)):
         return
 
-    device_state = section_liebert_system.get('Unit Operating State')
+    value, unit = item_data
+
+    device_state = section_liebert_system.get("Unit Operating State")
     if "Unavailable" in value and device_state == "standby":
-        yield Result(state=state.OK, summary="Unit is in standby (unavailable)")
+        yield Result(state=State.OK, summary="Unit is in standby (unavailable)")
         return
 
     try:
-        value = float(value)
+        value_float = float(value)
     except ValueError:
         return
 
-    unit = unit.replace('deg ', '').lower()
-    value = to_celsius(value, unit)
     yield from check_temperature(
-        value,
+        temperature_to_celsius(value_float, unit),
         params,
         unique_name="check_liebert_temp_air.%s" % item,
         value_store=value_store,
@@ -114,24 +95,25 @@ register.snmp_section(
     parse_function=parse_liebert_temp_air,
     fetch=[
         SNMPTree(
-            base='.1.3.6.1.4.1.476.1.42.3.9.20.1',
+            base=".1.3.6.1.4.1.476.1.42.3.9.20.1",
             oids=[
-                '10.1.2.1.4291',  # LIEBERT-GP-FLExible-MIB: lgpFlexibleEntryDataLabel
-                '20.1.2.1.4291',  # LIEBERT-GP-FLExible-MIB: lgpFlexibleEntryValue
-                '30.1.2.1.4291',  # LIEBERT-GP-FLExible-MIB: lgpFlexibleEntryUnitsOfMeasure
-                '10.1.2.1.5002',  # LIEBERT-GP-FLExible-MIB: lgpFlexibleEntryDataLabel
-                '20.1.2.1.5002',  # LIEBERT-GP-FLExible-MIB: lgpFlexibleEntryValue
-                '30.1.2.1.5002',  # LIEBERT-GP-FLExible-MIB: lgpFlexibleEntryUnitsOfMeasure
-            ]),
+                "10.1.2.1.4291",  # LIEBERT-GP-FLExible-MIB: lgpFlexibleEntryDataLabel
+                "20.1.2.1.4291",  # LIEBERT-GP-FLExible-MIB: lgpFlexibleEntryValue
+                "30.1.2.1.4291",  # LIEBERT-GP-FLExible-MIB: lgpFlexibleEntryUnitsOfMeasure
+                "10.1.2.1.5002",  # LIEBERT-GP-FLExible-MIB: lgpFlexibleEntryDataLabel
+                "20.1.2.1.5002",  # LIEBERT-GP-FLExible-MIB: lgpFlexibleEntryValue
+                "30.1.2.1.5002",  # LIEBERT-GP-FLExible-MIB: lgpFlexibleEntryUnitsOfMeasure
+            ],
+        ),
     ],
 )
 
 register.check_plugin(
-    name='liebert_temp_air',
-    sections=['liebert_temp_air', 'liebert_system'],
-    service_name='%s Temperature',
+    name="liebert_temp_air",
+    sections=["liebert_temp_air", "liebert_system"],
+    service_name="%s Temperature",
     check_default_parameters={},
     discovery_function=discover_liebert_temp_air,
     check_function=check_liebert_temp_air,
-    check_ruleset_name='temperature',
+    check_ruleset_name="temperature",
 )

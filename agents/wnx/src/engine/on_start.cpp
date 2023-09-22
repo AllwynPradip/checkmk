@@ -1,48 +1,78 @@
 // Configuration Parameters for whole Agent
 #include "stdafx.h"
 
-#include "on_start.h"
+#include "wnx/on_start.h"
 
 #include <atomic>
 #include <string>
-#include <string_view>
 
-#include "cfg.h"
-#include "cma_core.h"
 #include "common/cfg_info.h"
-#include "windows_service_api.h"
+#include "wnx/cfg.h"
+#include "wnx/cfg_details.h"
+#include "wnx/cma_core.h"
+#include "wnx/windows_service_api.h"
 
-namespace cma::details {
-extern bool g_is_test;
-}
+namespace fs = std::filesystem;
 
 namespace cma {
 
+bool OnStart(AppType proposed_type, const std::wstring &config_file);
+inline bool OnStart(AppType type) { return OnStart(type, L""); }
+bool OnStartApp() { return OnStart(AppType::automatic); }
+bool OnStartTest() { return OnStart(AppType::test); }
+
+
 // internal global variables:
-static bool S_ConfigLoaded = false;
-static std::atomic<bool> S_OnStartCalled = false;
+namespace {
+bool g_config_loaded = false;
+std::atomic g_s_on_start_called = false;
+}  // namespace
 
-bool ConfigLoaded() { return S_ConfigLoaded; }
+bool ConfigLoaded() { return g_config_loaded; }
 
-std::pair<std::filesystem::path, std::filesystem::path> FindAlternateDirs(
-    std::wstring_view environment_variable) {
-    auto base = cma::tools::win::GetEnv(environment_variable);
-    if (base.empty()) return {};
+std::pair<fs::path, fs::path> FindTestDirs(const fs::path &base) {
+    auto root_dir = fs::path{base} / "test" / "root";
+    auto data_dir = fs::path{base} / "test" / "data";
 
-    namespace fs = std::filesystem;
-    fs::path root_dir = base;
-    fs::path data_dir = base;
-    data_dir /= L"ProgramData";
-
-    std::error_code ec;
-    if (!std::filesystem::exists(data_dir, ec) &&
-        !fs::create_directories(data_dir, ec)) {
-        XLOG::l.crit("Cannot create test folder {} error:{}", data_dir,
-                     ec.value());
-        return {};
+    if (std::error_code ec;
+        fs::exists(root_dir, ec) && fs::exists(data_dir, ec)) {
+        return {root_dir, data_dir};
     }
 
-    return {root_dir, data_dir};
+    return {};
+}
+
+std::pair<fs::path, fs::path> FindAlternateDirs(AppType app_type) {
+    switch (app_type) {
+        case AppType::exe:
+            for (const auto &env_var :
+                 {env::regression_base_dir, env::integration_base_dir}) {
+                if (auto dir = tools::win::GetEnv(env_var); !dir.empty()) {
+                    XLOG::l.i(
+                        "YOU ARE USING '{}' set by environment variable '{}'",
+                        wtools::ToUtf8(dir), wtools::ToUtf8(env_var));
+                    return FindTestDirs(dir);
+                }
+            }
+            break;
+
+        case AppType::test: {
+            const auto &dir = tools::win::GetEnv(env::unit_base_dir);
+            if (dir.empty()) {
+                XLOG::l.i(
+                    "Environment variable '{}' not found, fallback to SOLUTION_DIR",
+                    wtools::ToUtf8(env::unit_base_dir));
+                return {fs::path{SOLUTION_DIR} / "install" / "resources", {}};
+            }
+            return FindTestDirs(dir);
+        }
+        case AppType::failed:
+        case AppType::srv:
+        case AppType::automatic:
+            XLOG::l("Bad Mode [{}]", static_cast<int>(app_type));
+            return {};
+    }
+    return {};
 }
 
 namespace cfg {
@@ -53,52 +83,46 @@ void LogFolders() {
     XLOG::l.t("Using root = '{}' and data = '{}' folders ", root_dir, data_dir);
 }
 
-bool FindAndPrepareWorkingFolders(AppType Type) {
-    namespace fs = std::filesystem;
-
-    switch (Type) {
-        case AppType::exe:  // main exe
-        {
-            auto [r, d] = FindAlternateDirs(kTemporaryRoot);
+bool FindAndPrepareWorkingFolders(AppType app_type) {
+    switch (app_type) {
+        case AppType::exe:
+            [[fallthrough]];
+        case AppType::test: {  // watest32
+            auto [r, d] = FindAlternateDirs(app_type);
             GetCfg().initFolders(L"", r.wstring(), d.wstring());
             break;
         }
         case AppType::srv:
             GetCfg().initFolders(cma::srv::kServiceName, L"", L"");
             break;
-        case AppType::test:  // only watest
-        {
-            auto [r, d] = FindAlternateDirs(kRemoteMachine);
-#if 0
-            r = "c:\\z\\m\\check_mk\\artefacts";
-            d = "c:\\z\\m\\check_mk\\artefacts\\ProgramData";
-#endif
-            GetCfg().initFolders(L"", r.wstring(), d.wstring());
-            break;
-        }
         case AppType::automatic:
-            XLOG::l.crit("Invalid value of the AppType automatic");
-            return false;
+            [[fallthrough]];
         case AppType::failed:
-            XLOG::l.crit("Invalid value of the AppType automatic");
+            XLOG::l.crit("Invalid value of the AppType automatic [{}]",
+                         static_cast<int>(app_type));
             return false;
-    };
+    }
     LogFolders();
     return true;
 }
 
 }  // namespace cfg
 
-static AppType CalcAppType(AppType Type) {
-    if (Type == AppType::automatic) return AppDefaultType();
-    if (Type == AppType::test) cma::details::g_is_test = true;
+static AppType CalcAppType(AppType app_type) {
+    if (app_type == AppType::automatic) {
+        return AppDefaultType();
+    }
 
-    return Type;
+    if (app_type == AppType::test) {
+        details::SetModus(Modus::test);
+    }
+
+    return app_type;
 }
 
 bool ReloadConfig() {
     //
-    return LoadConfig(AppDefaultType(), {});
+    return LoadConfigFull({});
 }
 
 UninstallAlert g_uninstall_alert;
@@ -111,7 +135,7 @@ void UninstallAlert::clear() noexcept {
 
 void UninstallAlert::set() noexcept {
     //
-    if (!IsService()) {
+    if (GetModus() != Modus::service) {
         XLOG::l.i("Requested clean on exit is IGNORED, not service");
         return;
     }
@@ -122,46 +146,53 @@ void UninstallAlert::set() noexcept {
     set_ = true;
 }
 
-bool LoadConfig(AppType Type, const std::wstring& ConfigFile) {
-    cfg::details::KillDefaultConfig();
-    // load config is here
-    auto cfg_files = cfg::DefaultConfigArray();
-    if (!ConfigFile.empty()) {
-        cfg_files.clear();
-        cfg_files.push_back(ConfigFile);
-    }
+bool LoadConfigBase(const std::vector<std::wstring> &config_filenames,
+                    YamlCacheOp cache_op) {
+    g_config_loaded = cfg::InitializeMainConfig(config_filenames, cache_op);
 
-    S_ConfigLoaded = cfg::InitializeMainConfig(cfg_files, YamlCacheOp::update);
-
-    if (S_ConfigLoaded) {
+    if (g_config_loaded) {
         cfg::ProcessKnownConfigGroups();
         cfg::SetupEnvironmentFromGroups();
     }
 
     XLOG::l.i("Loaded start config {}",
-              wtools::ToUtf8(cma::cfg::GetPathOfLoadedConfig()));
+              wtools::ToUtf8(cfg::GetPathOfLoadedConfig()));
     return true;
 }
 
-bool OnStartCore(AppType type, const std::wstring& config_file) {
-    if (!cfg::FindAndPrepareWorkingFolders(type)) return false;
-    wtools::InitWindowsCom();
+bool LoadConfigFull(const std::wstring &config_file) {
+    cfg::details::KillDefaultConfig();
+    // load config is here
+    auto cfg_files = cfg::DefaultConfigArray();
+    if (!config_file.empty()) {
+        cfg_files.clear();
+        cfg_files.push_back(config_file);
+    }
 
-    return LoadConfig(type, config_file);
+    return LoadConfigBase(cfg_files, YamlCacheOp::update);
 }
 
-// must be called on start
-bool OnStart(AppType proposed_type, const std::wstring& config_file) {
-    auto type = CalcAppType(proposed_type);
+bool OnStartCore(AppType type, const std::wstring &config_file) {
+    if (!cfg::FindAndPrepareWorkingFolders(type)) {
+        return false;
+    }
+    wtools::InitWindowsCom();
 
-    auto already_loaded = S_OnStartCalled.exchange(true);
+    return LoadConfigFull(config_file);
+}
+
+/// must be called on the start
+bool OnStart(AppType proposed_type, const std::wstring &config_file) {
+    const auto type = CalcAppType(proposed_type);
+
+    const auto already_loaded = g_s_on_start_called.exchange(true);
     if (type == AppType::srv) {
         XLOG::details::LogWindowsEventAlways(XLOG::EventLevel::information, 35,
                                              "check_mk_service is loading");
     }
 
     if (!already_loaded) {
-        XLOG::setup::SetContext(cma::IsService() ? "srv" : "app");
+        XLOG::setup::SetContext(GetModus() == Modus::service ? "srv" : "app");
         return OnStartCore(type, config_file);
     }
 

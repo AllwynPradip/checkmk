@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
+
+import re
+import time
+from collections.abc import Iterable, Mapping, Sequence
 
 # Example output from agent:
 # 0 Service_FOO V=1 This Check is OK
@@ -13,40 +16,15 @@
 # P Some_yet_other_Service temp=40;30;50|humidity=28;50:100;0:50;0;100
 # P Has-no-var - This has no variable
 # P No-Text hirn=-8;-20
-from typing import (
-    Any,
-    Dict,
-    List,
-    Mapping,
-    NamedTuple,
-    Optional,
-    Tuple,
-    Union,
-    Iterable,
-    Sequence,
-)
+from typing import Any, NamedTuple
 
-import re
-import time
-
-from .agent_based_api.v1.type_defs import (
-    DiscoveryResult,
-    StringTable,
-)
-from .agent_based_api.v1 import (
-    Result,
-    Metric,
-    Service,
-    State,
-    check_levels,
-    register,
-)
-from .agent_based_api.v1.clusterize import make_node_notice_results
+from .agent_based_api.v1 import check_levels, Metric, register, Result, Service, State
+from .agent_based_api.v1.type_defs import DiscoveryResult, StringTable
 from .utils.cache_helper import CacheInfo, render_cache_info
 
 # we don't have IgnoreResults and thus don't want to handle them
-LocalCheckResult = Iterable[Union[Metric, Result]]
-Levels = Optional[Tuple[float, float]]
+LocalCheckResult = Iterable[Metric | Result]
+Levels = tuple[float, float] | None
 
 
 class Perfdata(NamedTuple):
@@ -54,11 +32,11 @@ class Perfdata(NamedTuple):
     value: float
     levels_upper: Levels
     levels_lower: Levels
-    boundaries: Optional[Tuple[Optional[float], Optional[float]]]
+    boundaries: tuple[float | None, float | None] | None
 
 
 class LocalResult(NamedTuple):
-    cache_info: Optional[CacheInfo]
+    cache_info: CacheInfo | None
     item: str
     state: State
     apply_levels: bool
@@ -72,12 +50,12 @@ class LocalError(NamedTuple):
 
 
 class LocalSection(NamedTuple):
-    errors: List[LocalError]
+    errors: Mapping[str, LocalError]
     data: Mapping[str, LocalResult]
 
 
 def float_ignore_uom(value: str) -> float:
-    '''16MB -> 16.0'''
+    """16MB -> 16.0"""
     while value:
         try:
             return float(value)
@@ -86,29 +64,15 @@ def float_ignore_uom(value: str) -> float:
     return 0.0
 
 
-def _try_convert_to_float(value: str) -> Optional[float]:
+def _try_convert_to_float(value: str) -> float | None:
     try:
         return float(value)
     except ValueError:
         return None
 
 
-def _parse_cache(cache_raw: Optional[str], now: float) -> Optional[CacheInfo]:
-    """Parse and preprocess cache info
-    make sure max(..) will give the oldest/most outdated case
-    """
-    if not cache_raw:
-        return None
-    creation_time, interval = (float(v) for v in cache_raw[7:-1].split(',', 1))
-    age = now - creation_time
-    return CacheInfo(
-        age=age,
-        cache_interval=interval,
-    )
-
-
-def _sanitize_state(raw_state: str) -> Tuple[Union[int, str], str]:
-    state_mapping: Mapping[str, Tuple[Union[int, str], str]] = {
+def _sanitize_state(raw_state: str) -> tuple[int | str, str]:
+    state_mapping: Mapping[str, tuple[int | str, str]] = {
         "0": (0, ""),
         "1": (1, ""),
         "2": (2, ""),
@@ -119,10 +83,10 @@ def _sanitize_state(raw_state: str) -> Tuple[Union[int, str], str]:
 
 
 def _parse_perfentry(entry: str) -> Perfdata:
-    '''Parse single perfdata entry, syntax is:
+    """Parse single perfdata entry, syntax is:
         NAME=VALUE[;[[WARN_LOWER:]WARN_UPPER][;[[CRIT_LOWER:]CRIT_UPPER][;[MIN][;MAX]]]]
 
-    see https://docs.checkmk.com/latest/de/localchecks.html
+    see https://docs.checkmk.com/latest/en/localchecks.html
     >>> _parse_perfentry("a=5;3:7;2:8;1;9")
     Perfdata(name='a', value=5.0, levels_upper=(7.0, 8.0), levels_lower=(3.0, 2.0), boundaries=(1.0, 9.0))
     >>> _parse_perfentry("a=5;7")
@@ -139,21 +103,29 @@ def _parse_perfentry(entry: str) -> Perfdata:
     Perfdata(name='a', value=5.0, levels_upper=(7.0, 8.0), levels_lower=(3.0, -inf), boundaries=(1.0, 9.0))
     >>> _parse_perfentry("a=5;7;2:8;1;9")
     Perfdata(name='a', value=5.0, levels_upper=(7.0, 8.0), levels_lower=(2.0, 2.0), boundaries=(1.0, 9.0))
-    '''
+    >>> _parse_perfentry("a=5;;;;")
+    Perfdata(name='a', value=5.0, levels_upper=None, levels_lower=None, boundaries=(None, None))
+    >>> _parse_perfentry("a=5;7;2:8;;")
+    Perfdata(name='a', value=5.0, levels_upper=(7.0, 8.0), levels_lower=(2.0, 2.0), boundaries=(None, None))
+    >>> _parse_perfentry("a=5;7;2:8;0;")
+    Perfdata(name='a', value=5.0, levels_upper=(7.0, 8.0), levels_lower=(2.0, 2.0), boundaries=(0.0, None))
+    >>> _parse_perfentry("a=5;7;2:8;;20")
+    Perfdata(name='a', value=5.0, levels_upper=(7.0, 8.0), levels_lower=(2.0, 2.0), boundaries=(None, 20.0))
+    """
     entry = entry.rstrip(";")
-    name, raw_list = entry.split('=', 1)
+    name, raw_list = entry.split("=", 1)
     raw = raw_list.split(";")
     value = float_ignore_uom(raw[0])
 
     # create a check_levels compatible levels quadruple
-    levels: List[Optional[float]] = [None] * 4
+    levels: list[float | None] = [None] * 4
     if len(raw) >= 2:
-        warn = raw[1].split(':', 1)
+        warn = raw[1].split(":", 1)
         levels[0] = _try_convert_to_float(warn[-1])
         if len(warn) > 1:
             levels[2] = _try_convert_to_float(warn[0])
     if len(raw) >= 3:
-        crit = raw[2].split(':', 1)
+        crit = raw[2].split(":", 1)
         levels[1] = _try_convert_to_float(crit[-1])
         if len(crit) > 1:
             levels[3] = _try_convert_to_float(crit[0])
@@ -166,11 +138,11 @@ def _parse_perfentry(entry: str) -> Perfdata:
 
     # check_levels won't handle crit=None, if warn is present.
     if levels[0] is not None and levels[1] is None:
-        levels[1] = float('inf')
+        levels[1] = float("inf")
     if levels[2] is not None and levels[3] is None:
-        levels[3] = float('-inf')
+        levels[3] = float("-inf")
 
-    def optional_tuple(warn: Optional[float], crit: Optional[float]) -> Levels:
+    def optional_tuple(warn: float | None, crit: float | None) -> Levels:
         assert (warn is None) == (crit is None)
         if warn is not None and crit is not None:
             return warn, crit
@@ -181,18 +153,20 @@ def _parse_perfentry(entry: str) -> Perfdata:
         value,
         levels_upper=optional_tuple(levels[0], levels[1]),
         levels_lower=optional_tuple(levels[2], levels[3]),
-        boundaries=(float(raw[3]) if len(raw) >= 4 else None,
-                    float(raw[4]) if len(raw) >= 5 else None),
+        boundaries=(
+            _try_convert_to_float(raw[3]) if len(raw) >= 4 else None,
+            _try_convert_to_float(raw[4]) if len(raw) >= 5 else None,
+        ),
     )
 
 
-def _parse_perftxt(string: str) -> Tuple[Iterable[Perfdata], str]:
-    if string == '-':
+def _parse_perftxt(string: str) -> tuple[Iterable[Perfdata], str]:
+    if string == "-":
         return [], ""
 
     perfdata = []
     msg = []
-    for entry in string.split('|'):
+    for entry in string.split("|"):
         try:
             perfdata.append(_parse_perfentry(entry))
         except (ValueError, IndexError):
@@ -202,7 +176,7 @@ def _parse_perftxt(string: str) -> Tuple[Iterable[Perfdata], str]:
     return perfdata, ""
 
 
-def _split_check_result(line: str) -> Optional[Tuple[str, str, str, Optional[str]]]:
+def _split_check_result(line: str) -> tuple[str, str, str, str | None] | None:
     """Parse the output of a local check and return the individual components
     Note: this regex does not check the validity of each component. E.g. the state component
           could be 'NOK' (which is not a valid state) but would be complained later
@@ -219,17 +193,22 @@ def _split_check_result(line: str) -> Optional[Tuple[str, str, str, Optional[str
     forbidden_service_name_characters = r"\"\'"
     match = re.match(
         r"^"
-        r"([^ ]+) "  #                                     - service state (permissive)
-        r"((\"([^%s]+)\")|(\'([^%s]+)\')|([^ %s]+)) "  #   - optionally quoted service name
-        r"([^ ]+)"  #                                      - perf data
-        r"( +(.*))?"  #                                    - service string
+        r"([^ ]+) "  # -                                   - service state (permissive)
+        r"((\"([^%s]+)\")|(\'([^%s]+)\')|([^ %s]+)) "  # - - optionally quoted service name
+        r"([^ ]+)"  # -                                    - perf data
+        r"( +(.*))?"  # -                                  - service string
         r"$" % ((forbidden_service_name_characters,) * 3),
-        line)
-    return None if match is None else (
-        match.groups()[0] or "",
-        match.groups()[5] or match.groups()[3] or match.groups()[1] or "",
-        match.groups()[7] or "",
-        match.groups()[9],
+        line,
+    )
+    return (
+        None
+        if match is None
+        else (
+            match.groups()[0] or "",
+            match.groups()[5] or match.groups()[3] or match.groups()[1] or "",
+            match.groups()[7] or "",
+            match.groups()[9],
+        )
     )
 
 
@@ -277,10 +256,10 @@ def parse_local_pure(string_table: Iterable[Sequence[str]], now: float) -> Local
     #       would make it invalid with no hints about what exactly was the problem.
     #       Therefore we first apply a very loosy pattern to "split" into raw components
     #       and later check those for validity.
-    errors = []
+    errors = {}
     parsed_data = {}
 
-    # turn splittet lines into monolithic strings again in order to be able to handle
+    # turn split lines into monolithic strings again in order to be able to handle
     # all input in the same manner. current `local` sections are 0-separated anyway so
     # joining is only needed for legacy input
     for line in (l[0] if len(l) == 1 else " ".join(l) for l in string_table):
@@ -290,48 +269,39 @@ def parse_local_pure(string_table: Iterable[Sequence[str]], now: float) -> Local
         raw_cached, raw_result = split_cache_match.groups()
 
         if not raw_result:
-            errors.append(
-                LocalError(output=line,
-                           reason="Received empty line. Maybe some of the local checks"
-                           " returns a superfluous newline character."))
             continue
 
         raw_components = _split_check_result(raw_result)
         if not raw_components:
-            # splitting into raw components didn't work out so the given line must
-            # be really crappy
-            errors.append(
-                LocalError(output=line,
-                           reason="Received wrong format of local check output. "
-                           "Please read the documentation regarding the correct format: "
-                           "https://docs.checkmk.com/2.0.0/de/localchecks.html"))
             continue
 
         # these are raw components - not checked for validity yet
         raw_state, raw_item, raw_perf, raw_info = raw_components
 
+        item = raw_item
+
         state, state_msg = _sanitize_state(raw_state)
         if state_msg:
-            errors.append(LocalError(output=line, reason=state_msg))
-
-        item = raw_item
+            errors[item] = LocalError(output=line, reason=state_msg)
+            continue
 
         perfdata, perf_msg = _parse_perftxt(raw_perf)
         if perf_msg:
-            errors.append(LocalError(output=line, reason=perf_msg))
+            errors[item] = LocalError(output=line, reason=perf_msg)
+            continue
 
         # convert escaped newline chars
         # (will be converted back later individually for the different cores)
         text = (raw_info or "").replace("\\n", "\n")
         if state_msg or perf_msg:
             state = 3
-            text = "%s%sOutput is: %s" % (state_msg, perf_msg, text)
+            text = f"{state_msg}{perf_msg}Output is: {text}"
 
         parsed_data[item] = LocalResult(
-            cache_info=_parse_cache(raw_cached, now),
+            cache_info=CacheInfo.from_raw(raw_cached, now),
             item=item,
-            state=State.OK if state == 'P' else State(state),
-            apply_levels=state == 'P',
+            state=State.OK if state == "P" else State(state),
+            apply_levels=state == "P",
             text=text,
             perfdata=perfdata,
         )
@@ -356,52 +326,85 @@ _STATE_MARKERS = {
 # performance data.
 def _local_make_metrics(local_result: LocalResult) -> LocalCheckResult:
     for entry in local_result.perfdata:
+        try:
+            _ = Metric(entry.name, 0)
+        except TypeError as exc:
+            yield Result(
+                state=State.WARN,
+                summary=f"Invalid metric name: {entry.name!r}",
+                details=(
+                    f"The metric name {entry.name!r} is invalid. "
+                    f"It will not be recorded. Problem: {exc}"
+                ),
+            )
+            metric_name = None
+        else:
+            metric_name = entry.name
+
         yield from check_levels(
             entry.value,
             # check_levels does not like levels like (23, None), but it does deal with it.
             levels_upper=entry.levels_upper if local_result.apply_levels else None,
             levels_lower=entry.levels_lower if local_result.apply_levels else None,
-            metric_name=entry.name,
+            metric_name=metric_name,
             label=_labelify(entry.name),
             boundaries=entry.boundaries,
+            notice_only=True,
         )
 
 
 def _labelify(word: str) -> str:
     """
-        >>> _labelify("weekIncidence")
-        'Week incidence'
-        >>> _labelify("casesPer100k")
-        'Cases per 100 k'
-        >>> _labelify("WHOrecommendation4")
-        'WHO recommendation 4'
-        >>> _labelify("zombie_apocalypse")
-        'Zombie apocalypse'
+    >>> _labelify("INCIDENTS_CT_PHISING")
+    'Incidents ct phising'
+    >>> _labelify("weekIncidence")
+    'Week incidence'
+    >>> _labelify("casesPer100k")
+    'Cases per 100 k'
+    >>> _labelify("WHOrecommendation4")
+    'WHO recommendation 4'
+    >>> _labelify("recommendation4WHO")
+    'Recommendation 4 WHO'
+    >>> _labelify("zombie_apocalypse")
+    'Zombie apocalypse'
 
     """
-    label = ''.join("%s%s" % (
-        this if prev.isupper() else this.lower(),
-        ' ' if (  #
-            prev.isupper() and this.isupper() and nxt.islower() or  #
-            this.islower() and nxt.isupper() or  #
-            this.isdigit() is not nxt.isdigit()  #
-        ) else '',
-    ) for prev, this, nxt in zip(' ' + word, word, word[1:] + ' '))
-    return (label[0].upper() + label[1:].replace('_', ' ')).strip()
+    label = "".join(
+        "%s%s"
+        % (
+            this if not prev.isalnum() or prev.isupper() or nxt.isupper() else this.lower(),
+            " "
+            if (
+                prev.isupper()
+                and this.isupper()
+                and nxt.islower()
+                or this.islower()
+                and nxt.isupper()
+                or this.isdigit() is not nxt.isdigit()
+            )
+            else "",
+        )
+        for prev, this, nxt in zip(" " + word, word, word[1:] + " ")
+    )
+    if label.isupper():
+        label = label.lower()
+    return (label[0].upper() + label[1:].replace("_", " ")).strip()
 
 
 def discover_local(section: LocalSection) -> DiscoveryResult:
-    if section.errors:
-        output = section.errors[0].output
-        reason = section.errors[0].reason
-        raise ValueError(("Invalid line in agent section <<<local>>>. "
-                          "Reason: %s First offending line: \"%s\"" % (reason, output)))
-
     for key in section.data:
+        yield Service(item=key)
+
+    for key in section.errors:
         yield Service(item=key)
 
 
 def check_local(item: str, params: Mapping[str, Any], section: LocalSection) -> LocalCheckResult:
+    if (local_error := section.errors.get(item)) is not None:
+        raise ValueError(
+            f'Invalid local check line: "{local_error.output}". Reason: {local_error.reason}'
+        )
+
     local_result = section.data.get(item)
     if local_result is None:
         return
@@ -423,79 +426,6 @@ def check_local(item: str, params: Mapping[str, Any], section: LocalSection) -> 
         yield Result(state=State.OK, summary=render_cache_info(local_result.cache_info))
 
 
-def cluster_check_local(
-    item: str,
-    params: Mapping[str, Any],
-    section: Mapping[str, LocalSection],
-) -> LocalCheckResult:
-
-    # collect the result instances and yield the rest
-    results_by_node: Dict[str, LocalCheckResult] = {}
-    for node, node_section in section.items():
-        node_results = list(check_local(item, {}, node_section))
-        if node_results:
-            results_by_node[node] = node_results
-    if not results_by_node:
-        return
-
-    if params is None or params.get("outcome_on_cluster", "worst") == "worst":
-        yield from _aggregate_worst(results_by_node)
-    else:
-        yield from _aggregate_best(results_by_node)
-
-
-def _aggregate_worst(node_results: Dict[str, LocalCheckResult]) -> LocalCheckResult:
-    node_states: Dict[State, str] = {}
-    for node_name, results in node_results.items():
-        node_states.setdefault(
-            State.worst(*(r.state for r in results if isinstance(r, Result))),
-            node_name,
-        )
-
-    global_worst_state = State.worst(*node_states)
-    worst_node = node_states[global_worst_state]
-
-    for node_result in node_results[worst_node]:
-        if isinstance(node_result, Result):
-            yield Result(
-                state=node_result.state,
-                summary="[%s]: %s" % (worst_node, node_result.summary),
-                details="[%s]: %s" % (worst_node, node_result.details),
-            )
-        else:  # Metric
-            yield node_result
-
-    for node, results in node_results.items():
-        if node != worst_node:
-            yield from make_node_notice_results(node, results)
-
-
-def _aggregate_best(node_results: Dict[str, LocalCheckResult]) -> LocalCheckResult:
-    node_states: Dict[State, str] = {}
-    for node_name, results in node_results.items():
-        node_states.setdefault(
-            State.worst(*(r.state for r in results if isinstance(r, Result))),
-            node_name,
-        )
-
-    global_best_state = State.best(*node_states)
-    best_node = node_states[global_best_state]
-
-    for node_result in node_results[best_node]:
-        if isinstance(node_result, Result):
-            yield Result(
-                state=node_result.state,
-                summary="[%s]: %s" % (best_node, node_result.summary),
-                details="[%s]: %s" % (best_node, node_result.details),
-            )
-        else:  # Metric
-            yield node_result
-
-    for node, results in node_results.items():
-        if node != best_node:
-            yield from make_node_notice_results(node, results, force_ok=True)
-
-
 register.check_plugin(
     name="local",
     service_name="%s",
@@ -503,5 +433,4 @@ register.check_plugin(
     check_default_parameters={},
     check_ruleset_name="local",
     check_function=check_local,
-    cluster_check_function=cluster_check_local,
 )

@@ -1,23 +1,18 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import (
-    Any,
-    Dict,
-    Iterable,
-    Mapping,
-    Sequence,
-    Tuple,
-    Union,
-)
-from .agent_based_api.v1 import (
-    register,
-    type_defs,
-)
-from .utils import interfaces
+from collections.abc import Iterable, Mapping, MutableMapping, MutableSequence, Sequence
+from dataclasses import dataclass, field, replace
+from typing import Any, Literal
+
+from .agent_based_api.v1 import register, TableRow, type_defs
+from .agent_based_api.v1.type_defs import InventoryResult
+from .utils import bonding, interfaces
+from .utils.interfaces import InterfaceWithCounters
+from .utils.inventory_interfaces import Interface as InterfaceInv
+from .utils.inventory_interfaces import inventorize_interfaces
 
 # Example output from agent:
 
@@ -60,52 +55,70 @@ from .utils import interfaces
 #         Auto-negotiation: on
 #         Link detected: yes
 
-SectionInventory = Dict[str, Dict[str, Union[str, Sequence[str]]]]
-Section = Tuple[interfaces.Section, SectionInventory]
+
+@dataclass
+class EthtoolInterface:
+    ethtool_index: str | None = None
+    counters: Sequence[int] = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    address: str = ""
+    speed: int = 0
+    link_detected: str | None = None
+
+
+@dataclass
+class IPLinkInterface:
+    state_infos: Sequence[str]
+    link_ether: str = ""
+    inet: MutableSequence[str] = field(default_factory=list)
+    inet6: MutableSequence[str] = field(default_factory=list)
+
+
+EthtoolSection = Mapping[str, EthtoolInterface]
+SectionInventory = MutableMapping[str, IPLinkInterface]
+Section = tuple[Sequence[InterfaceWithCounters], SectionInventory]
 
 
 def _parse_lnx_if_ipaddress(lines: Iterable[Sequence[str]]) -> SectionInventory:
     ip_stats: SectionInventory = {}
     iface = None
     for line in lines:
-        if line == ['[end_iplink]']:
+        if line == ["[end_iplink]"]:
             break
 
         if line[0].endswith(":") and line[1].endswith(":"):
             # Some (docker) interfaces have suffix "@..." but ethtool does not show this suffix.
             # 1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default ...
             # 5: veth6a06585@if4: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue ...
-            iface = ip_stats.setdefault(line[1][:-1].split("@")[0], {})
+            iface = ip_stats.setdefault(
+                line[1][:-1].split("@")[0], IPLinkInterface(state_infos=line[2][1:-1].split(","))
+            )
             # The interface flags are summarized in the angle brackets.
-            iface["state_infos"] = line[2][1:-1].split(",")
             continue
 
         if not iface:
             continue
 
-        if line[0].startswith('link/'):
+        if len(line) > 1 and line[0] == "link/ether":
             # link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
             # link/none
-            try:
-                iface[line[0]] = line[1]
-                iface[line[2]] = line[3]
-            except IndexError:
-                pass
+            iface.link_ether = _get_physical_address(line[1])
 
-        elif line[0].startswith('inet'):
-            if "temporary" in line and "dynamic" in line:
-                continue
+        if "temporary" in line and "dynamic" in line:
+            continue
+        if line[0] == "inet":
             # inet 127.0.0.1/8 scope host lo
+            iface.inet.append(line[1])
+        elif line[0] == "inet6":
             # inet6 ::1/128 scope host
-            inet_data = iface.setdefault(line[0], [])
-            assert isinstance(inet_data, list)
-            inet_data.append(line[1])
+            iface.inet6.append(line[1])
     return ip_stats
 
 
-def _parse_lnx_if_sections(string_table: type_defs.StringTable):
-    ip_stats = {}
-    ethtool_stats: Dict[str, Dict[str, Union[str, int, Sequence[int]]]] = {}
+def _parse_lnx_if_sections(
+    string_table: type_defs.StringTable,
+) -> tuple[SectionInventory, EthtoolSection]:
+    ip_stats: dict[str, IPLinkInterface] = {}
+    ethtool_stats: dict[str, EthtoolInterface] = {}
     iface = None
     lines = iter(string_table)
     ethtool_index = 0
@@ -117,140 +130,114 @@ def _parse_lnx_if_sections(string_table: type_defs.StringTable):
         elif len(line) == 2 and len(line[1].strip().split()) >= 16:
             # Parse '/proc/net/dev'
             # IFACE_NAME: VAL VAL VAL ...
-            iface = ethtool_stats.setdefault(line[0], {})
-            iface.update({"counters": list(map(int, line[1].strip().split()))})
-            continue
-
-        elif line[0].startswith('[') and line[0].endswith(']'):
+            iface = ethtool_stats.setdefault(line[0], EthtoolInterface())
+            iface.counters = list(map(int, line[1].strip().split()))
+        elif line[0].startswith("[") and line[0].endswith("]"):
             # Parse 'ethtool' output
             # [IF_NAME]
             #       KEY: VAL
             #       KEY: VAL
             #       ...
-            iface = ethtool_stats.setdefault(line[0][1:-1], {})
             ethtool_index += 1
-            iface["ethtool_index"] = ethtool_index
-            continue
-
-        if iface is not None:
+            iface = ethtool_stats.setdefault(line[0][1:-1], EthtoolInterface())
+            iface.ethtool_index = str(ethtool_index)
+        elif iface is not None:
             stripped_line0 = line[0].strip()
             if stripped_line0 == "Address":
-                iface[stripped_line0] = ":".join(line[1:]).strip()
-            else:
-                iface[stripped_line0] = " ".join(line[1:]).strip()
+                iface.address = _get_physical_address(":".join(line[1:]).strip())
+            elif stripped_line0 == "Speed":
+                iface.speed = _get_speed(line[1].strip())
+            elif stripped_line0 == "Link detected":
+                iface.link_detected = line[1].strip()
     return ip_stats, ethtool_stats
+
+
+def _get_speed(speed_text: str) -> int:
+    if speed_text == "65535Mb/s":  # unknown
+        return 0
+    if speed_text.endswith("Kb/s"):
+        return int(float(speed_text[:-4])) * 1000
+    if speed_text.endswith("Mb/s"):
+        return int(float(speed_text[:-4])) * 1000_000
+    if speed_text.endswith("Gb/s"):
+        return int(float(speed_text[:-4])) * 1000_000_000
+    return 0
+
+
+def _get_oper_status(
+    link_detected: str | None, state_infos: Sequence[str], ifInOctets: int
+) -> Literal["1", "2", "4"]:
+    # Link state from ethtool. If ethtool has no information about
+    # this NIC, we set the state to unknown.
+    if link_detected == "yes":
+        return "1"
+    if link_detected == "no":
+        return "2"
+
+    # Assumption:
+    # abc: <BROADCAST,MULTICAST,UP,LOWER_UP>    UP + LOWER_UP   => really UP
+    # def: <NO-CARRIER,BROADCAST,MULTICAST,UP>  NO-CARRIER + UP => DOWN, but admin UP
+    # ghi: <BROADCAST,MULTICAST>                unconfigured    => DOWN
+    if state_infos is not None:
+        if "UP" in state_infos and "LOWER_UP" in state_infos:
+            return "1"
+        return "2"
+
+    # No information from ethtool. We consider interfaces up
+    # if they have been used at least some time since the
+    # system boot.
+    if ifInOctets > 0:
+        return "1"  # assume up
+    return "4"  # unknown (NIC has never been used)
+
+
+def _get_physical_address(address: str) -> str:
+    if ":" in address:
+        # We saw interface entries of tunnels for the address
+        # is an integer, eg. '1910236'; especially on OpenBSD.
+        return interfaces.mac_address_from_hexstring(address)
+    return ""
 
 
 def parse_lnx_if(string_table: type_defs.StringTable) -> Section:
     ip_stats, ethtool_stats = _parse_lnx_if_sections(string_table)
 
-    nic_info = []
-    for iface_name, iface in sorted(ethtool_stats.items()):
-        iface.update(ip_stats.get(iface_name, {}))
-        nic_info.append((iface_name, iface))
-
     if_table = []
-    for index, (nic, attr) in enumerate(nic_info):
-        counters = attr.get("counters", [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-        ifIndex = attr.get("ethtool_index", index + 1)
-        ifDescr = nic
-        ifAlias = nic
-
-        # Guess type from name of interface
-        if nic == "lo":
-            ifType = 24
-        else:
-            ifType = 6
-
-        # Compute speed
-        speed_text = attr.get("Speed")
-        if speed_text is None:
-            ifSpeed = 0
-        else:
-            if speed_text == '65535Mb/s':  # unknown
-                ifSpeed = 0
-            elif speed_text.endswith("Kb/s"):
-                ifSpeed = int(float(speed_text[:-4])) * 1000
-            elif speed_text.endswith("Mb/s"):
-                ifSpeed = int(float(speed_text[:-4])) * 1000000
-            elif speed_text.endswith("Gb/s"):
-                ifSpeed = int(float(speed_text[:-4])) * 1000000000
-            else:
-                ifSpeed = 0
-
-        # Performance counters
-        ifInOctets = counters[0]
-        inucast = counters[1] + counters[7]
-        inmcast = counters[7]
-        inbcast = 0
-        ifInDiscards = counters[3]
-        ifInErrors = counters[2]
-        ifOutOctets = counters[8]
-        outucast = counters[9]
-        outmcast = 0
-        outbcast = 0
-        ifOutDiscards = counters[11]
-        ifOutErrors = counters[10]
-        ifOutQLen = counters[12]
-
-        # Link state from ethtool. If ethtool has no information about
-        # this NIC, we set the state to unknown.
-        ld = attr.get("Link detected")
-        if ld == "yes":
-            ifOperStatus = 1
-        elif ld == "no":
-            ifOperStatus = 2
-        else:
-            # No information from ethtool. We consider interfaces up
-            # if they have been used at least some time since the
-            # system boot.
-            state_infos = attr.get('state_infos')
-            if state_infos is None:
-                if ifInOctets > 0:
-                    ifOperStatus = 1  # assume up
-                else:
-                    ifOperStatus = 4  # unknown (NIC has never been used)
-            else:
-                # Assumption:
-                # abc: <BROADCAST,MULTICAST,UP,LOWER_UP>    UP + LOWER_UP   => really UP
-                # def: <NO-CARRIER,BROADCAST,MULTICAST,UP>  NO-CARRIER + UP => DOWN, but admin UP
-                # ghi: <BROADCAST,MULTICAST>                unconfigured    => DOWN
-                if "UP" in state_infos and "LOWER_UP" in state_infos:
-                    ifOperStatus = 1
-                else:
-                    ifOperStatus = 2
-
-        raw_phys_address = attr.get("Address", attr.get("link/ether", ""))
-        if ":" in raw_phys_address:
-            # We saw interface entries of tunnels for the address
-            # is an integer, eg. '1910236'; especially on OpenBSD.
-            ifPhysAddress = interfaces.mac_address_from_hexstring(raw_phys_address)
-        else:
-            ifPhysAddress = ''
-
+    for index, (nic, ethtool_interface) in enumerate(sorted(ethtool_stats.items())):
+        ifInOctets = ethtool_interface.counters[0]
+        iplink_interface = ip_stats.get(nic, IPLinkInterface(state_infos=[]))
         if_table.append(
-            interfaces.Interface(
-                index=str(ifIndex),
-                descr=str(ifDescr),
-                type=str(ifType),
-                speed=ifSpeed,
-                oper_status=str(ifOperStatus),
-                in_octets=ifInOctets,
-                in_ucast=inucast,
-                in_mcast=inmcast,
-                in_bcast=inbcast,
-                in_discards=ifInDiscards,
-                in_errors=ifInErrors,
-                out_octets=ifOutOctets,
-                out_ucast=outucast,
-                out_mcast=outmcast,
-                out_bcast=outbcast,
-                out_discards=ifOutDiscards,
-                out_errors=ifOutErrors,
-                out_qlen=ifOutQLen,
-                alias=ifAlias,
-                phys_address=ifPhysAddress,
-            ))
+            interfaces.InterfaceWithCounters(
+                interfaces.Attributes(
+                    index=ethtool_interface.ethtool_index or str(index + 1),
+                    descr=nic,
+                    type="24" if nic == "lo" else "6",  # Guess type from name of interface
+                    speed=ethtool_interface.speed,
+                    oper_status=_get_oper_status(
+                        ethtool_interface.link_detected,
+                        iplink_interface.state_infos,
+                        ifInOctets,
+                    ),
+                    out_qlen=ethtool_interface.counters[12],
+                    alias=nic,
+                    phys_address=ethtool_interface.address or iplink_interface.link_ether,
+                ),
+                interfaces.Counters(
+                    in_octets=ifInOctets,
+                    in_ucast=ethtool_interface.counters[1] + ethtool_interface.counters[7],
+                    in_mcast=ethtool_interface.counters[7],
+                    in_bcast=0,
+                    in_disc=ethtool_interface.counters[3],
+                    in_err=ethtool_interface.counters[2],
+                    out_octets=ethtool_interface.counters[8],
+                    out_ucast=ethtool_interface.counters[9],
+                    out_mcast=0,
+                    out_bcast=0,
+                    out_disc=ethtool_interface.counters[11],
+                    out_err=ethtool_interface.counters[10],
+                ),
+            )
+        )
 
     return if_table, ip_stats
 
@@ -264,42 +251,84 @@ register.agent_section(
 
 def discover_lnx_if(
     params: Sequence[Mapping[str, Any]],
-    section: Section,
+    section_lnx_if: Section | None,
+    section_bonding: bonding.Section | None,
 ) -> type_defs.DiscoveryResult:
+    if section_lnx_if is None:
+        return
     # Always exclude dockers veth* interfaces on docker nodes
-    if_table = [iface for iface in section[0] if not iface.descr.startswith("veth")]
+    if_table = [
+        iface for iface in section_lnx_if[0] if not iface.attributes.descr.startswith("veth")
+    ]
     yield from interfaces.discover_interfaces(
         params,
         if_table,
     )
 
 
+def _fix_bonded_mac(
+    interface: interfaces.InterfaceWithCounters,
+    mac_map: Mapping[str, str],
+) -> interfaces.InterfaceWithCounters:
+    try:
+        mac = mac_map.get(interface.attributes.alias) or mac_map[interface.attributes.descr]
+    except KeyError:
+        return interface
+    return replace(
+        interface,
+        attributes=replace(
+            interface.attributes,
+            phys_address=interfaces.mac_address_from_hexstring(mac),
+        ),
+    )
+
+
+def _get_fixed_bonded_if_table(
+    section_lnx_if: Section,
+    section_bonding: bonding.Section | None,
+) -> interfaces.Section[interfaces.InterfaceWithCounters]:
+    if not section_bonding:
+        return section_lnx_if[0]
+    mac_map = bonding.get_mac_map(section_bonding)
+    return [_fix_bonded_mac(interface, mac_map) for interface in section_lnx_if[0]]
+
+
 def check_lnx_if(
     item: str,
     params: Mapping[str, Any],
-    section: Section,
+    section_lnx_if: Section | None,
+    section_bonding: bonding.Section | None,
 ) -> type_defs.CheckResult:
+    if section_lnx_if is None:
+        return
+
     yield from interfaces.check_multiple_interfaces(
         item,
         params,
-        section[0],
+        _get_fixed_bonded_if_table(section_lnx_if, section_bonding),
     )
 
 
 def cluster_check_lnx_if(
     item: str,
     params: Mapping[str, Any],
-    section: Mapping[str, Section],
+    section_lnx_if: Mapping[str, Section | None],
+    section_bonding: Mapping[str, bonding.Section | None],
 ) -> type_defs.CheckResult:
     yield from interfaces.cluster_check(
         item,
         params,
-        {node: node_section[0] for node, node_section in section.items()},
+        {
+            node: _get_fixed_bonded_if_table(node_section, section_bonding.get(node))
+            for node, node_section in section_lnx_if.items()
+            if node_section is not None
+        },
     )
 
 
 register.check_plugin(
     name="lnx_if",
+    sections=["lnx_if", "bonding"],
     service_name="Interface %s",
     discovery_ruleset_name="inventory_if_rules",
     discovery_ruleset_type=register.RuleSetType.ALL,
@@ -309,4 +338,108 @@ register.check_plugin(
     check_default_parameters=interfaces.CHECK_DEFAULT_PARAMETERS,
     check_function=check_lnx_if,
     cluster_check_function=cluster_check_lnx_if,
+)
+
+
+def _make_inventory_interface(
+    interface: interfaces.InterfaceWithCounters,
+    mac_map: Mapping[str, str],
+    bond_map: Mapping[str, str],
+) -> InterfaceInv | None:
+    # Always exclude dockers veth* interfaces on docker nodes.
+    # Useless entries for "TenGigabitEthernet2/1/21--Uncontrolled".
+    # Ignore useless half-empty tables (e.g. Viprinet-Router).
+    if interface.attributes.descr.startswith("veth") or interface.attributes.type in ("231", "232"):
+        return None
+
+    mac = (
+        mac_map.get(interface.attributes.descr)
+        or mac_map.get(interface.attributes.alias)
+        or interfaces.render_mac_address(interface.attributes.phys_address)
+    )
+
+    return InterfaceInv(
+        index=interface.attributes.index,
+        descr=interface.attributes.descr,
+        alias=interface.attributes.alias,
+        type=interface.attributes.type,
+        speed=int(interface.attributes.speed),
+        oper_status=int(interface.attributes.oper_status)
+        if isinstance(interface.attributes.oper_status, str)
+        else None,
+        phys_address=mac,
+        bond=bond_map.get(mac),
+    )
+
+
+def inventory_lnx_if(
+    section_lnx_if: Section | None,
+    section_bonding: bonding.Section | None,
+) -> InventoryResult:
+    if section_lnx_if is None:
+        return
+
+    ifaces, ip_stats = section_lnx_if
+
+    mac_map = bonding.get_mac_map(section_bonding) if section_bonding else {}
+    bond_map = bonding.get_bond_map(section_bonding) if section_bonding else {}
+
+    yield from inventorize_interfaces(
+        {
+            "usage_port_types": [
+                "6",
+                "32",
+                "62",
+                "117",
+                "127",
+                "128",
+                "129",
+                "180",
+                "181",
+                "182",
+                "205",
+                "229",
+            ],
+        },
+        (
+            inv_if
+            for interface in ifaces
+            if (inv_if := _make_inventory_interface(interface, mac_map, bond_map)) is not None
+        ),
+        len(ifaces),
+    )
+
+    yield from _inventorize_addresses(ip_stats)
+
+
+def _inventorize_addresses(ip_stats: SectionInventory) -> InventoryResult:
+    for if_name, interface in ip_stats.items():
+        for networks, ty in [
+            (interface.inet, "ipv4"),
+            (interface.inet6, "ipv6"),
+        ]:
+            for network in networks:
+                yield TableRow(
+                    path=["networking", "addresses"],
+                    key_columns={
+                        "device": if_name,
+                        "address": _get_address(network),
+                    },
+                    inventory_columns={
+                        "type": ty,
+                    },
+                )
+
+
+def _get_address(network: str) -> str:
+    return network.split("/")[0]
+
+
+register.inventory_plugin(
+    name="lnx_if",
+    sections=["lnx_if", "bonding"],
+    inventory_function=inventory_lnx_if,
+    # TODO Use inv_if? Also have a look at winperf_if and other interface intentories..
+    # inventory_ruleset_name="inv_if",
+    # inventory_default_parameters={},
 )

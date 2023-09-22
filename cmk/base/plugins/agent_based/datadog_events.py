@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """
@@ -46,8 +45,7 @@ def check_datadog_events(section: Section) -> CheckResult:
     """
     yield Result(
         state=State.OK,
-        summary=
-        f"Forwarded {section.n_events} event{'' if section.n_events == 1 else 's'} to the Event Console",
+        summary=f"Forwarded {section.n_events} event{'' if section.n_events == 1 else 's'} to the Event Console",
     )
 
 

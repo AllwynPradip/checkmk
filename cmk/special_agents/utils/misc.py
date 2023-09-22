@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """Place for common code shared among different Check_MK special agents
@@ -12,16 +11,16 @@ import abc
 import argparse
 import atexit
 import datetime
-import errno
 import getopt
 import json
 import logging
-from pathlib import Path
 import pprint
 import sys
 import time
-from typing import Any, Dict, List, Generator, Callable
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
 
 import requests
 
@@ -31,22 +30,25 @@ LOG = logging.getLogger(__name__)
 
 
 class AgentJSON:
-    def __init__(self, key, title):
+    def __init__(self, key, title) -> None:  # type: ignore[no-untyped-def]
         self._key = key
         self._title = title
 
     def usage(self):
-        sys.stderr.write("""
+        sys.stderr.write(
+            """
 Check_MK %s Agent
 
 USAGE: agent_%s --section_url [{section_name},{url}]
 
     Parameters:
-        --section_url   Pair of section_name and url
+        --section_url   Pair of section_name and url separated by a comma
                         Can be defined multiple times
         --debug         Output json data with pprint
 
-""" % (self._title, self._key))
+"""
+            % (self._title, self._key)
+        )
 
     def get_content(self):
         short_options = "h"
@@ -69,7 +71,7 @@ USAGE: agent_%s --section_url [{section_name},{url}]
                 newline_replacement = a
             elif o in ["--debug"]:
                 opt_debug = True
-            elif o in ['-h', '--help']:
+            elif o in ["-h", "--help"]:
                 self.usage()
                 sys.exit(0)
 
@@ -77,10 +79,11 @@ USAGE: agent_%s --section_url [{section_name},{url}]
             self.usage()
             sys.exit(0)
 
-        content: Dict[str, List[str]] = {}
+        content: dict[str, list[str]] = {}
         for section_name, url in sections:
             content.setdefault(section_name, [])
-            content[section_name].append(requests.get(url).text.replace("\n", newline_replacement))
+            c = requests.get(url)  # nosec B113
+            content[section_name].append(c.text.replace("\n", newline_replacement))
 
         if opt_debug:
             for line in content:
@@ -90,12 +93,13 @@ USAGE: agent_%s --section_url [{section_name},{url}]
                     print(line)
         else:
             return content
+        return None
 
 
 def datetime_serializer(obj):
     """Custom serializer to pass to json dump functions"""
     if isinstance(obj, datetime.datetime):
-        return obj.__str__()
+        return str(obj)
     # fall back to json default behaviour:
     raise TypeError("%r is not JSON serializable" % obj)
 
@@ -132,10 +136,10 @@ class DataCache(abc.ABC):
 
         try:
             return self._cache_file.stat().st_mtime
+        except FileNotFoundError:
+            logging.info("No such file or directory %s (cache_timestamp)", self._cache_file)
+            return None
         except OSError as exc:
-            if exc.errno == errno.ENOENT:
-                logging.info("No such file or directory %s (cache_timestamp)", self._cache_file)
-                return None
             logging.info("Cannot calculate cache file age: %s", exc)
             raise
 
@@ -158,11 +162,11 @@ class DataCache(abc.ABC):
         try:
             with self._cache_file.open(encoding="utf-8") as f:
                 raw_content = f.read().strip()
-        except IOError as exc:
-            if exc.errno == errno.ENOENT:
-                logging.info("No such file or directory %s (read from cache)", self._cache_file)
-            else:
-                logging.info("Cannot read from cache file: %s", exc)
+        except FileNotFoundError:
+            logging.info("No such file or directory %s (read from cache)", self._cache_file)
+            raise
+        except OSError as exc:
+            logging.info("Cannot read from cache file: %s", exc)
             raise
 
         try:
@@ -173,11 +177,11 @@ class DataCache(abc.ABC):
         return content
 
     def get_data(self, *args, **kwargs):
-        use_cache = kwargs.pop('use_cache', True)
-        if (use_cache and self.get_validity_from_args(*args) and self._cache_is_valid()):
+        use_cache = kwargs.pop("use_cache", True)
+        if use_cache and self.get_validity_from_args(*args) and self._cache_is_valid():
             try:
                 return self.get_cached_data()
-            except (OSError, IOError, ValueError) as exc:
+            except (OSError, ValueError) as exc:
                 logging.info("Getting live data (failed to read from cache: %s).", exc)
                 if self.debug:
                     raise
@@ -185,7 +189,7 @@ class DataCache(abc.ABC):
         live_data = self.get_live_data(*args)
         try:
             self._write_to_cache(live_data)
-        except (OSError, IOError, TypeError) as exc:
+        except (OSError, TypeError) as exc:
             logging.info("Failed to write data to cache file: %s", exc)
             if self.debug:
                 raise
@@ -195,21 +199,22 @@ class DataCache(abc.ABC):
         self._cache_file_dir.mkdir(parents=True, exist_ok=True)
 
         json_dump = json.dumps(raw_content, default=datetime_serializer)
-        store.save_file(str(self._cache_file), json_dump)
+        store.save_text_to_file(str(self._cache_file), json_dump)
 
 
 class _NullContext:
     """A context manager that does nothing and is falsey"""
+
     def __call__(self, *_args, **_kwargs):
         return self
 
     def __enter__(self):
         return self
 
-    def __exit__(self, *_args):
+    def __exit__(self, *exc_info: object) -> None:
         pass
 
-    def __bool__(self):
+    def __bool__(self) -> bool:
         return False
 
 
@@ -236,15 +241,15 @@ def vcrtrace(**vcr_init_kwargs):
     If the corresponding flag ('--vcrtrace' in the above example) was not specified,
     the args attribute will be a null-context.
     """
+
     class VcrTraceAction(argparse.Action):
-        def __init__(self, *args, **kwargs):
+        def __init__(self, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
             kwargs.setdefault("metavar", "TRACEFILE")
-            help_part = "" if vcrtrace.__doc__ is None else vcrtrace.__doc__.split('\n\n')[3]
-            kwargs["help"] = "%s %s" % (help_part, kwargs.get("help", ""))
+            help_part = "" if vcrtrace.__doc__ is None else vcrtrace.__doc__.split("\n\n")[3]
+            kwargs["help"] = "{} {}".format(help_part, kwargs.get("help", ""))
             # NOTE: There are various mypy issues around the kwargs Kung Fu
             # below, see e.g. https://github.com/python/mypy/issues/6799.
-            super(VcrTraceAction, self).__init__(  # type: ignore[misc]
-                *args, nargs=None, default=False, **kwargs)
+            super().__init__(*args, nargs=None, default=False, **kwargs)  # type: ignore[misc]
 
         def __call__(self, _parser, namespace, filename, option_string=None):
             if not filename:
@@ -252,6 +257,7 @@ def vcrtrace(**vcr_init_kwargs):
                 return
 
             import vcr  # type: ignore[import] # pylint: disable=import-outside-toplevel
+
             use_cassette = vcr.VCR(**vcr_init_kwargs).use_cassette
             setattr(namespace, self.dest, lambda **kwargs: use_cassette(filename, **kwargs))
             global_context = use_cassette(filename)
@@ -261,7 +267,7 @@ def vcrtrace(**vcr_init_kwargs):
     return VcrTraceAction
 
 
-def get_seconds_since_midnight(current_time) -> float:
+def get_seconds_since_midnight(current_time) -> float:  # type: ignore[no-untyped-def]
     midnight = datetime.datetime.combine(current_time.date(), datetime.datetime.min.time())
     return (current_time - midnight).total_seconds()
 
@@ -290,16 +296,26 @@ def to_bytes(string: str) -> int:
     132607115264
     """
     return round(  #
-        (float(string[:-3]) * (1 << 10)) if string.endswith("KiB") else
-        (float(string[:-2]) * (10**3)) if string.endswith("KB") else
-        (float(string[:-3]) * (1 << 20)) if string.endswith("MiB") else
-        (float(string[:-2]) * (10**6)) if string.endswith("MB") else
-        (float(string[:-3]) * (1 << 30)) if string.endswith("GiB") else
-        (float(string[:-2]) * (10**9)) if string.endswith("GB") else
-        (float(string[:-3]) * (1 << 40)) if string.endswith("TiB") else
-        (float(string[:-2]) * (10**12)) if string.endswith("TB") else  #
-        float(string[:-1]) if string.endswith("B") else  #
-        float(string))
+        (float(string[:-3]) * (1 << 10))
+        if string.endswith("KiB")
+        else (float(string[:-2]) * (10**3))
+        if string.endswith("KB")
+        else (float(string[:-3]) * (1 << 20))
+        if string.endswith("MiB")
+        else (float(string[:-2]) * (10**6))
+        if string.endswith("MB")
+        else (float(string[:-3]) * (1 << 30))
+        if string.endswith("GiB")
+        else (float(string[:-2]) * (10**9))
+        if string.endswith("GB")
+        else (float(string[:-3]) * (1 << 40))
+        if string.endswith("TiB")
+        else (float(string[:-2]) * (10**12))
+        if string.endswith("TB")
+        else float(string[:-1])  #
+        if string.endswith("B")
+        else float(string)  #
+    )
 
 
 @contextmanager
@@ -318,12 +334,11 @@ def JsonCachedData(
         cache = {}
 
     dirty = False
-    if cutoff_condition:
-        # note: this must not be a generator - otherwise we modify a dict while iterating it
-        for key in [k for k, data in cache.items() if cutoff_condition(k, data)]:
-            dirty = True
-            LOG.debug("Cache: erase log cache for %r", key)
-            del cache[key]
+    # note: this must not be a generator - otherwise we modify a dict while iterating it
+    for key in [k for k, data in cache.items() if cutoff_condition(k, data)]:
+        dirty = True
+        LOG.debug("Cache: erase log cache for %r", key)
+        del cache[key]
 
     def setdefault(key: str, value_fn: Callable[[], Any]) -> Any:
         nonlocal dirty
@@ -346,4 +361,5 @@ if __name__ == "__main__":
     # Please keep these lines - they make TDD easy and have no effect on normal test runs.
     # Just run this file from your IDE and dive into the code.
     import pytest
+
     assert not pytest.main(["--doctest-modules", __file__])

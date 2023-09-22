@@ -1,31 +1,13 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import (
-    Any,
-    Mapping,
-    Optional,
-)
-from .agent_based_api.v1 import (
-    register,
-    Service,
-    State as state,
-    type_defs,
-)
-from .utils import ipmi
+from collections.abc import Mapping
+from typing import Any
 
-# NOTE: THIS AN API VIOLATION, DO NOT REPLICATE THIS
-# This is needed because inventory_ipmi_rules was once not a dict, which is not allowed by the API
-# for discovery rulesets
-# ==================================================================================================
-from cmk.utils.type_defs import RuleSetName  # pylint: disable=cmk-module-layer-violation
-from cmk.base.config import get_config_cache  # pylint: disable=cmk-module-layer-violation
-from cmk.base.check_api import host_name  # pylint: disable=cmk-module-layer-violation
-from cmk.base.api.agent_based.register import add_discovery_ruleset, get_discovery_ruleset  # pylint: disable=cmk-module-layer-violation
-# ==================================================================================================
+from .agent_based_api.v1 import register, Service, State, type_defs
+from .utils import ipmi
 
 # Example of output from ipmi:
 # <<<ipmi>>>
@@ -113,6 +95,7 @@ from cmk.base.api.agent_based.register import add_discovery_ruleset, get_discove
 # BMC Watchdog     | 03h | ok |  7.1 |
 # PS1 Status       | C8h | ok | 10.1 | Presence detected, Failure detected     <= NOT OK !!
 # PS2 Status       | C9h | ok | 10.2 | Presence detected
+# Drive 4          | 64h | ok  |  4.4 | Drive Present, Drive Fault <= NOT OK
 
 # broken
 # <<<ipmi:cached(1472175405,300)>>>
@@ -147,27 +130,37 @@ def parse_ipmi(string_table: type_defs.StringTable) -> ipmi.Section:
     >>> pprint(parse_ipmi([
     ... ['Ambient', '18.500', 'degrees_C', 'ok', 'na', '1.000', '6.000', '37.000', '42.000', 'na'],
     ... ['CPU', '33.000', 'degrees_C', 'ok', 'na', 'na', 'na', '95.000', '99.000', 'na'],
-    ... ['PCH_1.05V', '1.040', 'Volts', 'ok', 'na', '0.970', 'na', 'na', '1.130', 'na'],
-    ... ['Total_Power', '48.000', 'Watts', 'ok', 'na', 'na', 'na', 'na', '498.000', 'na'],
-    ... ['I2C4_error_ratio', '0.000', 'percent', 'ok', 'na', 'na', 'na', '10.000', '20.000', 'na'],
     ... ]))
-    {'Ambient': Sensor(status_txt='ok', unit='degrees_C', value=18.5, crit_low=1.0, warn_low=6.0, warn_high=37.0, crit_high=42.0),
-     'CPU': Sensor(status_txt='ok', unit='degrees_C', value=33.0, crit_low=None, warn_low=None, warn_high=95.0, crit_high=99.0),
-     'I2C4_error_ratio': Sensor(status_txt='ok', unit='percent', value=0.0, crit_low=None, warn_low=None, warn_high=10.0, crit_high=20.0),
-     'PCH_1.05V': Sensor(status_txt='ok', unit='Volts', value=1.04, crit_low=0.97, warn_low=None, warn_high=None, crit_high=1.13),
-     'Total_Power': Sensor(status_txt='ok', unit='Watts', value=48.0, crit_low=None, warn_low=None, warn_high=None, crit_high=498.0)}
+    {'Ambient': Sensor(status_txt='ok',
+                       unit='degrees_C',
+                       state=None,
+                       value=18.5,
+                       crit_low=1.0,
+                       warn_low=6.0,
+                       warn_high=37.0,
+                       crit_high=42.0,
+                       type_=None),
+     'CPU': Sensor(status_txt='ok',
+                   unit='degrees_C',
+                   state=None,
+                   value=33.0,
+                   crit_low=None,
+                   warn_low=None,
+                   warn_high=95.0,
+                   crit_high=99.0,
+                   type_=None)}
     >>> pprint(parse_ipmi([
     ... ['CMOS Battery     ', ' 10h ', ' ok  ', '  7.1 ', ''],
-    ... ['VCORE            ', ' 12h ', ' ok  ', '  3.1 ', ' State Deasserted'],
-    ... ['MSR Info Log     ', ' 28h ', ' ns  ', ' 34.1 ', ' No Reading'],
-    ... ['Power Redundancy ', ' 02h ', ' ok ', ' 21.1 ', ' Fully Redundant'],
-    ... ['PS1 Status       ', ' C8h ', ' ok ', ' 10.1 ', ' Presence detected, Failure detected     <= NOT OK !!'],
     ... ]))
-    {'CMOS_Battery': Sensor(status_txt='ok', unit='', value=None, crit_low=None, warn_low=None, warn_high=None, crit_high=None),
-     'MSR_Info_Log': Sensor(status_txt='ns (No Reading)', unit='', value=None, crit_low=None, warn_low=None, warn_high=None, crit_high=None),
-     'PS1_Status': Sensor(status_txt='ok (Presence detected, Failure detected     <= NOT OK !!)', unit='', value=None, crit_low=None, warn_low=None, warn_high=None, crit_high=None),
-     'Power_Redundancy': Sensor(status_txt='ok (Fully Redundant)', unit='', value=None, crit_low=None, warn_low=None, warn_high=None, crit_high=None),
-     'VCORE': Sensor(status_txt='ok (State Deasserted)', unit='', value=None, crit_low=None, warn_low=None, warn_high=None, crit_high=None)}
+    {'CMOS_Battery': Sensor(status_txt='ok',
+                            unit='',
+                            state=None,
+                            value=None,
+                            crit_low=None,
+                            warn_low=None,
+                            warn_high=None,
+                            crit_high=None,
+                            type_=None)}
     """
     parsed: ipmi.Section = {}
     for line in string_table:
@@ -198,12 +191,13 @@ def parse_ipmi(string_table: type_defs.StringTable) -> ipmi.Section:
                         "unrec_high",
                     ],
                     line[1:],
-                ))
+                )
+            )
 
             sensor = parsed.setdefault(
                 name,
                 ipmi.Sensor(
-                    data['status_txt'],
+                    data["status_txt"],
                     data["unit"].replace(" ", "_"),
                 ),
             )
@@ -234,8 +228,8 @@ register.agent_section(
 
 
 def _merge_sections(
-    section_ipmi: Optional[ipmi.Section],
-    section_ipmi_discrete: Optional[ipmi.Section],
+    section_ipmi: ipmi.Section | None,
+    section_ipmi_discrete: ipmi.Section | None,
 ) -> ipmi.Section:
     return {
         **(section_ipmi_discrete or {}),
@@ -243,53 +237,49 @@ def _merge_sections(
     }
 
 
-def _get_discovery_ruleset() -> Any:
-    # NOTE: THIS AN API VIOLATION, DO NOT REPLICATE THIS
-    # This is needed because inventory_ipmi_rules was once not a dict, which is not allowed by the
-    # API for discovery rulesets
-    # ==============================================================================================
-    rules_all_hosts = get_discovery_ruleset(RuleSetName("inventory_ipmi_rules"))
-    rules_this_host = get_config_cache().host_extra_conf(host_name(), rules_all_hosts)
-    rules_this_host += [{"discovery_mode": ("summarize", {})}]  # default parameters
-    return rules_this_host[0]
-    # ==============================================================================================
-
-
 def discover_ipmi(
-    section_ipmi: Optional[ipmi.Section],
-    section_ipmi_discrete: Optional[ipmi.Section],
+    params: ipmi.DiscoveryParams,
+    section_ipmi: ipmi.Section | None,
+    section_ipmi_discrete: ipmi.Section | None,
 ) -> type_defs.DiscoveryResult:
+    mode, ignore_params = params["discovery_mode"]
 
-    section_merged = _merge_sections(section_ipmi, section_ipmi_discrete)
-    mode, ignore_params = ipmi.transform_discovery_ruleset(_get_discovery_ruleset())
     if mode == "summarize":
         yield Service(item="Summary")
         return
 
-    ignore_params = {
-        "ignored_sensorstates": ["ns", "nr", "na"],
-        **ignore_params,
-    }
-    for sensor_name, sensor in section_merged.items():
-        if not ipmi.ignore_sensor(sensor_name, sensor.status_txt, ignore_params):
-            yield Service(item=sensor_name)
+    yield from ipmi.discover_individual_sensors(
+        {
+            "ignored_sensorstates": ["ns", "nr", "na"],
+            **ignore_params,
+        },
+        _merge_sections(section_ipmi, section_ipmi_discrete),
+    )
 
 
-def ipmi_status_txt_mapping(status_txt: str) -> state:
+def ipmi_status_txt_mapping(status_txt: str) -> State:
     status_txt_lower = status_txt.lower()
-    if status_txt.startswith('ok') and not ("failure detected" in status_txt_lower or
-                                            "in critical array" in status_txt_lower):
-        return state.OK
-    if status_txt.startswith('nc'):
-        return state.WARN
-    return state.CRIT
+    if status_txt.startswith("ok") and not any(
+        p in status_txt_lower
+        for p in (
+            "failure detected",
+            "in critical array",
+            "drive fault",
+            "predictive failure",
+            "power supply ac lost",
+        )
+    ):
+        return State.OK
+    if status_txt.startswith("nc"):
+        return State.WARN
+    return State.CRIT
 
 
 def check_ipmi(
     item: str,
     params: Mapping[str, Any],
-    section_ipmi: Optional[ipmi.Section],
-    section_ipmi_discrete: Optional[ipmi.Section],
+    section_ipmi: ipmi.Section | None,
+    section_ipmi_discrete: ipmi.Section | None,
 ) -> type_defs.CheckResult:
     yield from ipmi.check_ipmi(
         item,
@@ -305,14 +295,9 @@ register.check_plugin(
     sections=["ipmi", "ipmi_discrete"],
     service_name="IPMI Sensor %s",
     discovery_function=discover_ipmi,
+    discovery_ruleset_name="inventory_ipmi_rules",
+    discovery_default_parameters={"discovery_mode": ("summarize", {})},
     check_function=check_ipmi,
-    check_ruleset_name='ipmi',
+    check_ruleset_name="ipmi",
     check_default_parameters={"ignored_sensorstates": ["ns", "nr", "na"]},
 )
-
-# NOTE: THIS AN API VIOLATION, DO NOT REPLICATE THIS
-# This is needed because inventory_ipmi_rules was once not a dict, which is not allowed by the API
-# for discovery rulesets
-# ==================================================================================================
-add_discovery_ruleset(RuleSetName("inventory_ipmi_rules"))
-# ==================================================================================================

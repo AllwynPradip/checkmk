@@ -3,26 +3,23 @@
 //
 #include "pch.h"
 
-#include <string_view>
 #include <thread>
 
-#include "asio.h"
-#include "cfg.h"
 #include "common/cfg_info.h"
-#include "realtime.h"
 #include "tools/_misc.h"
+#include "tools/_raii.h"
+#include "wnx/asio.h"
+#include "wnx/cfg.h"
+#include "wnx/realtime.h"
 
 namespace tst {
-void DisableSectionsNode(std::string_view Str) {
+void DisableSectionsNode(std::string_view str) {
     using namespace cma::cfg;
     YAML::Node config = GetLoadedConfig();
     auto disabled_string = cma::cfg::GetVal(
         groups::kGlobal, vars::kSectionsDisabled, std::string(""));
-    {
-        disabled_string += " ";
-
-        disabled_string += std::string(Str);
-    }
+    disabled_string += " ";
+    disabled_string += std::string(str);
     config[groups::kGlobal][vars::kSectionsDisabled] = disabled_string;
 }
 }  // namespace tst
@@ -36,7 +33,7 @@ static std::vector<RtBlock> TestTable;
 // do NOT use in production
 class UdpServer {
 public:
-    UdpServer(asio::io_context& io_context, short port)
+    UdpServer(asio::io_context &io_context, short port)
         : socket_(io_context, udp::endpoint(udp::v4(), port)) {
         do_receive();
     }
@@ -61,14 +58,11 @@ private:
     char data_[max_length];
 };
 
-void StartTestServer(asio::io_context* IoContext, int Port) {
+void StartTestServer(asio::io_context *io_context, uint16_t port) {
     try {
-        ;
-
-        UdpServer s(*IoContext, Port);
-
-        IoContext->run();
-    } catch (std::exception& e) {
+        UdpServer s(*io_context, port);
+        io_context->run();
+    } catch (std::exception &e) {
         std::cerr << "Exception: " << e.what() << "\n";
     }
 }
@@ -76,7 +70,7 @@ void StartTestServer(asio::io_context* IoContext, int Port) {
 TEST(RealtimeTest, LowLevel) {
     // stub
     Device dev;
-    auto ret = dev.start();
+    dev.start();
     ASSERT_TRUE(dev.started());
     EXPECT_FALSE(dev.use_df_);
     EXPECT_FALSE(dev.use_mem_);
@@ -112,7 +106,6 @@ TEST(RealtimeTest, LowLevel) {
 }
 
 TEST(RealtimeTest, StaticCheck) {
-    // prtects again occasional consats change
     EXPECT_EQ(kEncryptedHeader, "00");
     EXPECT_EQ(kPlainHeader, "99");
     EXPECT_EQ(kHeaderSize, 2);
@@ -135,10 +128,10 @@ TEST(RealtimeTest, PackData) {
         EXPECT_TRUE(0 == memcmp(data, kPlainHeader.data(), kHeaderSize));
         EXPECT_TRUE(0 == memcmp(data + kHeaderSize + kTimeStampSize,
                                 output.data(), output.size()));
-        auto char_data = reinterpret_cast<char*>(data);
+        auto char_data = reinterpret_cast<char *>(data);
         std::string_view ts(char_data + kHeaderSize, kTimeStampSize);
         std::string timestamp(ts);
-        auto timestamp_mid = std::atoll(timestamp.c_str());
+        auto timestamp_mid = std::stoll(timestamp);
         EXPECT_TRUE(tstamp1 <= timestamp_mid);
         EXPECT_TRUE(tstamp2 >= timestamp_mid);
     }
@@ -154,10 +147,10 @@ TEST(RealtimeTest, PackData) {
         ASSERT_TRUE(crypt_result.size() >
                     output.size() + kHeaderSize + kTimeStampSize);
         auto data = crypt_result.data();
-        auto char_data = reinterpret_cast<char*>(data);
+        auto char_data = reinterpret_cast<char *>(data);
         std::string_view ts(char_data + kHeaderSize, kTimeStampSize);
         std::string timestamp(ts);
-        auto timestamp_mid = std::atoll(timestamp.c_str());
+        auto timestamp_mid = std::stoll(timestamp);
         EXPECT_TRUE(tstamp1 <= timestamp_mid);
         EXPECT_TRUE(tstamp2 >= timestamp_mid);
 
@@ -175,7 +168,7 @@ TEST(RealtimeTest, PackData) {
 }
 
 template <typename T, typename B>
-void WaitFor(std::function<bool()> predicat,
+void WaitFor(const std::function<bool()> &predicat,
              std::chrono::duration<T, B> max_dur) noexcept {
     using namespace std::chrono;
     auto end = steady_clock::now() + max_dur;
@@ -187,13 +180,12 @@ void WaitFor(std::function<bool()> predicat,
     }
 }
 
-TEST(RealtimeTest, Base_Long) {
+TEST(RealtimeTest, Base_Simulation) {
     // stub
     using namespace std::chrono;
 
-    cma::OnStart(cma::AppType::test);
-    ON_OUT_OF_SCOPE(
-        cma::OnStart(cma::AppType::test));  // restore original config
+    OnStartTest();
+    ON_OUT_OF_SCOPE( OnStartTest());  // restore original config
     {
         // we disable sections to be sure that realtime sections are executed
         // even being disabled
@@ -206,27 +198,27 @@ TEST(RealtimeTest, Base_Long) {
         Device dev;
         asio::io_context context;
         TestTable.clear();
-        std::thread first(StartTestServer, &context, 555);
+        std::thread first(StartTestServer, &context, 555U);
         auto ret = dev.start();
 
-        EXPECT_TRUE(dev.started_);
+        EXPECT_TRUE(dev.started());
         dev.connectFrom("127.0.0.1", 555, {"mem", "df", "winperf_processor"},
                         "");
 
         EXPECT_TRUE(ret);
-        WaitFor([]() { return TestTable.size() >= 6; }, 20s);
+        WaitFor([] { return TestTable.size() >= 6; }, 20s);
 
-        EXPECT_TRUE(dev.started_);
+        EXPECT_TRUE(dev.started());
         dev.stop();
-        EXPECT_FALSE(dev.started_);
+        EXPECT_FALSE(dev.started());
 
         context.stop();
         if (first.joinable()) first.join();
         EXPECT_GT(TestTable.size(), static_cast<size_t>(3));
 
-        for (auto packet : TestTable) {
-            auto d = reinterpret_cast<const char*>(packet.data());
-            std::string p(d);
+        for (const auto &packet : TestTable) {
+            auto d = reinterpret_cast<const char *>(packet.data());
+            std::string p(d, packet.size());
             EXPECT_TRUE(p.find(kPlainHeader) == 0);
             EXPECT_TRUE(p.find("<<<df") != std::string::npos);
             EXPECT_TRUE(p.find("<<<mem") != std::string::npos);
@@ -237,30 +229,30 @@ TEST(RealtimeTest, Base_Long) {
         Device dev;
         asio::io_context context;
         TestTable.clear();
-        std::thread first(StartTestServer, &context, 555);
+        std::thread first(StartTestServer, &context, 555U);
         auto ret = dev.start();
 
-        EXPECT_TRUE(dev.started_);
+        EXPECT_TRUE(dev.started());
         dev.connectFrom("127.0.0.1", 555, {"mem", "df", "winperf_processor"},
                         "encrypt");
 
         EXPECT_TRUE(ret);
-        WaitFor([]() { return TestTable.size() >= 6; }, 20s);
-        EXPECT_TRUE(dev.started_);
+        WaitFor([] { return TestTable.size() >= 6; }, 20s);
+        EXPECT_TRUE(dev.started());
         dev.stop();
-        EXPECT_FALSE(dev.started_);
+        EXPECT_FALSE(dev.started());
 
         context.stop();
         if (first.joinable()) first.join();
         EXPECT_TRUE(TestTable.size() > 3);
         cma::encrypt::Commander dec("encrypt");
-        for (auto packet : TestTable) {
-            auto d = reinterpret_cast<char*>(packet.data());
+        for (auto &packet : TestTable) {
+            auto d = reinterpret_cast<char *>(packet.data());
             auto [success, size] =
                 dec.decode(d + kHeaderSize + kTimeStampSize,
                            packet.size() - kHeaderSize - kTimeStampSize, true);
             ASSERT_TRUE(success);
-            std::string p(d);
+            std::string p(d, packet.size());
             ASSERT_TRUE(p.find(kEncryptedHeader) == 0);
 
             EXPECT_TRUE(p.find("<<<df") != std::string::npos);

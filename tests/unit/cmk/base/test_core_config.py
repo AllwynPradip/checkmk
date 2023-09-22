@@ -1,183 +1,304 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+import shutil
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+from pytest import MonkeyPatch
 
-from testlib.base import Scenario
+from tests.testlib.base import Scenario
 
+import cmk.utils.config_path
 import cmk.utils.paths
 import cmk.utils.version as cmk_version
-from cmk.utils.exceptions import MKGeneralException
-from cmk.utils.type_defs import CheckPluginName
+from cmk.utils.config_path import ConfigPath, LATEST_CONFIG, VersionedConfigPath
+from cmk.utils.hostaddress import HostAddress, HostName
+from cmk.utils.labels import Labels
+from cmk.utils.rulesets.ruleset_matcher import LabelSources
+from cmk.utils.tags import TagGroupID, TagID
 
-import cmk.core_helpers.paths
-from cmk.core_helpers.paths import LATEST_SERIAL
+from cmk.checkengine.checking import CheckPluginName, ConfiguredService
+from cmk.checkengine.parameters import TimespecificParameters
 
 import cmk.base.config as config
 import cmk.base.core_config as core_config
 import cmk.base.nagios_utils
-from cmk.base.check_utils import Service
+from cmk.base.config import ConfigCache, ObjectAttributes
+from cmk.base.core_config import (
+    CollectedHostLabels,
+    get_labels_from_attributes,
+    read_notify_host_file,
+    write_notify_host_file,
+)
 from cmk.base.core_factory import create_core
 
 
-def test_do_create_config_nagios(core_scenario):
-    core_config.do_create_config(create_core("nagios"))
+@pytest.fixture(name="config_path")
+def fixture_config_path():
+    ConfigPath.ROOT.mkdir(parents=True, exist_ok=True)
+    try:
+        yield ConfigPath.ROOT
+    finally:
+        shutil.rmtree(ConfigPath.ROOT)
+
+
+@pytest.fixture(name="core_scenario")
+def fixture_core_scenario(monkeypatch):
+    ts = Scenario()
+    ts.add_host(HostName("test-host"))
+    ts.set_option("ipaddresses", {"test-host": "127.0.0.1"})
+    return ts.apply(monkeypatch)
+
+
+def test_do_create_config_nagios(core_scenario: ConfigCache) -> None:
+    core_config.do_create_config(create_core("nagios"), core_scenario, duplicates=())
 
     assert Path(cmk.utils.paths.nagios_objects_file).exists()
-    assert config.PackedConfigStore.from_serial(LATEST_SERIAL).path.exists()
+    assert config.PackedConfigStore.from_serial(LATEST_CONFIG).path.exists()
 
 
-def test_active_check_arguments_basics():
-    assert core_config.active_check_arguments("bla", "blub", u"args 123 -x 1 -y 2") \
-        == u"args 123 -x 1 -y 2"
-
-    assert core_config.active_check_arguments("bla", "blub", ["args", "123", "-x", "1", "-y", "2"]) \
-        == "'args' '123' '-x' '1' '-y' '2'"
-
-    assert core_config.active_check_arguments("bla", "blub", ["args", "1 2 3", "-d=2",
-        "--hallo=eins", 9]) \
-        == "'args' '1 2 3' '-d=2' '--hallo=eins' 9"
-
-    with pytest.raises(MKGeneralException):
-        core_config.active_check_arguments("bla", "blub", (1, 2))  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize("pw", ["abc", "123", "x'äd!?", u"aädg"])
-def test_active_check_arguments_password_store(monkeypatch, pw):
-    monkeypatch.setattr(config, "stored_passwords", {"pw-id": {"password": pw,}})
-    assert core_config.active_check_arguments("bla", "blub", ["arg1", ("store", "pw-id", "--password=%s"), "arg3"]) \
-        == "--pwstore=2@11@pw-id 'arg1' '--password=%s' 'arg3'" % ("*" * len(pw))
-
-
-def test_active_check_arguments_not_existing_password(capsys):
-    assert core_config.active_check_arguments("bla", "blub", ["arg1", ("store", "pw-id", "--password=%s"), "arg3"]) \
-        == "--pwstore=2@11@pw-id 'arg1' '--password=***' 'arg3'"
-    stderr = capsys.readouterr().err
-    assert "The stored password \"pw-id\" used by service \"blub\" on host \"bla\"" in stderr
-
-
-def test_active_check_arguments_wrong_types():
-    with pytest.raises(MKGeneralException):
-        core_config.active_check_arguments("bla", "blub", 1)  # type: ignore[arg-type]
-
-    with pytest.raises(MKGeneralException):
-        core_config.active_check_arguments("bla", "blub", (1, 2))  # type: ignore[arg-type]
-
-
-def test_active_check_arguments_str():
-    assert core_config.active_check_arguments("bla", "blub",
-                                              u"args 123 -x 1 -y 2") == 'args 123 -x 1 -y 2'
-
-
-def test_active_check_arguments_list():
-    assert core_config.active_check_arguments("bla", "blub", ["a", "123"]) == "'a' '123'"
-
-
-def test_active_check_arguments_list_with_numbers():
-    assert core_config.active_check_arguments("bla", "blub", [1, 1.2]) == "1 1.2"
-
-
-def test_active_check_arguments_list_with_pwstore_reference():
-    assert core_config.active_check_arguments(
-        "bla", "blub",
-        ["a", ("store", "pw1", "--password=%s")]) == "--pwstore=2@11@pw1 'a' '--password=***'"
-
-
-def test_active_check_arguments_list_with_invalid_type():
-    with pytest.raises(MKGeneralException):
-        core_config.active_check_arguments("bla", "blub", [None])  # type: ignore[list-item]
-
-
-def test_get_host_attributes(fixup_ip_lookup, monkeypatch):
-    ts = Scenario().add_host("test-host", tags={"agent": "no-agent"})
-    ts.set_option("host_labels", {
-        "test-host": {
-            "ding": "dong",
+def test_get_host_attributes(monkeypatch: MonkeyPatch) -> None:
+    ts = Scenario()
+    ts.add_host(HostName("test-host"), tags={TagGroupID("agent"): TagID("no-agent")})
+    ts.set_option(
+        "host_labels",
+        {
+            "test-host": {
+                "ding": "dong",
+            },
         },
-    })
+    )
     config_cache = ts.apply(monkeypatch)
 
     expected_attrs = {
-        '_ADDRESS_4': '0.0.0.0',
-        '_ADDRESS_6': '',
-        '_ADDRESS_FAMILY': '4',
-        '_FILENAME': '/wato/hosts.mk',
-        '_TAGS': '/wato/ auto-piggyback ip-v4 ip-v4-only lan no-agent no-snmp prod site:unit',
-        u'__TAG_address_family': u'ip-v4-only',
-        u'__TAG_agent': u'no-agent',
-        u'__TAG_criticality': u'prod',
-        u'__TAG_ip-v4': u'ip-v4',
-        u'__TAG_networking': u'lan',
-        u'__TAG_piggyback': u'auto-piggyback',
-        u'__TAG_site': u'unit',
-        u'__TAG_snmp_ds': u'no-snmp',
-        '__LABEL_ding': 'dong',
-        '__LABELSOURCE_ding': 'explicit',
-        'address': '0.0.0.0',
-        'alias': 'test-host',
+        "_ADDRESSES_4": "",
+        "_ADDRESSES_6": "",
+        "_ADDRESS_4": "0.0.0.0",
+        "_ADDRESS_6": "",
+        "_ADDRESS_FAMILY": "4",
+        "_FILENAME": "/wato/hosts.mk",
+        "_TAGS": "/wato/ auto-piggyback ip-v4 ip-v4-only lan no-agent no-snmp prod site:unit",
+        "__TAG_address_family": "ip-v4-only",
+        "__TAG_agent": "no-agent",
+        "__TAG_criticality": "prod",
+        "__TAG_ip-v4": "ip-v4",
+        "__TAG_networking": "lan",
+        "__TAG_piggyback": "auto-piggyback",
+        "__TAG_site": "unit",
+        "__TAG_snmp_ds": "no-snmp",
+        "__LABEL_ding": "dong",
+        "__LABEL_cmk/site": "NO_SITE",
+        "__LABELSOURCE_cmk/site": "discovered",
+        "__LABELSOURCE_ding": "explicit",
+        "address": "0.0.0.0",
+        "alias": "test-host",
     }
 
-    if cmk_version.is_managed_edition():
-        expected_attrs['_CUSTOMER'] = 'provider'
+    if cmk_version.edition() is cmk_version.Edition.CME:
+        expected_attrs["_CUSTOMER"] = "provider"
 
-    attrs = core_config.get_host_attributes("test-host", config_cache)
-    assert attrs == expected_attrs
+    assert config_cache.get_host_attributes(HostName("test-host")) == expected_attrs
 
 
-@pytest.mark.usefixtures("load_all_agent_based_plugins")
-@pytest.mark.parametrize("hostname,result", [
-    ("localhost", {
-        'check_interval': 1.0,
-        'contact_groups': u'ding',
-    }),
-    ("blub", {
-        'check_interval': 40.0
-    }),
-])
-def test_get_cmk_passive_service_attributes(monkeypatch, hostname, result):
-    ts = Scenario().add_host("localhost")
-    ts.add_host("blub")
+@pytest.mark.usefixtures("fix_register")
+@pytest.mark.parametrize(
+    "hostname,result",
+    [
+        (
+            HostName("localhost"),
+            {
+                "check_interval": 1.0,
+                "contact_groups": "ding",
+            },
+        ),
+        (HostName("blub"), {"check_interval": 40.0}),
+    ],
+)
+def test_get_cmk_passive_service_attributes(
+    monkeypatch: pytest.MonkeyPatch, hostname: HostName, result: ObjectAttributes
+) -> None:
+    ts = Scenario()
+    ts.add_host(HostName("localhost"))
+    ts.add_host(HostName("blub"))
     ts.set_option(
-        "extra_service_conf", {
-            "contact_groups": [(u'ding', ['localhost'], ["CPU load$"]),],
-            "check_interval": [
-                (40.0, ['blub'], ["Check_MK$"]),
-                (33.0, ['localhost'], ["CPU load$"]),
+        "extra_service_conf",
+        {
+            "contact_groups": [
+                {
+                    "condition": {
+                        "service_description": [{"$regex": "CPU load$"}],
+                        "host_name": ["localhost"],
+                    },
+                    "options": {},
+                    "value": "ding",
+                },
             ],
-        })
+            "check_interval": [
+                {
+                    "condition": {
+                        "service_description": [{"$regex": "Check_MK$"}],
+                        "host_name": ["blub"],
+                    },
+                    "options": {},
+                    "value": 40.0,
+                },
+                {
+                    "condition": {
+                        "service_description": [{"$regex": "CPU load$"}],
+                        "host_name": ["localhost"],
+                    },
+                    "options": {},
+                    "value": 33.0,
+                },
+            ],
+        },
+    )
     config_cache = ts.apply(monkeypatch)
-    host_config = config_cache.get_host_config(hostname)
     check_mk_attrs = core_config.get_service_attributes(hostname, "Check_MK", config_cache)
 
-    service = Service(CheckPluginName("cpu_loads"), None, "CPU load", {})
-    service_spec = core_config.get_cmk_passive_service_attributes(config_cache, host_config,
-                                                                  service, check_mk_attrs)
+    service = ConfiguredService(
+        check_plugin_name=CheckPluginName("cpu_loads"),
+        item=None,
+        description="CPU load",
+        parameters=TimespecificParameters(),
+        discovered_parameters={},
+        service_labels={},
+        is_enforced=False,
+    )
+    service_spec = core_config.get_cmk_passive_service_attributes(
+        config_cache, hostname, service, check_mk_attrs
+    )
     assert service_spec == result
 
 
-@pytest.mark.parametrize("tag_groups,result", [({
-    "tg1": "val1",
-    "tg2": "val1",
-}, {
-    u"__TAG_tg1": u"val1",
-    u"__TAG_tg2": u"val1",
-}), ({
-    u"täg-113232_eybc": u"äbcdef"
-}, {
-    u"__TAG_täg-113232_eybc": u"äbcdef",
-}), ({
-    "a.d B/E u-f N_A": "a.d B/E u-f N_A"
-}, {
-    u"__TAG_a.d B/E u-f N_A": "a.d B/E u-f N_A",
-})])
-def test_get_tag_attributes(tag_groups, result):
-    attributes = core_config._get_tag_attributes(tag_groups, "TAG")
+@pytest.mark.parametrize(
+    "tag_groups,result",
+    [
+        (
+            {
+                "tg1": "val1",
+                "tg2": "val1",
+            },
+            {
+                "__TAG_tg1": "val1",
+                "__TAG_tg2": "val1",
+            },
+        ),
+        (
+            {"täg-113232_eybc": "äbcdef"},
+            {
+                "__TAG_täg-113232_eybc": "äbcdef",
+            },
+        ),
+        (
+            {"a.d B/E u-f N_A": "a.d B/E u-f N_A"},
+            {
+                "__TAG_a.d B/E u-f N_A": "a.d B/E u-f N_A",
+            },
+        ),
+    ],
+)
+def test_get_tag_attributes(
+    tag_groups: Mapping[TagGroupID, TagID] | Labels | LabelSources, result: ObjectAttributes
+) -> None:
+    attributes = ConfigCache._get_tag_attributes(tag_groups, "TAG")
     assert attributes == result
     for k, v in attributes.items():
         assert isinstance(k, str)
         assert isinstance(v, str)
+
+
+@pytest.mark.parametrize("ipaddress", [None, HostAddress("127.0.0.1")])
+def test_template_translation(
+    ipaddress: HostAddress | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    template = "<NOTHING>x<IP>x<HOST>x<host>x<ip>x"
+    hostname = HostName("testhost")
+    ts = Scenario()
+    ts.add_host(hostname)
+    config_cache = ts.apply(monkeypatch)
+
+    assert config_cache.translate_commandline(
+        hostname, ipaddress, template
+    ) == "<NOTHING>x{}x{}x<host>x<ip>x".format(ipaddress if ipaddress is not None else "", hostname)
+
+
+@pytest.mark.parametrize(
+    "attributes, expected",
+    [
+        pytest.param(
+            {
+                "_ADDRESSES_4": "",
+                "_ADDRESSES_6": "",
+                "__TAG_piggyback": "auto-piggyback",
+                "__TAG_site": "unit",
+                "__TAG_snmp_ds": "no-snmp",
+                "__LABEL_ding": "dong",
+                "__LABEL_cmk/site": "NO_SITE",
+                "__LABELSOURCE_cmk/site": "discovered",
+                "__LABELSOURCE_ding": "explicit",
+                "address": "0.0.0.0",
+                "alias": "test-host",
+            },
+            {
+                "cmk/site": "NO_SITE",
+                "ding": "dong",
+            },
+        ),
+    ],
+)
+def test_get_labels_from_attributes(attributes: dict[str, str], expected: Labels) -> None:
+    assert get_labels_from_attributes(list(attributes.items())) == expected
+
+
+@pytest.mark.parametrize(
+    "versioned_config_path, host_name, host_labels, expected",
+    [
+        pytest.param(
+            VersionedConfigPath(1),
+            "horsthost",
+            CollectedHostLabels(
+                host_labels={"owe": "owe"},
+                service_labels={
+                    "svc": {"lbl": "blub"},
+                    "svc2": {},
+                },
+            ),
+            CollectedHostLabels(
+                host_labels={"owe": "owe"},
+                service_labels={"svc": {"lbl": "blub"}},
+            ),
+        )
+    ],
+)
+def test_write_and_read_notify_host_file(
+    versioned_config_path: VersionedConfigPath,
+    host_name: HostName,
+    host_labels: CollectedHostLabels,
+    expected: CollectedHostLabels,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    notify_labels_path: Path = Path(versioned_config_path) / "notify" / "labels"
+    monkeypatch.setattr(
+        cmk.base.core_config,
+        "_get_host_file_path",
+        lambda config_path: notify_labels_path,
+    )
+
+    write_notify_host_file(
+        versioned_config_path,
+        {host_name: host_labels},
+    )
+
+    assert notify_labels_path.exists()
+
+    monkeypatch.setattr(
+        cmk.base.core_config,
+        "_get_host_file_path",
+        lambda host_name: notify_labels_path / host_name,
+    )
+    assert read_notify_host_file(host_name) == expected

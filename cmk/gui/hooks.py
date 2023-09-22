@@ -1,44 +1,30 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 import functools
-
 import sys
 import traceback
-from typing import Any, Callable, Dict, List, NamedTuple, Union, Literal
+import typing
+from collections.abc import Callable
+from typing import Any, Literal, NamedTuple
 
-import cmk.gui.config as config
-import cmk.gui.i18n
-from cmk.gui.i18n import _
-from cmk.gui.globals import html
-
-Hook = NamedTuple("Hook", [
-    ("handler", Callable),
-    ("is_builtin", bool),
-])
-
-hooks: Dict[str, List[Hook]] = {}
-
-# Datastructures and functions needed before plugins can be loaded
-loaded_with_language: Union[bool, None, str] = False
+from cmk.utils.exceptions import MKGeneralException
 
 
-# Load all login plugins
-def load_plugins(force: bool) -> None:
-    global loaded_with_language
-    if loaded_with_language == cmk.gui.i18n.get_current_language() and not force:
-        return
+class Hook(NamedTuple):
+    handler: Callable
+    is_builtin: bool
 
+
+hooks: dict[str, list[Hook]] = {}
+
+
+def load_plugins() -> None:
+    """Plugin initialization hook (Called by cmk.gui.main_modules.load_plugins())"""
     # Cleanup all plugin hooks. They need to be renewed by load_plugins()
     # of the other modules
     unregister_plugin_hooks()
-
-    # This must be set after plugin loading to make broken plugins raise
-    # exceptions all the time and not only the first time (when the plugins
-    # are loaded).
-    loaded_with_language = cmk.gui.i18n.get_current_language()
 
 
 def unregister_plugin_hooks() -> None:
@@ -55,6 +41,11 @@ def register_builtin(name: str, func: Callable) -> None:
     register(name, func, is_builtin=True)
 
 
+# TODO: Kept for compatibility with pre-1.6 Setup plugins
+def register_hook(name: str, func: Callable) -> None:
+    register_from_plugin(name, func)
+
+
 def register_from_plugin(name: str, func: Callable) -> None:
     register(name, func, is_builtin=False)
 
@@ -64,12 +55,19 @@ def register(name: str, func: Callable, is_builtin: bool = False) -> None:
     hooks.setdefault(name, []).append(Hook(handler=func, is_builtin=is_builtin))
 
 
-def get(name: str) -> List[Hook]:
+def unregister(name: str, func: Callable) -> None:
+    registered_hooks = hooks.get(name, [])
+    for hook in registered_hooks:
+        if hook.handler == func:
+            registered_hooks.remove(hook)
+
+
+def get(name: str) -> list[Hook]:
     return hooks.get(name, [])
 
 
 def registered(name: str) -> bool:
-    """ Returns True if at least one function is registered for the given hook """
+    """Returns True if at least one function is registered for the given hook"""
     return hooks.get(name, []) != []
 
 
@@ -80,35 +78,44 @@ def call(name: str, *args: Any) -> None:
         try:
             hook.handler(*args)
         except Exception as e:
-            if config.debug:
-                t, v, tb = sys.exc_info()
-                msg = "".join(traceback.format_exception(t, v, tb, None))
-                html.show_error("<h1>" + _("Error executing hook") + " %s #%d: %s</h1>"
-                                "<pre>%s</pre>" % (name, n, e, msg))
-            raise
+            t, v, tb = sys.exc_info()
+            msg = "".join(traceback.format_exception(t, v, tb, None))
+            raise MKGeneralException(msg) from e
 
 
 ClearEvent = Literal[
-    'activate-changes',
-    'pre-activate-changes',
-    'all-hosts-changed',
-    'contactgroups-saved',
-    'hosts-changed',
-    'ldap-sync-finished',
-    'request-start',
-    'request-end',
-    'roles-saved',
-    'users-saved',
-]  # yapf: disable
+    "activate-changes",
+    "pre-activate-changes",
+    "all-hosts-changed",
+    "contactgroups-saved",
+    "hosts-changed",
+    "ldap-sync-finished",
+    "request-start",
+    "request-end",
+    "request-context-enter",
+    "request-context-exit",
+    "roles-saved",
+    "users-saved",
+]
 
-ClearEvents = Union[List[ClearEvent], ClearEvent]
+ClearEvents = list[ClearEvent] | ClearEvent
+
+R = typing.TypeVar("R")
+P = typing.ParamSpec("P")
 
 
-def scoped_memoize(
+# NOTE
+# We can't make a type alias like Foo = Callable[P, R] right now, because of a bug in mypy. We
+# therefore need to duplicate the Callable[P, R] part in every site of use. It seems to work, but
+# the declaration itself raises an error.
+# For more detailed information see: https://github.com/python/mypy/issues/11855
+
+
+def _scoped_memoize(
     clear_events: ClearEvents,
-    maxsize: int = 128,
+    maxsize: int | None = 128,
     typed: bool = False,
-):
+) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """A scoped memoization decorator.
 
     This caches the decorated function with a `functools.lru_cache`, however the cache will be
@@ -137,16 +144,19 @@ def scoped_memoize(
     if not clear_events:
         raise ValueError(f"No clear-events specified. Use one of: {ClearEvent!r}")
 
-    def _decorator(func):
+    def _decorator(func: Callable[P, R]) -> Callable[P, R]:
         cached_func = functools.lru_cache(maxsize=maxsize, typed=typed)(func)
         for clear_event in clear_events:
-            register(clear_event, cached_func.cache_clear)  # hooks.register
-        return cached_func
+            register_builtin(clear_event, cached_func.cache_clear)  # hooks.register_builtin
+        # TODO: mypy does more complex type overloads depending on arity
+        return typing.cast(Callable[P, R], cached_func)
 
     return _decorator
 
 
-def request_memoize(maxsize: int = 128, typed: bool = False):
+def request_memoize(
+    maxsize: int | None = 128, typed: bool = False
+) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """A cache decorator which only has a scope for one request.
 
     Args:
@@ -157,7 +167,9 @@ def request_memoize(maxsize: int = 128, typed: bool = False):
             See `functools.lru_cache`
 
     Returns:
-        A `scoped_memoize` decorator which clears on every request-start.
+        A `_scoped_memoize` decorator which clears on every request-start.
 
     """
-    return scoped_memoize(clear_events=['request-start'], maxsize=maxsize, typed=typed)
+    return _scoped_memoize(
+        clear_events=["request-end", "request-context-exit"], maxsize=maxsize, typed=typed
+    )

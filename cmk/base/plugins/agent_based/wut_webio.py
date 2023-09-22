@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
-from typing import (
-    List,
-    NamedTuple,
-    Optional,
-    Mapping,
-    Any,
-    Literal,
-)
+"""Check plugin for W&T WebIO device
+
+Knowledge:
+* a device can potentially be in an Unknown state for different reasons such as an occasional
+firmware problem
+"""
+from collections.abc import Mapping
+from typing import Any, Literal, NamedTuple
+
 from .agent_based_api.v1 import (
-    register,
-    SNMPTree,
+    any_of,
     contains,
-    Service,
+    register,
     Result,
+    Service,
+    SNMPTree,
     State,
     type_defs,
-    any_of,
 )
 
 _EA12x12_BASE = ".1.3.6.1.4.1.5040.1.2.4"
@@ -33,7 +33,7 @@ _OIDS_TO_FETCH = [
     "1.3.1.4",  # the state of the input
 ]
 
-_DeviceStates = Literal["On", "Off"]
+_DeviceStates = Literal["On", "Off", "Unknown"]
 
 
 class Input(NamedTuple):
@@ -46,11 +46,13 @@ Section = Mapping[str, Input]
 STATE_TRANSLATION: Mapping[str, _DeviceStates] = {
     "0": "Off",
     "1": "On",
+    "": "Unknown",
 }
 
 DEFAULT_STATE_EVALUATION = {
     "Off": int(State.CRIT),
     "On": int(State.OK),
+    "Unknown": int(State.UNKNOWN),
 }
 
 STATE_EVAL_KEY = "evaluation_mode"
@@ -58,7 +60,7 @@ AS_DISCOVERED = "as_discovered"
 STATES_DURING_DISC_KEY = "states_during_discovery"
 
 
-def parse_wut_webio(string_table: List[type_defs.StringTable]) -> Optional[Section]:
+def parse_wut_webio(string_table: list[type_defs.StringTable]) -> Section | None:
     # We may have a EA12x6, EA2x2 or EA12x12
     webio_data = string_table[0] or string_table[1] or string_table[2]
     if not webio_data:
@@ -68,7 +70,8 @@ def parse_wut_webio(string_table: List[type_defs.StringTable]) -> Optional[Secti
         f"{webio_data[0][0]} {port_name}": Input(
             state=STATE_TRANSLATION[state],
             idx=idx,
-        ) for _, idx, port_name, state in webio_data[1:]
+        )
+        for _, idx, port_name, state in webio_data[1:]
     }
 
 
@@ -76,15 +79,9 @@ register.snmp_section(
     name="wut_webio",
     parse_function=parse_wut_webio,
     fetch=[
-        SNMPTree(
-            base=_EA12x6_BASE,  # wtWebio577xxEA12x6
-            oids=_OIDS_TO_FETCH),
-        SNMPTree(
-            base=_EA2x2_BASE,  # wtWebio577xxEA2x2
-            oids=_OIDS_TO_FETCH),
-        SNMPTree(
-            base=_EA12x12_BASE,  # wtWebioEA12x12
-            oids=_OIDS_TO_FETCH),
+        SNMPTree(base=_EA12x6_BASE, oids=_OIDS_TO_FETCH),  # wtWebio577xxEA12x6
+        SNMPTree(base=_EA2x2_BASE, oids=_OIDS_TO_FETCH),  # wtWebio577xxEA2x2
+        SNMPTree(base=_EA12x12_BASE, oids=_OIDS_TO_FETCH),  # wtWebioEA12x12
     ],
     detect=any_of(
         contains(".1.3.6.1.2.1.1.2.0", _EA12x6_BASE),
@@ -95,11 +92,10 @@ register.snmp_section(
 
 
 def _get_state_evaluation_from_state(state: str) -> Mapping[str, int]:
-    return {state_key: 0 if state == state_key else 2 for state_key in ("Off", "On")}
+    return {state_key: 0 if state == state_key else 2 for state_key in ("Off", "On", "Unknown")}
 
 
 def discover_wut_webio(section: Section) -> type_defs.DiscoveryResult:
-
     yield from [
         Service(item=item, parameters={STATES_DURING_DISC_KEY: input_.state})
         for item, input_ in section.items()

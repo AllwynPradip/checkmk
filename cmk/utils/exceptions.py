@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """User-defined exceptions and error handling related constant."""
@@ -8,13 +7,12 @@
 import enum
 import traceback
 from types import TracebackType
-from typing import Tuple, Type
 
 __all__ = [
     "MKAgentError",
     "MKBailOut",
+    "MKConfigLockTimeout",
     "MKIPAddressLookupError",
-    "MKEmptyAgentData",
     "MKException",
     "MKFetcherError",
     "MKGeneralException",
@@ -41,23 +39,24 @@ class MKAgentError(MKFetcherError):
     pass
 
 
-class MKEmptyAgentData(MKAgentError):
+class MKSNMPError(MKFetcherError):
     pass
 
 
 class MKParseFunctionError(MKException):
-    def __init__(self, exception_type: Type[Exception], exception: Exception,
-                 backtrace: TracebackType) -> None:
+    def __init__(
+        self, exception_type: type[Exception], exception: Exception, backtrace: TracebackType
+    ) -> None:
         self.exception_type = exception_type
         self.exception = exception
         self.backtrace = backtrace
-        super(MKParseFunctionError, self).__init__(self, exception_type, exception, backtrace)
+        super().__init__(self, exception_type, exception, backtrace)
 
-    def exc_info(self) -> Tuple[Type[Exception], Exception, TracebackType]:
+    def exc_info(self) -> tuple[type[Exception], Exception, TracebackType]:
         return self.exception_type, self.exception, self.backtrace
 
     def __str__(self) -> str:
-        return "%r\n%s" % (self.exception, "".join(traceback.format_tb(self.backtrace)))
+        return "{!r}\n{}".format(self.exception, "".join(traceback.format_tb(self.backtrace)))
 
 
 class MKSkipCheck(MKException):
@@ -86,15 +85,16 @@ class MKBailOut(MKException):
     pass
 
 
-# This exception is raised when a previously configured timeout is reached.
-# It is used during keepalive mode. It is also used by the automations
-# which have a timeout set.
 class MKTimeout(MKException):
-    pass
+    """Raise when a timeout is reached.
 
+    Note:
+        It is used during keepalive mode. It is also used by the
+        automations which have a timeout set.
 
-class MKSNMPError(MKException):
-    pass
+    See also:
+        `cmk.utils.timeout` has a context manager using it.
+    """
 
 
 class MKIPAddressLookupError(MKGeneralException):
@@ -105,3 +105,7 @@ class OnError(enum.Enum):
     RAISE = "raise"
     WARN = "warn"
     IGNORE = "ignore"
+
+
+class MKConfigLockTimeout(MKTimeout):
+    """Special exception to signalize timeout waiting for the global configuration lock"""

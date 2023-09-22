@@ -1,5 +1,5 @@
 #!/bin/bash -ex
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -32,7 +32,10 @@ package_names=(
     "pkg-config"
     "wget"
 )
-packages=$(IFS=,; echo "${package_names[*]}")
+packages=$(
+    IFS=,
+    echo "${package_names[*]}"
+)
 # TODO: Would use --force-check-gpg, but not supported on wheezy (root server)
 debootstrap \
     --components=main,universe \
@@ -42,14 +45,18 @@ debootstrap \
 ## Nun ein kleiner Hack um zu verhindern, dass beim Installieren der Pakete
 # die Daemonen der Pakete gestartet werden. Ist nicht dramatisch, erzeugt
 # aber doofe Fehlermeldungen.
-echo exit 101 > $CHROOT_PATH/usr/sbin/policy-rc.d
+echo exit 101 >$CHROOT_PATH/usr/sbin/policy-rc.d
 chmod +x $CHROOT_PATH/usr/sbin/policy-rc.d
 
 cp /etc/resolv.conf $CHROOT_PATH/etc/resolv.conf
 
 ## kill any processes that are running on chroot
-chroot_pids=$(for p in /proc/*/root; do ls -l $p; done | grep $CHROOT_PATH | cut -d'/' -f3)
-test -z "$chroot_pids" || (kill -9 $chroot_pids; sleep 2)
+chroot_pids=$(for p in /proc/*/root; do ls -l "$p"; done | grep $CHROOT_PATH | cut -d'/' -f3)
+# shellcheck disable=SC2086
+test -z "$chroot_pids" || (
+    kill -9 $chroot_pids
+    sleep 2
+)
 
 ### unmount /proc
 umount $CHROOT_PATH/proc || echo "Already unmounted"
@@ -58,6 +65,7 @@ umount $CHROOT_PATH/proc || echo "Already unmounted"
 tar cfz ubuntu.tgz -C $CHROOT_PATH .
 
 ### import this tar archive into a docker image:
+# shellcheck disable=SC2002
 cat ubuntu.tgz | docker import - $docker_image --message "Build with https://github.com/docker-32bit/ubuntu"
 
 # ### push image to Docker Hub

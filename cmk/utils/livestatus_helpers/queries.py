@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2020 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2020 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
-from typing import Any, Dict, Generator, List, Optional, Tuple, Type, cast
+
+from collections.abc import Generator
+from contextlib import contextmanager
+from typing import Any, NoReturn
+
+from livestatus import LivestatusResponse, MultiSiteConnection, OnlySites, SiteId
 
 from cmk.utils.livestatus_helpers import tables
-from cmk.utils.livestatus_helpers.base import BaseQuery
 from cmk.utils.livestatus_helpers.expressions import (
     And,
     BinaryExpression,
+    Not,
     NothingExpression,
     Or,
     QueryExpression,
-    Not,
 )
-from cmk.utils.livestatus_helpers.types import Column, expr_to_tree, Table
+from cmk.utils.livestatus_helpers.types import Column, expr_to_tree, ExpressionDict, Table
 
 # TODO: Support Stats headers in Query() class
 
@@ -30,8 +33,7 @@ class ResultRow(dict):
     Sadly the values can't really be checked by mypy, but this won't be possible with dict-lookups
     as well.
 
-    >>> from typing import Dict
-    >>> result: Dict[str, Any] = {'a': 'b', 'b': 5, 'c': [1, 2, 3]}
+    >>> result: dict[str, Any] = {'a': 'b', 'b': 5, 'c': [1, 2, 3]}
     >>> d = ResultRow(result)
     >>> str_value = d.a  # is of type Any
     >>> str_value
@@ -74,20 +76,21 @@ class ResultRow(dict):
         KeyError: 'foo: Setting of keys not allowed.'
 
     """
+
     def __getattr__(self, item: str) -> Any:
         try:
             return self[item]
         except KeyError as exc:
             raise AttributeError(str(exc))
 
-    def __setitem__(self, key, value):
+    def __setitem__(self, key: object, value: object) -> NoReturn:
         raise KeyError(f"{key}: Setting of keys not allowed.")
 
-    def __setattr__(self, key, value):
+    def __setattr__(self, key: object, value: object) -> NoReturn:
         raise AttributeError(f"{key}: Setting of attributes not allowed.")
 
 
-def _get_column(table_class: Type[Table], col: str) -> Column:
+def _get_column(table_class: type[Table], col: str) -> Column:
     """Strip prefixes from column names and return the correct column
 
     Examples:
@@ -112,17 +115,17 @@ def _get_column(table_class: Type[Table], col: str) -> Column:
         A column instance
 
     """
-    if hasattr(table_class, col):
-        return getattr(table_class, col)
+    if not hasattr(table_class, col):
+        prefix = table_class.__tablename__.rstrip("s") + "_"
+        while col.startswith(prefix):
+            col = col[len(prefix) :]
+    value = getattr(table_class, col)
+    if not isinstance(value, Column):
+        raise ValueError(f"{table_class}.{col} is not a Column")
+    return value
 
-    table_name = cast(str, table_class.__tablename__)
-    prefix = table_name.rstrip('s') + "_"
-    while col.startswith(prefix):
-        col = col[len(prefix):]
-    return getattr(table_class, col)
 
-
-class Query(BaseQuery):
+class Query:
     """A representation of a Livestatus query.
 
     This holds all necessary information to generate a valid livestatus query.
@@ -193,10 +196,11 @@ description = CPU\\nFilter: host_name ~ morgen\\nNegate: 1\\nAnd: 3'
         False
 
     """
+
     def __init__(
-            self,
-            columns: List[Column],
-            filter_expr: QueryExpression = NothingExpression(),
+        self,
+        columns: list[Column],
+        filter_expr: QueryExpression = NothingExpression(),
     ):
         """A representation of a livestatus query.
 
@@ -217,9 +221,9 @@ description = CPU\\nFilter: host_name ~ morgen\\nNegate: 1\\nAnd: 3'
         if len(_tables) != 1:
             raise ValueError(f"Query doesn't specify a single table: {_tables!r}")
 
-        self.table: Type[Table] = _tables.pop()
+        self.table: type[Table] = _tables.pop()
 
-    def filter(self, filter_expr: QueryExpression) -> 'Query':
+    def filter(self, filter_expr: QueryExpression) -> "Query":
         """Apply additional filters to an existing query.
 
         This will return a new `Query` instance. The original one is left untouched."""
@@ -228,7 +232,7 @@ description = CPU\\nFilter: host_name ~ morgen\\nNegate: 1\\nAnd: 3'
     def __str__(self) -> str:
         return self.compile()
 
-    def first(self, sites) -> Optional[ResultRow]:
+    def first(self, sites: MultiSiteConnection) -> ResultRow | None:
         """Fetch the first row of the result.
 
         If the result is empty, `None` will be returned.
@@ -243,7 +247,7 @@ description = CPU\\nFilter: host_name ~ morgen\\nNegate: 1\\nAnd: 3'
         """
         return next(self.iterate(sites), None)
 
-    def first_value(self, sites) -> Optional[Any]:
+    def first_value(self, sites: MultiSiteConnection) -> Any | None:
         """Fetch one cell from the result.
 
         If no result could be found, None is returned.
@@ -268,8 +272,8 @@ description = CPU\\nFilter: host_name ~ morgen\\nNegate: 1\\nAnd: 3'
             ...      name = Column('name', 'string', 'The host name')
             ...      parents = Column('parents', 'list', 'The hosts parents')
 
-            >>> from cmk.gui.livestatus_utils.testing import simple_expect
-            >>> with simple_expect() as live:
+            >>> from cmk.utils.livestatus_helpers.testing import expect_single_query
+            >>> with expect_single_query() as live:
             ...    _ = live.expect_query("GET hosts\\nColumns: parents\\nFilter: name = heute")
             ...    Query([Hosts.parents], Hosts.name == "heute").first_value(live)
             ['example.com']
@@ -287,17 +291,38 @@ description = CPU\\nFilter: host_name ~ morgen\\nNegate: 1\\nAnd: 3'
             return list(entry.values())[0]
         return None
 
-    def fetchall(self, sites) -> List[ResultRow]:
-        return list(self.iterate(sites))
+    def fetchall(
+        self,
+        sites: MultiSiteConnection,
+        include_site_ids: bool = False,
+        only_sites: OnlySites = None,
+    ) -> list[ResultRow]:
+        sites.set_only_sites(only_sites)
+        if include_site_ids:
+            with detailed_connection(sites) as conn:
+                result = list(self.iterate(conn))
+        else:
+            result = list(self.iterate(sites))
 
-    def fetchone(self, sites) -> ResultRow:
+        sites.set_only_sites()
+        return result
+
+    def fetchone(
+        self,
+        sites: MultiSiteConnection,
+        include_site_ids: bool = False,
+        only_site: SiteId | None = None,
+    ) -> ResultRow:
         """Fetch one row of the result.
 
         If the result from livestatus is more or less than exactly one row long it
         will throw an Exception.
+        If the site_id is passed, we only query that site + the site will be included in the result.
 
         Args:
-            sites:
+            sites: MultiSiteConnection
+            include_site_ids: include the site in the result or not,
+            only_site: query all sites or only the site with the site_id passed in.,
 
         Returns:
             One ResultRow entry.
@@ -312,33 +337,40 @@ description = CPU\\nFilter: host_name ~ morgen\\nNegate: 1\\nAnd: 3'
             ...      name = Column('name', 'string', 'The host name')
             ...      parents = Column('parents', 'list', 'The hosts parents')
 
-            >>> from cmk.gui.livestatus_utils.testing import simple_expect
+            >>> from cmk.utils.livestatus_helpers.testing import expect_single_query
 
-            >>> with simple_expect() as live:
+            >>> with expect_single_query() as live:
             ...    _ = live.expect_query("GET hosts\\nColumns: name\\nFilter: name = heute")
             ...    Query([Hosts.name], Hosts.name == "heute").fetchone(live)
             {'name': 'heute'}
 
-            >>> with simple_expect() as live:
+            >>> with expect_single_query() as live:
             ...    _ = live.expect_query("GET hosts\\nColumns: name\\nFilter: name = heute")
             ...    live.set_prepend_site(True)
             ...    Query([Hosts.name], Hosts.name == "heute").fetchone(live)
             {'site': 'NO_SITE', 'name': 'heute'}
 
-            >>> with simple_expect() as live:
+            >>> with expect_single_query() as live:
             ...    _ = live.expect_query("GET hosts\\nColumns: name")
             ...    Query([Hosts.name]).fetchone(live)
             Traceback (most recent call last):
             ...
             ValueError: Expected one row, got 2 row(s).
 
-       """
-        result = list(self.iterate(sites))
+        """
+        sites.set_only_sites(None if only_site is None else [only_site])
+        if include_site_ids:
+            with detailed_connection(sites) as conn:
+                result = list(self.iterate(conn))
+        else:
+            result = list(self.iterate(sites))
+
+        sites.set_only_sites()
         if len(result) != 1:
             raise ValueError(f"Expected one row, got {len(result)} row(s).")
         return result[0]
 
-    def value(self, sites) -> Any:
+    def value(self, sites: MultiSiteConnection) -> Any:
         """Fetch one cell from the result.
 
         For this to work, the result must be exactly one row long and this row needs to have
@@ -361,8 +393,8 @@ description = CPU\\nFilter: host_name ~ morgen\\nNegate: 1\\nAnd: 3'
             ...      name = Column('name', 'string', 'The host name')
             ...      parents = Column('parents', 'list', 'The hosts parents')
 
-            >>> from cmk.gui.livestatus_utils.testing import simple_expect
-            >>> with simple_expect() as live:
+            >>> from cmk.utils.livestatus_helpers.testing import expect_single_query
+            >>> with expect_single_query() as live:
             ...    _ = live.expect_query("GET hosts\\nColumns: parents\\nFilter: name = heute")
             ...    Query([Hosts.parents], Hosts.name == "heute").value(live)
             ['example.com']
@@ -377,7 +409,7 @@ description = CPU\\nFilter: host_name ~ morgen\\nNegate: 1\\nAnd: 3'
             raise ValueError("Number of columns need to be exactly 1 to give a value.")
         return list(self.fetchone(sites).values())[0]
 
-    def fetch_values(self, sites) -> List[List[Any]]:
+    def fetch_values(self, sites: MultiSiteConnection) -> LivestatusResponse:
         """Return the result coming from LiveStatus.
 
         This returns a list with each row being a list of len(number of columns requested).
@@ -391,7 +423,7 @@ description = CPU\\nFilter: host_name ~ morgen\\nNegate: 1\\nAnd: 3'
         """
         return sites.query(self.compile())
 
-    def iterate(self, sites) -> Generator[ResultRow, None, None]:
+    def iterate(self, sites: MultiSiteConnection) -> Generator[ResultRow, None, None]:
         """Return a generator of the result.
 
         Args:
@@ -408,13 +440,13 @@ description = CPU\\nFilter: host_name ~ morgen\\nNegate: 1\\nAnd: 3'
             ...      name = Column('name', 'string', 'The host name')
             ...      parents = Column('parents', 'list', 'The hosts parents')
 
-            >>> from cmk.gui.livestatus_utils.testing import simple_expect
-            >>> with simple_expect() as live:
+            >>> from cmk.utils.livestatus_helpers.testing import expect_single_query
+            >>> with expect_single_query() as live:
             ...    _ = live.expect_query("GET hosts\\nColumns: name parents")
             ...    list(Query([Hosts.name, Hosts.parents]).iterate(live))
             [{'name': 'heute', 'parents': ['example.com']}, {'name': 'example.com', 'parents': []}]
 
-            >>> with simple_expect() as live:
+            >>> with expect_single_query() as live:
             ...    _ = live.expect_query("GET hosts\\nColumns: name parents")
             ...    live.set_prepend_site(True)
             ...    list(Query([Hosts.name, Hosts.parents]).iterate(live))
@@ -423,17 +455,17 @@ description = CPU\\nFilter: host_name ~ morgen\\nNegate: 1\\nAnd: 3'
 
         """
         if sites.prepend_site:
-            if 'site' in self.column_names:
+            if "site" in self.column_names:
                 raise ValueError("Conflict: site both as column in a table and via prepend_site")
-            names = ['site', *self.column_names]
+            names = ["site", *self.column_names]
         else:
             names = self.column_names
 
         for entry in self.fetch_values(sites):
-            # This is Dict[str, Any], just with Attribute based access. Can't do much about this.
+            # This is dict[str, Any], just with Attribute based access. Can't do much about this.
             yield ResultRow(list(zip(names, entry)))
 
-    def to_dict(self, sites) -> Dict[Any, Any]:
+    def to_dict(self, sites: MultiSiteConnection) -> dict[Any, Any]:
         """Return a dict from the result set.
 
         The first column will be the mapping key, the second one the value.
@@ -455,8 +487,8 @@ description = CPU\\nFilter: host_name ~ morgen\\nNegate: 1\\nAnd: 3'
             ...      name = Column('name', 'string', 'The host name')
             ...      parents = Column('parents', 'list', 'The hosts parents')
 
-            >>> from cmk.gui.livestatus_utils.testing import simple_expect
-            >>> with simple_expect() as live:
+            >>> from cmk.utils.livestatus_helpers.testing import expect_single_query
+            >>> with expect_single_query() as live:
             ...    _ = live.expect_query("GET hosts\\nColumns: name parents")
             ...    Query([Hosts.name, Hosts.parents]).to_dict(live)
             {'heute': ['example.com'], 'example.com': []}
@@ -483,23 +515,25 @@ description = CPU\\nFilter: host_name ~ morgen\\nNegate: 1\\nAnd: 3'
             The LiveStatus-Query as a string.
 
         """
-        _query: List[Tuple[str, str]] = []
-        column_names = ' '.join(column.name for column in self.columns)
+        _query: list[tuple[str, str]] = []
+        column_names = " ".join(column.name for column in self.columns)
         _query.append(("Columns", column_names))
         _query.extend(self.filter_expr.render())
-        return '\n'.join([
-            'GET %s' % self.table.__tablename__,
-            *[': '.join(line) for line in _query],
-        ])
+        return "\n".join(
+            [
+                "GET %s" % self.table.__tablename__,
+                *[": ".join(line) for line in _query],
+            ]
+        )
 
-    def dict_repr(self):
+    def dict_repr(self) -> ExpressionDict | None:
         return expr_to_tree(self.table, self.filter_expr)
 
     @classmethod
-    def from_string(
+    def from_string(  # pylint: disable=too-many-branches
         cls,
         string_query: str,
-    ) -> 'Query':
+    ) -> "Query":
         """Constructs a Query instance from a string based LiveStatus-Query
 
         Args:
@@ -625,14 +659,14 @@ description = CPU\\nFilter: host_name ~ morgen\\nNegate: 1\\nAnd: 3'
         """
         lines = string_query.split("\n")
         for line in lines:
-            if line.startswith('GET '):
+            if line.startswith("GET "):
                 parts = line.split()
                 if len(parts) < 2:
                     raise ValueError(f"No table found in line: {line!r}")
 
                 table_name = parts[1]
                 try:
-                    table_class: Type[Table] = getattr(tables, table_name.title())
+                    table_class: type[Table] = getattr(tables, table_name.title())
                 except AttributeError:
                     raise ValueError(f"Table {table_name} was not defined in the tables module.")
                 break
@@ -640,9 +674,9 @@ description = CPU\\nFilter: host_name ~ morgen\\nNegate: 1\\nAnd: 3'
             raise ValueError("No table found")
 
         for line in lines:
-            if line.startswith('Columns: '):
+            if line.startswith("Columns: "):
                 column_names = line.split(": ", 1)[1].lstrip().split()
-                columns: List[Column] = []
+                columns: list[Column] = []
                 for col in column_names:
                     try:
                         columns.append(_get_column(table_class, col))
@@ -652,25 +686,25 @@ description = CPU\\nFilter: host_name ~ morgen\\nNegate: 1\\nAnd: 3'
         else:
             raise ValueError("No columns found")
 
-        filters: List[QueryExpression] = []
+        filters: list[QueryExpression] = []
         for line in lines:
-            if line.startswith('Filter: '):
+            if line.startswith("Filter: "):
                 try:
                     filters.append(_parse_line(table_class, line))
                 except AttributeError:
                     raise ValueError(f"Table {table_name!r}: Could not decode line {line!r}")
-            elif line.startswith('Or: ') or line.startswith("And: "):
+            elif line.startswith("Or: ") or line.startswith("And: "):
                 op, _count = line.split(": ")
                 count = int(_count)
                 # I'm sorry. :)
                 # We take the last `count` filters and pass them into the BooleanExpression
                 try:
-                    expr = {'or': Or, 'and': And}[op.lower()](*filters[-count:])
+                    expr = {"or": Or, "and": And}[op.lower()](*filters[-count:])
                 except ValueError:
                     raise ValueError(f"Could not parse {op} for {filters!r}")
                 filters = filters[:-count]
                 filters.append(expr)
-            elif line.startswith('Negate:') or line.startswith('Not:'):
+            elif line.startswith("Negate:") or line.startswith("Not:"):
                 filters[-1] = Not(filters[-1])
 
         if len(filters) > 1:
@@ -683,7 +717,7 @@ description = CPU\\nFilter: host_name ~ morgen\\nNegate: 1\\nAnd: 3'
 
 
 def _parse_line(
-    table: Type[Table],
+    table: type[Table],
     filter_string: str,
 ) -> BinaryExpression:
     """Parse a single filter line into a BinaryExpression
@@ -721,3 +755,16 @@ def _parse_line(
     _, column_name, op, *value = filter_string.split(None, 3)
     column = _get_column(table, column_name)
     return column.op(op, value)
+
+
+# TODO: Better rename to site_aware_connection or similar more meaningful
+@contextmanager
+def detailed_connection(
+    connection: MultiSiteConnection,
+) -> Generator[MultiSiteConnection, None, None]:
+    prev = connection.prepend_site
+    connection.set_prepend_site(True)
+    try:
+        yield connection
+    finally:
+        connection.set_prepend_site(prev)

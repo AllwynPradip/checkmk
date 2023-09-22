@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2021 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2021 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 from .agent_based_api.v1 import register, type_defs
 from .utils.cmciii import (
-    DiscoveryParams,
     CheckParams,
     discover_cmciii_sensors,
-    get_sensor,
     discovery_default_parameters,
+    DiscoveryParams,
+    get_sensor,
     Section,
 )
 from .utils.elphase import check_elphase
@@ -29,7 +28,7 @@ def check_cmciii_phase(item: str, params: CheckParams, section: Section) -> type
 
 register.check_plugin(
     name="cmciii_phase",
-    sections=['cmciii'],
+    sections=["cmciii"],
     service_name="Input %s",
     discovery_function=discover_cmciii_phase,
     check_function=check_cmciii_phase,

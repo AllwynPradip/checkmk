@@ -1,13 +1,14 @@
 @charset "UTF-8";
-// Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+// Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 // This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 // conditions defined in the file COPYING, which is part of this source code package.
 
 @import "~select2/dist/css/select2";
 @import "~@yaireo/tagify/dist/tagify";
-@import "~dc/web/css/dc";
+@import "~dc/dist/style/dc";
 @import "~simplebar/dist/simplebar";
 
+@import "../facelift/scss/_variables_common.scss";
 @import "scss/_variables.scss";
 @import "../facelift/scss/_main.scss";
 @import "../facelift/scss/_pages.scss";
@@ -28,7 +29,8 @@
 @import "../facelift/scss/_page_menu.scss";
 @import "../facelift/scss/_more.scss";
 @import "../facelift/scss/_graphs.scss";
-@import "../facelift/scss/_release_notes.scss";
+@import "../facelift/scss/_info.scss";
+@import "../facelift/scss/_password_meter.scss";
 
 // CEE specific files. Would love to add some kind of conditional import here,
 // but that is simply not possible at the moment using SCSS. Hack around this

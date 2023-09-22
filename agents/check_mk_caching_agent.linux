@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -13,7 +13,7 @@
 #   the contents of the cache file to servers that have not seen     #
 #   that output yet. No time criteria is needed, so this is working  #
 #   without configuration, regardless of your check interval. It     #
-#   is not even neccessary that all servers are polling with the     #
+#   is not even necessary that all servers are polling with the      #
 #   same interval.                                                   #
 #                                                                    #
 #   We apoplogize for the fact that this wrapper is running only     #
@@ -61,11 +61,11 @@ SEENFILE=$CACHEFILE.seenby.$REMOTE_HOST
 (
     flock --timeout 180 --exclusive 200 || exit 1
 
-    if [ ! -e "$CACHEFILE" -o -e "$SEENFILE" ]; then
+    if [ ! -e "$CACHEFILE" ] || [ -e "$SEENFILE" ]; then
         check_mk_agent >$CACHEFILE
         rm -f $CACHEFILE.seenby.*
     fi
     # Send cache file and mark it as seen by our remote host
     cat $CACHEFILE
-    touch $SEENFILE
+    touch "$SEENFILE"
 ) 200>$LOCKFILE

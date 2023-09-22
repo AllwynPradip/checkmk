@@ -1,103 +1,27 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# pylint: disable=chained-comparison
+# pylint: disable=chained-comparison,unused-import
 
-from typing import Any, Dict, List
-from cmk.base.config import factory_settings, Ruleset
+from cmk.base.api.agent_based.checking_classes import Metric, Result, State
 from cmk.base.check_api import get_bytes_human_readable
-from cmk.base.check_api import get_percent_human_readable
-
-from cmk.base.api.agent_based.checking_classes import Metric, Result
-from cmk.base.plugins.agent_based.utils.df import (
-    _check_inodes,
-    get_filesystem_levels as _get_filesystem_levels,
-    mountpoints_in_group,
-    FILESYSTEM_DEFAULT_LEVELS as _FILESYSTEM_DEFAULT_LEVELS,
+from cmk.base.plugins.agent_based.agent_based_api.v1 import render
+from cmk.base.plugins.agent_based.utils.df import check_filesystem_levels, check_inodes
+from cmk.base.plugins.agent_based.utils.df import (  # noqa: F401
+    FILESYSTEM_DEFAULT_LEVELS as FILESYSTEM_DEFAULT_LEVELS,
 )
+from cmk.base.plugins.agent_based.utils.df import (
+    FILESYSTEM_DEFAULT_PARAMS as FILESYSTEM_DEFAULT_PARAMS,
+)
+from cmk.base.plugins.agent_based.utils.df import INODES_DEFAULT_PARAMS as INODES_DEFAULT_PARAMS
+from cmk.base.plugins.agent_based.utils.df import mountpoints_in_group as mountpoints_in_group
+from cmk.base.plugins.agent_based.utils.df import TREND_DEFAULT_PARAMS as TREND_DEFAULT_PARAMS
 
-from .size_trend import size_trend  # type: ignore[attr-defined]
+from .size_trend import size_trend
 
 # Common include file for all filesystem checks (df, df_netapp, hr_fs, ...)
-
-# Settings for filesystem checks (df, df_vms, df_netapp and maybe others)
-filesystem_levels: List[Any] = []  # obsolete. Just here to check config and warn if changed
-filesystem_default_levels: Dict[str, Any] = {}  # can also be dropped some day in future
-
-# Filesystems to ignore. They should not be sent by agent anyway and
-# will indeed not be sent on Linux beginning with 1.6.0
-# TODO: Check other agents
-inventory_df_exclude_mountpoints = ['/dev']
-
-# Grouping of filesystems into groups that are monitored as one entity
-# Example:
-# filesystem_groups = [
-#     ( [ ( "Storage pool", "/data/pool*" ) ], [ 'linux', 'prod' ], ALL_HOSTS ),
-#     ( [ ( "Backup space 1", "/usr/backup/*.xyz" ),
-#         ( "Backup space 2", "/usr/backup2/*.xyz" ) ], ALL_HOSTS ),
-# ]
-filesystem_groups: Ruleset = []
-
-factory_settings["filesystem_default_levels"] = _FILESYSTEM_DEFAULT_LEVELS
-
-# Users might have set filesystem_default_levels to old format like (80, 90)
-
-# needed by df, df_netapp and vms_df and maybe others in future:
-# compute warning and critical levels. Takes into account the size of
-# the filesystem and the magic number. Since the size is only known at
-# check time this function's result cannot be precompiled.
-
-
-def _get_update_from_user_config_default_levels(
-    user_default_levels,
-    convert_legacy_levels,
-):
-    # convert default levels to dictionary. This is in order support
-    # old style levels like (80, 90)
-    if isinstance(user_default_levels, dict):
-        fs_default_levels = user_default_levels.copy()
-        fs_levels = fs_default_levels.get("levels")
-        if fs_levels:
-            fs_default_levels["levels"] = convert_legacy_levels(fs_levels)
-        return fs_default_levels
-
-    return {
-        "levels": convert_legacy_levels(user_default_levels[:2]),
-        "magic": user_default_levels[2] if len(user_default_levels) >= 3 else None,
-    }
-
-
-def _get_update_from_params(params):
-    if isinstance(params, dict):
-        # If params is a dictionary, make that override the default values
-        return params
-
-    # simple format - explicitely override levels and magic
-    update_params = {"levels": (float(params[0]), float(params[1]))}
-    if len(params) >= 3:
-        update_params["magic"] = params[2]
-    return update_params
-
-
-def get_filesystem_levels(mountpoint, size_gb, params):
-    """Just a wrapper for the migrated version"""
-    def convert_legacy_levels(value):
-        if isinstance(params, tuple) or not params.get("flex_levels"):
-            return tuple(map(float, value))
-        return value
-
-    update_params = {
-        **_get_update_from_user_config_default_levels(
-            filesystem_default_levels,
-            convert_legacy_levels,
-        ),
-        **_get_update_from_params(params),
-    }
-
-    return _get_filesystem_levels(size_gb, update_params)
 
 
 # ==================================================================================================
@@ -105,8 +29,6 @@ def get_filesystem_levels(mountpoint, size_gb, params):
 # THE NEW CHECK API. PLEASE DO NOT MODIFY THIS FUNCTION ANYMORE. INSTEAD, MODIFY THE MIGRATED CODE
 # RESIDING IN
 # cmk/base/plugins/agent_based/utils/df.py
-# IF YOU CANNOT FIND THE MIGRATED COUNTERPART OF A FUNCTION, PLEASE TALK TO TIMI BEFORE DOING
-# ANYTHING ELSE.
 # ==================================================================================================
 def df_check_filesystem_list_coroutine(
     item,
@@ -116,11 +38,14 @@ def df_check_filesystem_list_coroutine(
     this_time=None,
 ):
     """Wrapper for `df_check_filesystem_single` supporting groups"""
+
     def group_sum(metric_name, info, mountpoints_group):
         """Calculate sum of named values for matching mount points"""
-        return sum(block_info[metric_name]  #
-                   for (mp, block_info) in info.items()  #
-                   if mp in mountpoints_group)
+        return sum(
+            block_info[metric_name]  #
+            for (mp, block_info) in info.items()  #
+            if mp in mountpoints_group
+        )
 
     # Translate lists of tuples into convienient dicts
     blocks_info = {
@@ -128,13 +53,15 @@ def df_check_filesystem_list_coroutine(
             "size_mb": size_mb,
             "avail_mb": avail_mb,
             "reserved_mb": reserved_mb,
-        } for (mountp, size_mb, avail_mb, reserved_mb) in (fslist_blocks or [])
+        }
+        for (mountp, size_mb, avail_mb, reserved_mb) in (fslist_blocks or [])
     }
     inodes_info = {
         mountp: {
             "inodes_total": inodes_total,
             "inodes_avail": inodes_avail,
-        } for (mountp, inodes_total, inodes_avail) in (fslist_inodes or [])
+        }
+        for (mountp, inodes_total, inodes_avail) in (fslist_inodes or [])
     }
 
     if "patterns" not in params:
@@ -186,10 +113,8 @@ def df_check_filesystem_list_coroutine(
 # THE NEW CHECK API. PLEASE DO NOT MODIFY THIS FUNCTION ANYMORE. INSTEAD, MODIFY THE MIGRATED CODE
 # RESIDING IN
 # cmk/base/plugins/agent_based/utils/df.py
-# IF YOU CANNOT FIND THE MIGRATED COUNTERPART OF A FUNCTION, PLEASE TALK TO TIMI BEFORE DOING
-# ANYTHING ELSE.
 # ==================================================================================================
-def df_check_filesystem_single_coroutine(
+def df_check_filesystem_single_coroutine(  # pylint: disable=too-many-branches
     mountpoint,
     size_mb,
     avail_mb,
@@ -200,16 +125,20 @@ def df_check_filesystem_single_coroutine(
     this_time=None,
 ):
     if size_mb == 0:
-        yield 1, "Size of filesystem is 0 MB", []
+        yield 1, "Size of filesystem is 0 B", []
         return
 
     # params might still be a tuple
     show_levels, subtract_reserved, show_reserved = (
-        (params.get("show_levels", False),
-         params.get("subtract_reserved", False) and reserved_mb > 0,
-         params.get("show_reserved") and reserved_mb > 0)
+        (
+            params.get("show_levels", "onproblem"),
+            params.get("subtract_reserved", False) and reserved_mb > 0,
+            params.get("show_reserved") and reserved_mb > 0,
+        )
         # params might still be a tuple
-        if isinstance(params, dict) else (False, False, False))
+        if isinstance(params, dict)
+        else (False, False, False)
+    )
 
     used_mb = size_mb - avail_mb
     used_max = size_mb
@@ -217,57 +146,50 @@ def df_check_filesystem_single_coroutine(
         used_mb -= reserved_mb
         used_max -= reserved_mb
 
-    # Get warning and critical levels already with 'magic factor' applied
-    levels = get_filesystem_levels(mountpoint, size_mb / 1024., params)
-    warn_mb, crit_mb = levels["levels_mb"]
+    state = State.OK
+    infotext = []
+    perfdata: list[tuple[str, float, float | None, float | None, float | None, float | None]] = []
+    for result in check_filesystem_levels(
+        size_mb, used_max, avail_mb, used_mb, params, show_levels
+    ):
+        if isinstance(result, Result):
+            state = State.worst(state, result.state)
+            infotext.append(result.summary)
+        elif isinstance(result, Metric):
+            name = result.name
+            value = result.value
+            if hasattr(result, "levels"):
+                perflevels = result.levels
+            else:
+                perflevels = None, None
+            if hasattr(result, "boundaries"):
+                perfboundaries = result.boundaries
+            else:
+                perfboundaries = None, None
+            perfdata.append((name, value, *perflevels, *perfboundaries))
 
-    used_hr = get_bytes_human_readable(used_mb * 1024**2)
-    used_max_hr = get_bytes_human_readable(used_max * 1024**2)
-    used_perc_hr = get_percent_human_readable(100.0 * used_mb / used_max)
-
-    # If both numbers end with the same unit, then drop the first one
-    if used_hr[-2:] == used_max_hr[-2:]:
-        used_hr = used_hr[:-3]
-
-    infotext = ["%s used (%s of %s)" % (used_perc_hr, used_hr, used_max_hr)]
-
-    if warn_mb < 0.0:
-        # Negative levels, so user configured thresholds based on space left. Calculate the
-        # upper thresholds based on the size of the filesystem
-        crit_mb = used_max + crit_mb
-        warn_mb = used_max + warn_mb
-
-    status = 2 if used_mb >= crit_mb else 1 if used_mb >= warn_mb else 0
-
-    perfdata = [("fs_used", used_mb, warn_mb, crit_mb, 0, size_mb), ('fs_size', size_mb),
-                ("fs_used_percent", 100.0 * used_mb / size_mb)]
-
-    if (show_levels == "always" or  #
-        (show_levels == "onproblem" and status > 0) or  #
-        (show_levels == "onmagic" and (status > 0 or levels.get("magic", 1.0) != 1.0))):
-        infotext.append(levels["levels_text"])
+    perfdata.append(("fs_size", size_mb, None, None, 0, None))
 
     if show_reserved:
-        reserved_perc_hr = get_percent_human_readable(100.0 * reserved_mb / size_mb)
+        reserved_perc_hr = render.percent(100.0 * reserved_mb / size_mb)
         reserved_hr = get_bytes_human_readable(reserved_mb * 1024**2)
-        infotext.append("additionally reserved for root: %s" % reserved_hr  #
-                        if subtract_reserved else  #
-                        "therein reserved for root: %s (%s)" % (reserved_perc_hr, reserved_hr))
-
-    if subtract_reserved:
-        perfdata.append(("fs_free", avail_mb, None, None, 0, size_mb))
+        infotext.append(
+            "additionally reserved for root: %s" % reserved_hr  #
+            if subtract_reserved
+            else f"therein reserved for root: {reserved_perc_hr} ({reserved_hr})"  #
+        )
 
     if subtract_reserved or show_reserved:
-        perfdata.append(("reserved", reserved_mb))
+        perfdata.append(("reserved", reserved_mb, None, None, None, None))
 
-    yield status, ", ".join(infotext).replace("), (", ", "), perfdata
+    yield int(state), ", ".join(infotext), perfdata
 
-    if levels.get("trend_range"):
+    if params.get("trend_range"):
         trend_state, trend_text, trend_perf = size_trend(
-            'df',
+            "df",
             mountpoint,
             "disk",
-            levels,
+            params,
             used_mb,
             size_mb,
             this_time,
@@ -277,10 +199,10 @@ def df_check_filesystem_single_coroutine(
         if trend_state or trend_text or trend_perf:
             yield trend_state, trend_text.strip(" ,"), trend_perf or []
 
-    if not inodes_total or not inodes_avail:
+    if not inodes_total or inodes_avail is None:
         return
 
-    metric, result = _check_inodes(levels, inodes_total, inodes_avail)
+    metric, result = check_inodes(params, inodes_total, inodes_avail)
     assert isinstance(metric, Metric)
     assert isinstance(result, Result)
     yield int(result.state), result.summary, [
@@ -290,6 +212,7 @@ def df_check_filesystem_single_coroutine(
 
 def _aggregate(generator):
     """Deprecated: used only to mimic old non-coroutine functions - don't use"""
+
     def wrapped(*args, **kwargs):
         try:
             state, text, perfdata = tuple(zip(*generator(*args, **kwargs)))

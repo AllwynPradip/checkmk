@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 from abc import abstractmethod
-from typing import Dict, Iterator, Mapping, TypeVar, Type
+from collections.abc import Iterator, Mapping
+from typing import TypeVar
 
-_VT = TypeVar('_VT')
+_VT = TypeVar("_VT")
 
 # TODO: Refactor all plugins to one way of telling the registry it's name.
 #       for example let all use a static/class method .name().
@@ -21,7 +21,7 @@ class Registry(Mapping[str, _VT]):
     To create a registry inherit from ``Registry[A]`` where ``A`` is the class
     of the objects that are stored in the registry. Although it is not
     recommended classes can be stored inside registries as well. To create a
-    class registry you have to derive from ``Registry[Type[A]]``.
+    class registry you have to derive from ``Registry[type[A]]``.
 
     Objects can be added or removed with the register and unregister methods.
 
@@ -31,7 +31,7 @@ class Registry(Mapping[str, _VT]):
 
         >>> from cmk.utils.plugin_registry import Registry
         >>> class A:
-        ...     def __init__(self, name: str):
+        ...     def __init__(self, name: str) -> None:
         ...         self.name = name
         >>> class MyRegistry(Registry[A]):
         ...     def plugin_name(self, instance: A) -> str:
@@ -42,9 +42,10 @@ class Registry(Mapping[str, _VT]):
         >>> assert my_registry['my_a'] == my_a
 
     """
+
     def __init__(self) -> None:
         super().__init__()
-        self._entries: Dict[str, _VT] = {}
+        self._entries: dict[str, _VT] = {}
 
     @abstractmethod
     def plugin_name(self, instance: _VT) -> str:
@@ -57,11 +58,6 @@ class Registry(Mapping[str, _VT]):
         self.registration_hook(instance)
         self._entries[self.plugin_name(instance)] = instance
         return instance
-
-    def register_instance(self, cls: Type[_VT]) -> Type[_VT]:
-        """Decorate a class to create an instance of the class and register it to the object registry"""
-        self.register(cls())
-        return cls
 
     def unregister(self, name: str) -> None:
         del self._entries[name]

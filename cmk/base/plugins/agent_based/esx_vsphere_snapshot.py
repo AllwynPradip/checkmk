@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import datetime
 import json
+from collections.abc import Mapping, Sequence
+from typing import Any, NamedTuple
 
-from typing import Any, Mapping, NamedTuple, Sequence
 from .agent_based_api.v1 import check_levels, register, render, Result, Service, State
 from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult, StringTable
 from .utils import esx_vsphere
@@ -17,6 +17,7 @@ class Snapshot(NamedTuple):
     time: int
     state: str
     name: str
+    vm: str
 
 
 Section = Sequence[Snapshot]
@@ -24,10 +25,10 @@ Section = Sequence[Snapshot]
 
 def parse_esx_vsphere_snapshots(string_table: StringTable) -> Section:
     """
-        >>> parse_esx_vsphere_snapshots([
-        ...     ['{"time": 0, "state": "poweredOn", "name": "foo"}'],
-        ... ])
-        [Snapshot(time=0, state='poweredOn', name='foo')]
+    >>> parse_esx_vsphere_snapshots([
+    ...     ['{"time": 0, "state": "poweredOn", "name": "foo", "vm": "bar"}'],
+    ... ])
+    [Snapshot(time=0, state='poweredOn', name='foo', vm='bar')]
     """
     return [Snapshot(**json.loads(line[0])) for line in string_table]
 
@@ -42,17 +43,20 @@ def discover_snapshots_summary(section: Section) -> DiscoveryResult:
     yield Service()
 
 
+def _get_snapshot_name(snapshot: Snapshot) -> str:
+    return f"{snapshot.vm}/{snapshot.name}" if snapshot.vm else snapshot.name
+
+
 def check_snapshots_summary(params: Mapping[str, Any], section: Section) -> CheckResult:
     snapshots = section  # just to be clear
 
     # use UTC-timestamp - don't use time.time() here since it's local
-    now = int(datetime.datetime.utcnow().timestamp())
+    now = int(datetime.datetime.now(tz=datetime.UTC).timestamp())
 
     if any(s for s in snapshots if s.time > now):
         yield Result(
             state=State.WARN,
-            summary=
-            "Snapshot with a creation time in future found. Please check your network time synchronisation."
+            summary="Snapshot with a creation time in future found. Please check your network time synchronisation.",
         )
         return
 
@@ -61,15 +65,20 @@ def check_snapshots_summary(params: Mapping[str, Any], section: Section) -> Chec
     if not section:
         return
 
-    powered_on = (s.name for s in snapshots if s.state == "poweredOn")
-    yield Result(state=State.OK, summary="Powered on: %s" % (', '.join(powered_on) or "None"))
+    powered_on = [_get_snapshot_name(s) for s in snapshots if s.state == "poweredOn"]
+    yield Result(
+        state=State.OK, summary=f'Powered on: {", ".join(powered_on) if powered_on else "None"}'
+    )
 
     latest_snapshot = max(snapshots, key=lambda s: s.time)
     latest_timestamp = render.datetime(latest_snapshot.time)
     oldest_snapshot = min(snapshots, key=lambda s: s.time)
     oldest_timestamp = render.datetime(oldest_snapshot.time)
 
-    yield Result(state=State.OK, summary=f"Latest: {latest_snapshot.name} {latest_timestamp}")
+    yield Result(
+        state=State.OK,
+        summary=f"Latest: {_get_snapshot_name(latest_snapshot)} {latest_timestamp}",
+    )
 
     yield from check_levels(
         now - latest_snapshot.time,
@@ -83,7 +92,10 @@ def check_snapshots_summary(params: Mapping[str, Any], section: Section) -> Chec
 
     # Display oldest snapshot only, if it is not identical with the latest snapshot
     if oldest_snapshot != latest_snapshot:
-        yield Result(state=State.OK, summary=f"Oldest: {oldest_snapshot.name} {oldest_timestamp}")
+        yield Result(
+            state=State.OK,
+            summary=f"Oldest: {_get_snapshot_name(oldest_snapshot)} {oldest_timestamp}",
+        )
     # check oldest age unconditionally
     yield from check_levels(
         now - oldest_snapshot.time,
@@ -112,10 +124,21 @@ def discover_snapshots(section: esx_vsphere.SectionVM) -> DiscoveryResult:
 
 
 def check_snapshots(params: Mapping[str, Any], section: esx_vsphere.SectionVM) -> CheckResult:
-    raw_snapshots = " ".join(section.get("snapshot.rootSnapshotList", [])).split("|")
+    raw_snapshots = " ".join(section.snapshots if section else []).split("|")
     iter_snapshots_tuple = (x.split(" ", 3) for x in raw_snapshots if x)
+
     yield from check_snapshots_summary(
-        params, [Snapshot(int(x[1]), x[2], x[3]) for x in iter_snapshots_tuple])
+        params,
+        [
+            Snapshot(
+                time=int(x[1]),
+                state=x[2],
+                name=x[3],
+                vm=section.name if (section and section.name) else "",
+            )
+            for x in iter_snapshots_tuple
+        ],
+    )
 
 
 register.check_plugin(

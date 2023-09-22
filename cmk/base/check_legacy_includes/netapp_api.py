@@ -1,13 +1,27 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# type: ignore[list-item,import,assignment,misc,operator]  # TODO: see which are needed in this file
-from cmk.base.check_api import host_name
-from cmk.base.check_api import host_extra_conf_merged
 from cmk.base.plugins.agent_based.utils import netapp_api
+
+
+def get_and_try_cast_to_int(key: str, container: dict, default_value: int | None = None) -> int:
+    try:
+        to_be_casted = (
+            container.get(key, default_value) if default_value is not None else container[key]
+        )
+        return int(to_be_casted)
+    except ValueError as e:
+        # Some NetApp firmware versions return corrupt data.
+        # Known reported tickets (among others):
+        # SUP-9508, SUP-5407, SUP-6805
+        raise RuntimeError(
+            "Unable to cast the data to integer. "
+            "The reason therfore may be an issue in the used NetApp Firmware. "
+            "Consider upgrading and/or getting in touch with NetApp."
+            "Received data was: %s" % to_be_casted
+        ) from e
 
 
 # Transforms all lines into a dictionary.
@@ -24,12 +38,6 @@ def netapp_api_parse_lines(info, custom_keys=None, as_dict_list=False, item_func
         custom_keys=custom_keys,
         item_func=item_func,
     )
-
-
-def discover_single_items(discovery_rules):
-    config = host_extra_conf_merged(host_name(), discovery_rules)
-    mode = config.get("mode", "single")
-    return mode == "single"
 
 
 def maybefloat(num):

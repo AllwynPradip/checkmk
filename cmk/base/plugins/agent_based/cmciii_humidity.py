@@ -1,28 +1,29 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2021 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2021 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 from .agent_based_api.v1 import register, Result, State, type_defs
 from .utils.cmciii import (
     CheckParams,
-    DiscoveryParams,
     discover_cmciii_sensors,
-    get_sensor,
     discovery_default_parameters,
+    DiscoveryParams,
+    get_sensor,
     Section,
 )
 from .utils.humidity import check_humidity
 
 
-def discover_cmciii_humidity(params: DiscoveryParams,
-                             section: Section) -> type_defs.DiscoveryResult:
+def discover_cmciii_humidity(
+    params: DiscoveryParams, section: Section
+) -> type_defs.DiscoveryResult:
     yield from discover_cmciii_sensors("humidity", params, section)
 
 
-def check_cmciii_humidity(item: str, params: CheckParams,
-                          section: Section) -> type_defs.CheckResult:
+def check_cmciii_humidity(
+    item: str, params: CheckParams, section: Section
+) -> type_defs.CheckResult:
     entry = get_sensor(item, params, section["humidity"])
     if not entry:
         return
@@ -35,7 +36,7 @@ def check_cmciii_humidity(item: str, params: CheckParams,
 
 register.check_plugin(
     name="cmciii_humidity",
-    sections=['cmciii'],
+    sections=["cmciii"],
     service_name="%s",
     discovery_function=discover_cmciii_humidity,
     check_function=check_cmciii_humidity,

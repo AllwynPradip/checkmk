@@ -1,189 +1,178 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
+from __future__ import annotations
+
 import functools
 import http.client
 import json
 import logging
 import mimetypes
-import os
-import re
+import traceback
 import urllib.parse
-from base64 import b64decode
-from typing import Any, Callable, Dict, Optional, Tuple, Type, List, Literal
+from collections.abc import Callable, Mapping, Sequence
+from datetime import datetime
+from pathlib import Path
+from typing import Any, TYPE_CHECKING
 
-from apispec.yaml_utils import dict_to_yaml  # type: ignore[import]
-from swagger_ui_bundle import swagger_ui_3_path  # type: ignore[import]
-from werkzeug import Request, Response
-from werkzeug.exceptions import HTTPException, NotFound
+from apispec.yaml_utils import dict_to_yaml
+from flask import g, send_from_directory
+from marshmallow import fields as ma_fields
+from werkzeug.exceptions import HTTPException
 from werkzeug.routing import Map, Rule, Submount
 
-from cmk.utils import crash_reporting
+import cmk.utils.version as cmk_version
+from cmk.utils import crash_reporting, paths
 from cmk.utils.exceptions import MKException
-from cmk.utils.type_defs import UserId
+from cmk.utils.site import omd_site
 
-from cmk.gui import config, userdb
-from cmk.gui.config import omd_site
-from cmk.gui.exceptions import MKUserError, MKAuthException
-from cmk.gui.login import check_parsed_auth_cookie, user_from_cookie
-from cmk.gui.openapi import ENDPOINT_REGISTRY, generate_data, add_once
-from cmk.gui.plugins.openapi.restful_objects.type_defs import EndpointTarget
-from cmk.gui.plugins.openapi.utils import problem
-from cmk.gui.wsgi.auth import automation_auth, gui_user_auth, rfc7662_subject, set_user_context
-from cmk.gui.wsgi.middleware import with_context_middleware, OverrideRequestMethod
-from cmk.gui.wsgi.type_defs import RFC7662
+from cmk.gui import session
+from cmk.gui.exceptions import MKAuthException, MKHTTPException, MKUserError
+from cmk.gui.http import request, Response
+from cmk.gui.logged_in import LoggedInNobody, user
+from cmk.gui.openapi import add_once, ENDPOINT_REGISTRY, generate_data
+from cmk.gui.plugins.openapi.restful_objects import Endpoint
+from cmk.gui.plugins.openapi.restful_objects.parameters import (
+    HEADER_CHECKMK_EDITION,
+    HEADER_CHECKMK_VERSION,
+)
+from cmk.gui.plugins.openapi.utils import (
+    EXT,
+    GeneralRestAPIException,
+    problem,
+    ProblemException,
+    RestAPIPermissionException,
+    RestAPIRequestGeneralException,
+    RestAPIResponseGeneralException,
+)
+from cmk.gui.wsgi.applications.utils import AbstractWSGIApp
 from cmk.gui.wsgi.wrappers import ParameterDict
 
-ARGS_KEY = 'CHECK_MK_REST_API_ARGS'
+if TYPE_CHECKING:
+    # TODO: Directly import from wsgiref.types in Python 3.11, without any import guard
+    from _typeshed.wsgi import StartResponse, WSGIApplication, WSGIEnvironment
 
-logger = logging.getLogger('cmk.gui.wsgi.rest_api')
+    from cmk.gui.http import HTTPMethod
+    from cmk.gui.plugins.openapi.restful_objects.type_defs import EndpointTarget
+    from cmk.gui.wsgi.type_defs import WSGIResponse
 
-EXCEPTION_STATUS: Dict[Type[Exception], int] = {
+ARGS_KEY = "CHECK_MK_REST_API_ARGS"
+
+logger = logging.getLogger("cmk.gui.wsgi.rest_api")
+
+EXCEPTION_STATUS: dict[type[Exception], int] = {
     MKUserError: 400,
-    MKAuthException: 401,
 }
 
-SpecExtension = Literal['json', 'yaml']
-WSGIEnvironment = Dict[str, Any]
+PathArgs = Mapping[str, Any]
 
 
-def _verify_user(environ) -> RFC7662:
-    verified: List[RFC7662] = []
-
-    auth_header = environ.get('HTTP_AUTHORIZATION', '')
-    basic_user = None
-    if auth_header:
-        auth_type, _ = auth_header.split(None, 1)
-        if auth_type == 'Bearer':
-            user_id, secret = user_from_bearer_header(auth_header)
-            automation_user = automation_auth(user_id, secret)
-            if automation_user:
-                verified.append(automation_user)
-
-            gui_user = gui_user_auth(user_id, secret)
-            if gui_user:
-                verified.append(gui_user)
-        elif auth_type == 'Basic':
-            # We store this for sanity checking below, once we get a REMOTE_USER key.
-            # If we don't get a REMOTE_USER key, this value will be ignored.
-            basic_user = user_from_basic_header(auth_header)
-        else:
-            raise MKAuthException(f"Unsupported Auth Type: {auth_type}")
-
-    remote_user = environ.get('REMOTE_USER', '')
-    if remote_user and userdb.user_exists(UserId(remote_user)):
-        if basic_user and basic_user[0] != remote_user:
-            raise MKAuthException("Mismatch in authentication headers.")
-        verified.append(rfc7662_subject(UserId(remote_user), 'webserver'))
-
-    cookie = Request(environ).cookies.get(f"auth_{omd_site()}")
-    if cookie:
-        user_id, session_id, cookie_hash = user_from_cookie(cookie)
-        check_parsed_auth_cookie(user_id, session_id, cookie_hash)
-        verified.append(rfc7662_subject(user_id, 'cookie'))
-
-    if not verified:
-        raise MKAuthException("You need to be authenticated to use the REST API.")
-
-    # We pick the first successful authentication method, which means the precedence is the same
-    # as the oder in the code.
-    final_candidate = verified[0]
-    if not userdb.is_customer_user_allowed_to_login(final_candidate['sub']):
-        raise MKAuthException(f"{final_candidate['sub']} may not log in here.")
-
-    if userdb.user_locked(final_candidate['sub']):
-        raise MKAuthException(f"{final_candidate['sub']} not authorized.")
-
-    return final_candidate
+def _get_header_name(header: Mapping[str, ma_fields.String]) -> str:
+    assert len(header) == 1
+    return next(iter(header))
 
 
-def user_from_basic_header(auth_header: str) -> Tuple[UserId, str]:
-    """Decode a Basic Authorization header
+def crash_report_response(exc: Exception) -> WSGIApplication:
+    site = omd_site()
+    details: dict[str, Any] = {}
 
-    Examples:
+    if isinstance(exc, GeneralRestAPIException):
+        details["rest_api_exception"] = {
+            "description": exc.description,
+            "detail": exc.detail,
+            "ext": exc.ext,
+            "fields": exc.fields,
+        }
 
-        >>> user_from_basic_header("Basic Zm9vYmF6YmFyOmZvb2JhemJhcg==")
-        ('foobazbar', 'foobazbar')
+    details["request_info"] = {
+        "method": request.environ["REQUEST_METHOD"],
+        "data_received": request.json if request.data else "",
+        "endpoint_url": request.path,
+        "headers": {
+            "accept": request.environ.get("HTTP_ACCEPT", "missing"),
+            "content_type": request.environ.get("CONTENT_TYPE", "missing"),
+        },
+    }
 
-    Args:
-        auth_header:
+    details["check_mk_info"] = {
+        "site": site,
+        "check_mk_user": {
+            "user_id": user.id,
+            "user_roles": user.role_ids,
+            "authorized_sites": list(user.authorized_sites()),
+        },
+    }
 
-    Returns:
+    crash = APICrashReport.from_exception(details=details)
+    crash_reporting.CrashReportStore().save(crash)
+    logger.exception("Unhandled exception (Crash-ID: %s)", crash.ident_to_text())
 
+    query_string = urllib.parse.urlencode(
+        [
+            ("crash_id", (crash.ident_to_text())),
+            ("site", site),
+        ]
+    )
+    crash.crash_info["details"]["crash_report_url"] = {
+        "href": f"{request.host_url}{site}/check_mk/crash.py?{query_string}",
+        "method": "get",
+        "rel": "cmk/crash-report",
+        "type": "text/html",
+    }
+
+    del crash.crash_info["exc_traceback"]
+    if user.may("general.see_crash_reports"):
+        crash.crash_info["exc_traceback"] = traceback.format_exc().split("\n")
+
+    crash.crash_info["time"] = datetime.fromtimestamp(crash.crash_info["time"]).isoformat()
+    crash_msg = (
+        exc.description
+        if isinstance(exc, GeneralRestAPIException)
+        else crash.crash_info["exc_value"]
+    )
+
+    return problem(
+        status=500,
+        title="Internal Server Error",
+        detail=f"{crash.crash_info['exc_type']}: {crash_msg}. Crash report generated. Please submit.",
+        ext=EXT(crash.crash_info),
+    )
+
+
+class EndpointAdapter(AbstractWSGIApp):
+    """Wrap an Endpoint
+
+    Makes a "real" WSGI application out of an endpoint. Should be refactored away.
     """
-    try:
-        _, token = auth_header.split("Basic ", 1)
-    except ValueError:
-        raise MKAuthException(f"Not a valid Basic token: {auth_header}")
 
-    user_entry = b64decode(token.strip()).decode('latin1')
-    user_id, secret = user_entry.split(":")
-    return UserId(user_id), secret
+    def __init__(self, endpoint: Endpoint, debug: bool = False) -> None:
+        super().__init__(debug)
+        self.endpoint = endpoint
 
+    def __repr__(self) -> str:
+        return f"<EndpointAdapter {self.endpoint!r}>"
 
-def user_from_bearer_header(auth_header: str) -> Tuple[UserId, str]:
-    """
-
-    Examples:
-
-        >>> user_from_bearer_header("Bearer username password")
-        ('username', 'password')
-
-    Args:
-        auth_header:
-
-    Returns:
-
-    """
-    try:
-        _, token = auth_header.split("Bearer ", 1)
-    except ValueError:
-        raise MKAuthException(f"Not a valid Bearer token: {auth_header}")
-    try:
-        user_id, secret = token.strip().split(' ', 1)
-    except ValueError:
-        raise MKAuthException("No user/password combination in Bearer token.")
-    if not secret:
-        raise MKAuthException("Empty password not allowed.")
-    if not user_id:
-        raise MKAuthException("Empty user not allowed.")
-    if "/" in user_id:
-        raise MKAuthException("No slashes / allowed in username.")
-
-    return UserId(user_id), secret
-
-
-class Authenticate:
-    """Wrap an Endpoint so it will be authenticated
-
-    This is not very memory efficient as it wraps every individual endpoint in its own
-    authenticator, even though this does not need to be. This has to be done this way right now,
-    because we have multiple endpoints without authentication in this app. A refactoring to lower
-    the memory foot-print of this is feasible and should be done if a good way has been found.
-    """
-    def __init__(self, func):
-        self.func = func
-
-    def __call__(self, environ, start_response):
+    def wsgi_app(self, environ: WSGIEnvironment, start_response: StartResponse) -> WSGIResponse:
         path_args = environ[ARGS_KEY]
 
-        try:
-            rfc7662 = _verify_user(environ)
-        except MKException as exc:
-            return problem(
-                status=401,
-                title=str(exc),
-            )(environ, start_response)
+        # Create the response
+        with self.endpoint.register_permission_tracking():
+            wsgi_app = self.endpoint.wrapped(ParameterDict(path_args))
 
-        with set_user_context(rfc7662['sub'], rfc7662):
-            wsgi_app = self.func(ParameterDict(path_args))
-            return wsgi_app(environ, start_response)
+        wsgi_app.headers[_get_header_name(HEADER_CHECKMK_VERSION)] = cmk_version.__version__
+        wsgi_app.headers[_get_header_name(HEADER_CHECKMK_EDITION)] = cmk_version.edition().short
+
+        # Serve the response
+        return wsgi_app(environ, start_response)
 
 
 @functools.lru_cache
-def serve_file(file_name: str, content: str) -> Response:
+def serve_file(  # type: ignore[no-untyped-def]
+    file_name: str,
+    content: bytes,
+    default_content_type="text/plain; charset=utf-8",
+) -> Response:
     """Construct and cache a Response from a static file."""
     content_type, _ = mimetypes.guess_type(file_name)
 
@@ -191,13 +180,15 @@ def serve_file(file_name: str, content: str) -> Response:
     resp.direct_passthrough = True
     resp.data = content
     if content_type is not None:
-        resp.headers['Content-Type'] = content_type
+        resp.headers["Content-Type"] = content_type
+    else:
+        resp.headers["Content-Type"] = default_content_type
     resp.freeze()
     return resp
 
 
 def get_url(environ: WSGIEnvironment) -> str:
-    """Reconstruct an URL from a WSGI environment
+    """Reconstruct a URL from a WSGI environment
 
     >>> get_url({
     ...     'HTTP_HOST': 'localhorst',
@@ -205,7 +196,7 @@ def get_url(environ: WSGIEnvironment) -> str:
     ...     'SERVER_NAME': 'localhost',
     ...     'wsgi.url_scheme': 'http',
     ... })
-    'http://localhorst'
+    '//localhorst'
 
     >>> get_url({
     ...     'SERVER_PORT': '443',
@@ -213,7 +204,7 @@ def get_url(environ: WSGIEnvironment) -> str:
     ...     'wsgi.url_scheme': 'https',
     ...     'PATH_INFO': '/NO_SITE/check_mk/view.py'
     ... })
-    'https://localhost/NO_SITE/check_mk/view.py'
+    '//localhost/NO_SITE/check_mk/view.py'
 
     Args:
         environ:
@@ -223,23 +214,32 @@ def get_url(environ: WSGIEnvironment) -> str:
         A HTTP URL.
 
     """
-    url = environ['wsgi.url_scheme'] + '://'
-
-    if environ.get('HTTP_HOST'):
-        url += environ['HTTP_HOST']
+    # We construct a protocol relative URL so we don't need to know if we are on HTTP or HTTPs.
+    # This is important if we are behind a SSL terminating HTTP application proxy, which doesn't
+    # forward the protocol used. This solution is more robust in those circumstances.
+    if environ.get("HTTP_HOST"):
+        host_name = environ["HTTP_HOST"]
     else:
-        url += environ['SERVER_NAME']
+        host_name = environ["SERVER_NAME"]
 
-        if environ['wsgi.url_scheme'] == 'https':
-            if environ['SERVER_PORT'] != '443':
-                url += ':' + environ['SERVER_PORT']
-        else:
-            if environ['SERVER_PORT'] != '80':
-                url += ':' + environ['SERVER_PORT']
+    return f"//{host_name}{urllib.parse.quote(environ.get('PATH_INFO', ''))}"
 
-    url += urllib.parse.quote(environ.get('PATH_INFO', ''))
 
-    return url
+def get_filename_from_url(url: str) -> str:
+    """return the filename of a url
+
+    >>> get_filename_from_url("//foo/")
+    ''
+    >>> get_filename_from_url("//foo/bar/")
+    ''
+    >>> get_filename_from_url("//foo/bar?foo=bar")
+    'bar'
+    >>> get_filename_from_url("//foo/../foo/bar?foo=bar")
+    'bar'
+    """
+    if url.endswith("/"):
+        return ""
+    return Path(urllib.parse.urlparse(url).path).name
 
 
 @functools.lru_cache(maxsize=512)
@@ -248,11 +248,17 @@ def serve_spec(
     target: EndpointTarget,
     url: str,
     content_type: str,
-    serializer: Callable[[Dict[str, Any]], str],
+    serializer: Callable[[dict[str, Any]], str],
 ) -> Response:
     data = generate_data(target=target)
-    data.setdefault('servers', [])
-    add_once(data['servers'], {'url': url, 'description': f"Site: {site}"})
+    data.setdefault("servers", [])
+    add_once(
+        data["servers"],
+        {
+            "url": url,
+            "description": f"Site: {site}",
+        },
+    )
     response = Response(status=200)
     response.data = serializer(data)
     response.content_type = content_type
@@ -260,177 +266,219 @@ def serve_spec(
     return response
 
 
-class ServeSwaggerUI:
-    def __init__(self, prefix=''):
+class ServeSpec(AbstractWSGIApp):
+    def __init__(self, target: EndpointTarget, extension: str, debug: bool = False) -> None:
+        super().__init__(debug)
+        self.target = target
+        self.extension = extension
+
+    def wsgi_app(self, environ: WSGIEnvironment, start_response: StartResponse) -> WSGIResponse:
+        serializers = {"yaml": dict_to_yaml, "json": json.dumps}
+        content_types = {
+            "json": "application/json",
+            "yaml": "application/x-yaml; charset=utf-8",
+        }
+
+        def _site(_environ: WSGIEnvironment) -> str:
+            path_info = _environ["PATH_INFO"].split("/")
+            return path_info[1]
+
+        def _url(_environ: WSGIEnvironment) -> str:
+            return "/".join(get_url(_environ).split("/")[:-1])
+
+        return serve_spec(
+            site=_site(environ),
+            target=self.target,
+            url=_url(environ),
+            content_type=content_types[self.extension],
+            serializer=serializers[self.extension],
+        )(environ, start_response)
+
+
+class ServeSwaggerUI(AbstractWSGIApp):
+    def __init__(self, prefix: str = "", debug: bool = False) -> None:
+        super().__init__(debug)
         self.prefix = prefix
-        self.data: Optional[Dict[str, Any]] = None
+        self.data: dict[str, Any] | None = None
 
-    def _site(self, environ: WSGIEnvironment):
-        path_info = environ['PATH_INFO'].split("/")
-        return path_info[1]
+    def wsgi_app(self, environ: WSGIEnvironment, start_response: StartResponse) -> WSGIResponse:
+        filename = get_filename_from_url(get_url(environ)) or "index.html"
 
-    def _url(self, environ: WSGIEnvironment):
-        return '/'.join(get_url(environ).split("/")[:-1])
-
-    def serve_spec(self, target: EndpointTarget, extension: SpecExtension):
-        def _serve(environ: WSGIEnvironment, start_response):
-            serializers = {
-                'yaml': dict_to_yaml,
-                'json': json.dumps,
-            }
-            content_types = {
-                'json': 'application/json',
-                'yaml': 'application/x-yaml; charset=utf-8'
-            }
-            return serve_spec(
-                site=self._site(environ),
-                target=target,
-                url=self._url(environ),
-                content_type=content_types[extension],
-                serializer=serializers[extension],
-            )(environ, start_response)
-
-        return _serve
-
-    def _relative_path(self, environ: WSGIEnvironment):
-        path_info = environ['PATH_INFO']
-        relative_path = re.sub(self.prefix, '', path_info)
-        if relative_path == "/":
-            relative_path = "/index.html"
-        return relative_path
-
-    def __call__(self, environ: WSGIEnvironment, start_response):
-        return self._serve_file(environ, start_response)
-
-    def _serve_file(self, environ, start_response):
-        current_url = get_url(environ)
-        yaml_filename = "openapi-swagger-ui.yaml"
-        if current_url.endswith("/ui/"):
-            current_url = current_url[:-4]
-
-        yaml_file = f"{current_url}/{yaml_filename}"
-        file_path = swagger_ui_3_path + self._relative_path(environ)
-
-        if not os.path.exists(file_path):
-            return NotFound()(environ, start_response)
-
-        with open(file_path, 'r') as fh:
-            content = fh.read()
-
-        if file_path.endswith("/index.html"):
-            page = []
-            for line in content.splitlines():
-                if "<title>" in line:
-                    page.append("<title>REST-API Interactive GUI - Checkmk</title>")
-                elif "favicon" in line:
-                    continue
-                elif "petstore.swagger.io" in line:
-                    page.append(f'        url: "{yaml_file}",')
-                    page.append('        validatorUrl: null,')
-                    page.append('        displayOperationId: false,')
-                else:
-                    page.append(line)
-
-            content = '\n'.join(page)
-
-        return serve_file(file_path, content)(environ, start_response)
+        return send_from_directory(f"{paths.web_dir}/htdocs/openapi/swagger-ui-3/", filename)(
+            environ, start_response
+        )
 
 
-class CheckmkRESTAPI:
-    def __init__(self, debug: bool = False):
-        self.debug = debug
-        rules = []
+def ensure_authenticated(persist: bool = True) -> None:
+    session.session.persist_session = persist
+    if session.session.user is None or isinstance(session.session.user, LoggedInNobody):
+        # As a user we want the most specific error messages. Due to the errors being
+        # generated at the start of the request, where it isn't clear if Checkmk or RESTAPI
+        # will take the request, we need to store them and emit them to the user afterwards.
+        if session.session.exc:
+            raise session.session.exc
+        raise MKAuthException("You need to be logged in to access this resource.")
+
+
+class CheckmkRESTAPI(AbstractWSGIApp):
+    def __init__(self, debug: bool = False) -> None:
+        super().__init__(debug)
+        # This intermediate data structure is necessary because `Rule`s can't contain anything
+        # other than str anymore. Technically they could, but the typing is now fixed to str.
+        self._endpoints: dict[str, AbstractWSGIApp] = {}
+        self._url_map: Map | None = None
+        self._rules: list[Rule] = []
+
+    def _build_url_map(self) -> Map:
+        self._endpoints.clear()
+        self._rules[:] = []
+
+        self.add_rule(
+            ["/ui/", "/ui/<path:path>"],
+            ServeSwaggerUI(prefix="/[^/]+/check_mk/api/[^/]+/ui"),
+            "swagger-ui",
+        )
+        self.add_rule(
+            ["/openapi-swagger-ui.yaml"],
+            ServeSpec("swagger-ui", "yaml"),
+            "swagger-ui-yaml",
+        )
+        self.add_rule(
+            ["/openapi-swagger-ui.json"],
+            ServeSpec("swagger-ui", "json"),
+            "swagger-ui-json",
+        )
+        self.add_rule(
+            ["/openapi-doc.yaml"],
+            ServeSpec("doc", "yaml"),
+            "doc-yaml",
+        )
+        self.add_rule(
+            ["/openapi-doc.json"],
+            ServeSpec("doc", "json"),
+            "doc-json",
+        )
+
+        endpoint: Endpoint
         for endpoint in ENDPOINT_REGISTRY:
             if self.debug:
                 # This helps us to make sure we can always generate a valid OpenAPI yaml file.
                 _ = endpoint.to_operation_dict()
 
-            rules.append(
-                Rule(endpoint.default_path,
-                     methods=[endpoint.method],
-                     endpoint=Authenticate(endpoint.wrapped)))
+            self.add_rule(
+                [endpoint.default_path],
+                EndpointAdapter(endpoint),
+                endpoint.ident,
+                methods=[endpoint.method],
+            )
 
-        swagger_ui = ServeSwaggerUI(prefix="/[^/]+/check_mk/api/[^/]+/ui")
+        return Map([Submount("/<_site>/check_mk/api/<_version>/", [*self._rules])])
 
-        self.url_map = Map([
-            Submount(
-                "/<path:_path>",
-                [
-                    Rule("/ui/", endpoint=swagger_ui),
-                    Rule("/ui/<path:path>", endpoint=swagger_ui),
-                    Rule("/openapi-swagger-ui.yaml",
-                         endpoint=swagger_ui.serve_spec('swagger-ui', 'yaml')),
-                    Rule("/openapi-swagger-ui.json",
-                         endpoint=swagger_ui.serve_spec('swagger-ui', 'json')),
-                    Rule("/openapi-doc.yaml", endpoint=swagger_ui.serve_spec('doc', 'yaml')),
-                    Rule("/openapi-doc.json", endpoint=swagger_ui.serve_spec('doc', 'json')),
-                    *rules,
-                ],
-            ),
-        ])
-        self.wsgi_app = with_context_middleware(OverrideRequestMethod(self._wsgi_app))
+    def add_rule(
+        self,
+        path_entries: list[str],
+        endpoint: AbstractWSGIApp,
+        key: str,
+        methods: Sequence[HTTPMethod] | None = None,
+    ) -> None:
+        if methods is None:
+            methods = ["get"]
+        self._endpoints[key] = endpoint
+        for path in path_entries:
+            self._rules.append(Rule(path, methods=methods, endpoint=key))
 
-    def __call__(self, environ: WSGIEnvironment, start_response):
-        return self.wsgi_app(environ, start_response)
+    def _lookup_destination(self, environ: WSGIEnvironment) -> tuple[AbstractWSGIApp, PathArgs]:
+        """Match the URL which is requested with the corresponding endpoint.
 
-    def _wsgi_app(self, environ: WSGIEnvironment, start_response):
-        urls = self.url_map.bind_to_environ(environ)
+        The returning of the path variables should be considered a hack and should be removed
+        once the call graph to the Endpoint class is properly refactored.
+        """
+        if self._url_map is None:
+            # NOTE: This needs to be executed in a Request context because it depends on
+            # the configuration
+            self._url_map = self._build_url_map()
+
+        urls = self._url_map.bind_to_environ(environ)
+        result: tuple[str, PathArgs] = urls.match(return_rule=False)
+        endpoint_ident, matched_path_args = result
+
+        # Remove _site & _version (see Submount above), so the validators don't go crazy.
+        path_args = {
+            key: value
+            for key, value in matched_path_args.items()
+            if key not in ("_site", "_version")
+        }
+
+        return self._endpoints[endpoint_ident], path_args
+
+    def wsgi_app(self, environ: WSGIEnvironment, start_response: StartResponse) -> WSGIResponse:
+        response: WSGIApplication
+
         try:
-            wsgi_app, path_args = urls.match()
+            wsgi_endpoint, path_args = self._lookup_destination(environ)
 
-            # Remove this again (see Submount above), so the validators don't go crazy.
-            del path_args['_path']
+            if isinstance(wsgi_endpoint, EndpointAdapter):
+                g.endpoint = wsgi_endpoint.endpoint
 
             # This is an implicit dependency, as we only know the args at runtime, but the
             # function at setup-time.
             environ[ARGS_KEY] = path_args
-            return wsgi_app(environ, start_response)
+
+            # Only the GUI will persist sessions. You can log into the REST API using GUI
+            # credentials, but accessing the REST API will never touch the session store. We also
+            # don't want to have cookies sent to the HTTP client whenever one is logged in using
+            # the header methods.
+            ensure_authenticated(persist=False)
+            return wsgi_endpoint(environ, start_response)
+
+        except ProblemException as exc:
+            response = exc.to_problem()
+
+        except MKHTTPException as exc:
+            assert isinstance(exc.status, int)
+            response = problem(
+                status=exc.status,
+                title=http.client.responses[exc.status],
+                detail=str(exc),
+            )
+
+        except RestAPIRequestGeneralException as exc:
+            response = exc.to_problem()
+
+        except RestAPIPermissionException as exc:
+            response = crash_report_response(exc)
+
+        except RestAPIResponseGeneralException as exc:
+            response = crash_report_response(exc)
+
         except HTTPException as exc:
-            # We don't want to log explicit HTTPExceptions as these are intentional.
             assert isinstance(exc.code, int)
-            return problem(
+            response = problem(
                 status=exc.code,
                 title=http.client.responses[exc.code],
                 detail=str(exc),
-            )(environ, start_response)
+            )
+
         except MKException as exc:
             if self.debug:
                 raise
-
-            return problem(
+            response = problem(
                 status=EXCEPTION_STATUS.get(type(exc), 500),
                 title="An exception occurred.",
                 detail=str(exc),
-            )(environ, start_response)
+            )
+
         except Exception as exc:
-            crash = APICrashReport.from_exception()
-            crash_reporting.CrashReportStore().save(crash)
-            logger.exception("Unhandled exception (Crash-ID: %s)", crash.ident_to_text())
             if self.debug:
                 raise
+            response = crash_report_response(exc)
 
-            crash_url = f"/{config.omd_site()}/check_mk/crash.py?" + urllib.parse.urlencode([
-                ("crash_id", crash.ident_to_text()),
-                ("site", config.omd_site()),
-            ],)
-
-            return problem(status=500,
-                           title=str(exc),
-                           detail="An internal error occured while processing your request.",
-                           ext={
-                               'crash_report': {
-                                   'href': crash_url,
-                                   'method': 'get',
-                                   'rel': 'cmk/crash-report',
-                                   'type': 'text/html',
-                               },
-                               'crash_id': crash.ident_to_text(),
-                           })(environ, start_response)
+        return response(environ, start_response)
 
 
 class APICrashReport(crash_reporting.ABCCrashReport):
-    """API specific crash reporting class.
-    """
+    """API specific crash reporting class."""
+
     @classmethod
     def type(cls):
         return "rest_api"

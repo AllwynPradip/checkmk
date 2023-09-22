@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
-from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
+from collections.abc import Mapping, Sequence
+from typing import Any, NamedTuple
 
-from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult, StringTable
 from .agent_based_api.v1 import get_value_store, regex, register, Result, Service
-
-from .utils.df import FILESYSTEM_DEFAULT_LEVELS, df_check_filesystem_single
+from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult, StringTable
+from .utils.df import df_check_filesystem_single, FILESYSTEM_DEFAULT_PARAMS
 
 _MEGA = 1024.0**2
 
@@ -21,26 +20,26 @@ class Quota(NamedTuple):
 
 
 class Section(NamedTuple):
-    fs_sizes: Dict[str, int]
-    quotas: List[Quota]
+    fs_sizes: dict[str, int]
+    quotas: list[Quota]
 
 
 def parse_vnx_quotas(string_table: StringTable) -> Section:
     """
-        >>> from pprint import pprint as pp
-        >>> section = parse_vnx_quotas([
-        ...     ['[[[fs]]]'],
-        ...     ['fv51_01', '806636,806636,0,0,825996248'],
-        ...     ['fv51_02', '100774,100773,0,0,103193048'],
-        ...     ['[[[quotas]]]'],
-        ...     ['vdmfv51', 'fv51_01', '/hmtest', '0', '0'],
-        ...     ['vdmfv51', 'fv51_01', '/BOEINT', '0', '1048576'],
-        ... ])
-        >>> pp(section.fs_sizes)
-        {'fv51_01': 845820157952, 'fv51_02': 105669681152}
-        >>> pp(section.quotas)
-        [Quota(name='vdmfv51 /hmtest', fs='fv51_01', limit='0', used=0),
-         Quota(name='vdmfv51 /BOEINT', fs='fv51_01', limit='1048576', used=0)]
+    >>> from pprint import pprint as pp
+    >>> section = parse_vnx_quotas([
+    ...     ['[[[fs]]]'],
+    ...     ['fv51_01', '806636,806636,0,0,825996248'],
+    ...     ['fv51_02', '100774,100773,0,0,103193048'],
+    ...     ['[[[quotas]]]'],
+    ...     ['vdmfv51', 'fv51_01', '/hmtest', '0', '0'],
+    ...     ['vdmfv51', 'fv51_01', '/BOEINT', '0', '1048576'],
+    ... ])
+    >>> pp(section.fs_sizes)
+    {'fv51_01': 845820157952, 'fv51_02': 105669681152}
+    >>> pp(section.quotas)
+    [Quota(name='vdmfv51 /hmtest', fs='fv51_01', limit='0', used=0),
+     Quota(name='vdmfv51 /BOEINT', fs='fv51_01', limit='1048576', used=0)]
     """
 
     section = Section(fs_sizes={}, quotas=[])
@@ -52,7 +51,7 @@ def parse_vnx_quotas(string_table: StringTable) -> Section:
 
         if subsection == "fs":
             fs_name = line[0].strip()
-            fs_total_bytes = int(line[1].split(',')[4]) * 1024
+            fs_total_bytes = int(line[1].split(",")[4]) * 1024
             section.fs_sizes[fs_name] = fs_total_bytes
 
         elif subsection == "quotas":
@@ -60,14 +59,15 @@ def parse_vnx_quotas(string_table: StringTable) -> Section:
                 continue
 
             dms, fs, mp, used_str, limit_str = line
-            name = "%s %s" % (dms.strip(), mp.strip())
+            name = f"{dms.strip()} {mp.strip()}"
             section.quotas.append(
                 Quota(
                     name=name,
                     fs=fs.strip(),
                     limit=limit_str,
                     used=int(used_str) * 1024,
-                ))
+                )
+            )
 
     return section
 
@@ -78,7 +78,7 @@ register.agent_section(
 )
 
 
-def vnx_quotas_renaming(name: str, mappings: Sequence[Tuple[str, str]]) -> str:
+def vnx_quotas_renaming(name: str, mappings: Sequence[tuple[str, str]]) -> str:
     for match, substitution in mappings:
         if match.startswith("~"):
             num_perc_s = substitution.count("%s")
@@ -97,16 +97,16 @@ def vnx_quotas_renaming(name: str, mappings: Sequence[Tuple[str, str]]) -> str:
     return name
 
 
-def discover_vnx_quotas(params: List[Mapping[str, Any]], section: Section) -> DiscoveryResult:
+def discover_vnx_quotas(params: list[Mapping[str, Any]], section: Section) -> DiscoveryResult:
     for quota in section.quotas:
         dms, mpt = quota.name.split(" ")
         if params and params[0]:
             dms = vnx_quotas_renaming(dms, params[0]["dms_names"])
             mpt = vnx_quotas_renaming(mpt, params[0]["mp_names"])
-        yield Service(item="%s %s" % (dms, mpt), parameters={"pattern": quota.name})
+        yield Service(item=f"{dms} {mpt}", parameters={"pattern": quota.name})
 
 
-def _get_quota(item: str, params: Mapping[str, Any], section: Section) -> Optional[Quota]:
+def _get_quota(item: str, params: Mapping[str, Any], section: Section) -> Quota | None:
     for quota in section.quotas:
         if quota.name in (item, params["pattern"]):
             return quota
@@ -125,15 +125,15 @@ def check_vnx_quotas(item: str, params: Mapping[str, Any], section: Section) -> 
     available_mb = size_mb - quota.used / _MEGA
 
     for element in df_check_filesystem_single(
-            value_store=get_value_store(),
-            mountpoint=item,
-            size_mb=size_mb,
-            avail_mb=available_mb,
-            reserved_mb=0.0,
-            inodes_total=None,
-            inodes_avail=None,
-            params=params,
-            this_time=None,
+        value_store=get_value_store(),
+        mountpoint=item,
+        filesystem_size=size_mb,
+        free_space=available_mb,
+        reserved_space=0.0,
+        inodes_total=None,
+        inodes_avail=None,
+        params=params,
+        this_time=None,
     ):
         if not isinstance(element, Result):
             yield element
@@ -146,13 +146,13 @@ def check_vnx_quotas(item: str, params: Mapping[str, Any], section: Section) -> 
 
 
 register.check_plugin(
-    name='vnx_quotas',
-    service_name='VNX Quota %s',
+    name="vnx_quotas",
+    service_name="VNX Quota %s",
     discovery_function=discover_vnx_quotas,
     discovery_default_parameters={},
     discovery_ruleset_name="discovery_rules_vnx_quotas",
     discovery_ruleset_type=register.RuleSetType.ALL,
     check_function=check_vnx_quotas,
     check_ruleset_name="filesystem",
-    check_default_parameters=FILESYSTEM_DEFAULT_LEVELS,
+    check_default_parameters=FILESYSTEM_DEFAULT_PARAMS,
 )

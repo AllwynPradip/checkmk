@@ -20,8 +20,9 @@
 # URL   http, https or ftp url
 # TEXT  optional text to be searched in result page
 
-
-CURL_CODES="1      Unsupported protocol. This build of curl has no support for this protocol.
+curl_codes() {
+    cat <<HERE
+1      Unsupported protocol. This build of curl has no support for this protocol.
 2      Failed to initialize.
 3      URL malformat. The syntax was not correct.
 5      Couldn't  resolve  proxy.  The  given  proxy  host  could not be resolved.
@@ -89,43 +90,41 @@ CURL_CODES="1      Unsupported protocol. This build of curl has no support for t
 79     An unspecified error occurred during the SSH session
 80     Failed to shut down the SSL connection
 82     Could not load CRL file,  missing  or  wrong  format  (added  in 7.19.0)
-83     Issuer check failed (added in 7.19.0)"
-
-curl_error ()
-{
-   echo "$CURL_CODES" | while read code text
-   do
-      if [ "$code" = $1 ] ; then echo "$text" ; return ; fi
-   done
+83     Issuer check failed (added in 7.19.0)
+HERE
 }
 
+curl_error() {
+    curl_codes | while read -r code text; do
+        if [ "$code" = "$1" ]; then
+            echo "$text"
+            return
+        fi
+    done
+}
 
-
-if [ "$1" = -P ]
-then
-  PROXYPASS=$2
-  PROXYURL=$3
-  PROXYOPTIONS="--proxy-basic --proxy-user $PROXYPASS --proxy $PROXYURL"
-  shift
-  shift
-  shift
+if [ "$1" = -P ]; then
+    PROXYPASS=$2
+    PROXYURL=$3
+    PROXYOPTIONS="--proxy-basic --proxy-user $PROXYPASS --proxy $PROXYURL"
+    shift
+    shift
+    shift
 else
-  PROXYOPTIONS=
+    PROXYOPTIONS=
 fi
 
-if [ "$1" = -NTLM ]
-then
-  NTLM=" --ntlm --negotiate -u $2 "
-  shift
-  shift
+if [ "$1" = -NTLM ]; then
+    NTLM=" --ntlm --negotiate -u $2 "
+    shift
+    shift
 else
     NTLM=
 fi
 URL=$1
-PURL=$(echo $URL | awk -F "/" '{print $1"//"$3}')
+PURL=$(echo "$URL" | awk -F "/" '{print $1"//"$3}')
 
-if [ -z "$URL" ]
-then
+if [ -z "$URL" ]; then
     echo "Usage: [-P PROXYUSER:PROXYPASS PROXYURL] [-NTLM NTLM_USER:NTLM_PASSWORD] URL [SEARCHTEXT]"
     exit 3
 fi
@@ -135,31 +134,33 @@ CONTENT=$2
 # CURL="curl -A """Mozilla/4.0 (compatible; MSIE 6.0;)""" --silent --fail --insecure $PROXYOPTIONS $URL"
 # CURL="curl -A Mozilla/4.0 (compatible; MSIE 6.0;) --silent --fail --insecure $PROXYOPTIONS $URL"
 # CURL="curl  --silent --fail --insecure $PROXYOPTIONS $URL"
-if [ "$CONTENT" ]
-then
+if [ "$CONTENT" ]; then
     # if $CURL 2>&1 | fgrep -q "$CONTENT"
-    if curl $NTLM -A "Mozilla/4.0 (compatible; MSIE 6.0;)" --silent --fail --insecure $PROXYOPTIONS $URL 2>&1 | fgrep -q "$CONTENT"
-    then
+    # shellcheck disable=SC2086 # Yes, we want splitting for NTLM and PROXYOPTIONS.
+    if curl $NTLM -A "Mozilla/4.0 (compatible; MSIE 6.0;)" --silent --fail --insecure $PROXYOPTIONS "$URL" 2>&1 | grep -F -q "$CONTENT"; then
         echo "OK - $PURL found '$CONTENT' in answer"
         exit 0
     else
         exitcode=${PIPESTATUS[0]}
-        if [ "$exitcode" != 0 ]
-        then
-           msg=$(curl_error $exitcode)
-           echo "CRIT - $PURL not retrieved, $msg"
-           exit 2
+        if [ "$exitcode" != 0 ]; then
+            msg=$(curl_error "$exitcode")
+            echo "CRIT - $PURL not retrieved, $msg"
+            exit 2
         else
-           echo "CRIT - $PURL retrieved, but '$CONTENT' not found in page"
-           exit 2
+            echo "CRIT - $PURL retrieved, but '$CONTENT' not found in page"
+            exit 2
         fi
     fi
 else
     # OUTPUT=$($CURL >/dev/null 2>&1 | head -n 1 ; exit ${PIPESTATUS[0]})
-    OUTPUT=$(curl $NTLM -A "Mozilla/4.0 (compatible; MSIE 6.0;)" --silent --fail --insecure $PROXYOPTIONS $URL >/dev/null 2>&1 | head -n 1 ; exit ${PIPESTATUS[0]})
+    # shellcheck disable=SC2034 # OUTPUT appears unused.
+    OUTPUT=$(
+        # shellcheck disable=SC2086 # Yes, we want splitting for NTLM and PROXYOPTIONS.
+        curl $NTLM -A "Mozilla/4.0 (compatible; MSIE 6.0;)" --silent --fail --insecure $PROXYOPTIONS "$URL" >/dev/null 2>&1 | head -n 1
+        exit "${PIPESTATUS[0]}"
+    )
     exitcode=$?
-    if [ "$exitcode" = 0 ]
-    then
+    if [ "$exitcode" = 0 ]; then
         echo "OK - $PURL retrieved"
         exit 0
     else
@@ -168,4 +169,3 @@ else
         exit 2
     fi
 fi
-

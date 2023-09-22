@@ -1,31 +1,26 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from collections import defaultdict
 import re
-from typing import (
-    Any,
+from collections import defaultdict
+from collections.abc import (
     Callable,
-    DefaultDict,
     Generator,
     Iterable,
+    Iterator,
     Mapping,
     MutableMapping,
-    Optional,
     Sequence,
-    Tuple,
-    TypedDict,
-    Union,
-    Dict,
-    Iterator,
 )
+from typing import Any, DefaultDict, TypedDict
+
 from ..agent_based_api.v1 import (
     check_levels,
     check_levels_predictive,
     get_average,
+    get_rate,
     IgnoreResultsError,
     Metric,
     render,
@@ -33,7 +28,6 @@ from ..agent_based_api.v1 import (
     Service,
     State,
     type_defs,
-    get_rate,
 )
 
 Disk = Mapping[str, float]
@@ -44,10 +38,11 @@ DISKSTAT_DISKLESS_PATTERN = re.compile("x?[shv]d[a-z]*[0-9]+")
 
 def discovery_diskstat_generic(
     params: Sequence[Mapping[str, Any]],
-    section: Section,
+    section: Iterable[str],
 ) -> type_defs.DiscoveryResult:
+    item_candidates = list(section)
     # Skip over on empty data
-    if not section:
+    if not item_candidates:
         return
 
     modes = params[0]
@@ -55,8 +50,8 @@ def discovery_diskstat_generic(
     if "summary" in modes:
         yield Service(item="SUMMARY")
 
-    for name in section:
-        if "physical" in modes and ' ' not in name and not DISKSTAT_DISKLESS_PATTERN.match(name):
+    for name in item_candidates:
+        if "physical" in modes and " " not in name and not DISKSTAT_DISKLESS_PATTERN.match(name):
             yield Service(item=name)
 
         if "lvm" in modes and name.startswith("LVM "):
@@ -120,7 +115,7 @@ def compute_rates_multiple_disks(
             disks_with_rates[disk_name] = single_disk_rate_computer(
                 disk,
                 value_store,
-                '.%s' % disk_name,
+                ".%s" % disk_name,
             )
         except IgnoreResultsError as excpt:
             ignore_res_excpt = excpt
@@ -131,8 +126,16 @@ def compute_rates_multiple_disks(
     return disks_with_rates
 
 
-def combine_disks(disks: Iterable[Disk]) -> Disk:
+_METRICS_TO_BE_AVERAGED = {
+    "utilization",
+    "latency",
+    "read_latency",
+    "write_latency",
+    "queue_length",
+}
 
+
+def combine_disks(disks: Iterable[Disk]) -> Disk:
     # In summary mode we add up the throughput values, but
     # we average the other values for disks that have a throughput
     # > 0. Note: This is not very precise. Strictly spoken
@@ -167,13 +170,13 @@ def combine_disks(disks: Iterable[Disk]) -> Disk:
             n_contributions[key] += 1
 
     for key in combined_disk:
-        if key.startswith("ave") or key in ("utilization", "latency", "queue_length"):
+        if key.startswith("ave") or key in _METRICS_TO_BE_AVERAGED:
             combined_disk[key] /= n_contributions[key]
 
     return combined_disk
 
 
-def summarize_disks(disks: Iterable[Tuple[str, Disk]]) -> Disk:
+def summarize_disks(disks: Iterable[tuple[str, Disk]]) -> Disk:
     # we do not use a dictionary as input because we want to be able to have the same disk name
     # multiple times (cluster mode)
     # skip LVM devices for summary
@@ -181,16 +184,18 @@ def summarize_disks(disks: Iterable[Tuple[str, Disk]]) -> Disk:
 
 
 def _scale_levels_predictive(
-    levels: Dict[str, Any],
-    factor: Union[int, float],
-) -> Dict[str, Any]:
-    def generator() -> Iterator[Tuple[str, Any]]:
+    levels: dict[str, Any],
+    factor: int | float,
+) -> dict[str, Any]:
+    def generator() -> Iterator[tuple[str, Any]]:
         for key, value in levels.items():
             if key in ("levels_upper", "levels_lower"):
                 mode, prediction_levels = value
                 if mode == "absolute":
-                    yield key, (mode, (prediction_levels[0] * factor,
-                                       prediction_levels[1] * factor))
+                    yield key, (
+                        mode,
+                        (prediction_levels[0] * factor, prediction_levels[1] * factor),
+                    )
                 else:
                     yield key, value
             elif key == "levels_upper_min":
@@ -202,9 +207,9 @@ def _scale_levels_predictive(
 
 
 def _scale_levels(
-    levels: Optional[Tuple[float, float]],
-    factor: Union[int, float],
-) -> Optional[Tuple[float, float]]:
+    levels: tuple[float, float] | None,
+    factor: int | float,
+) -> tuple[float, float] | None:
     if levels is None:
         return None
     return (levels[0] * factor, levels[1] * factor)
@@ -219,90 +224,114 @@ class MetricSpecs(TypedDict, total=False):
     in_service_output: bool
 
 
-_METRICS: Tuple[Tuple[str, MetricSpecs], ...] = (
+_METRICS: tuple[tuple[str, MetricSpecs], ...] = (
     (
-        'utilization',
+        "utilization",
         {
-            'levels_scale': 0.01,  # value comes as fraction, but levels are specified in percent
-            'render_func': lambda x: render.percent(x * 100),
-        }),
+            "levels_scale": 0.01,  # value comes as fraction, but levels are specified in percent
+            "render_func": lambda x: render.percent(x * 100),
+        },
+    ),
     (
-        'read_throughput',
+        "read_throughput",
         {
-            'levels_key': 'read',
-            'levels_scale': 1e6,  # levels are specified in MB/s
-            'render_func': render.iobandwidth,
-            'label': 'Read',
-            'in_service_output': True
-        }),
+            "levels_key": "read",
+            "levels_scale": 1e6,  # levels are specified in MB/s
+            "render_func": render.iobandwidth,
+            "label": "Read",
+            "in_service_output": True,
+        },
+    ),
     (
-        'write_throughput',
+        "write_throughput",
         {
-            'levels_key': 'write',
-            'levels_scale': 1e6,  # levels are specified in MB/s
-            'render_func': render.iobandwidth,
-            'label': 'Write',
-            'in_service_output': True
-        }),
+            "levels_key": "write",
+            "levels_scale": 1e6,  # levels are specified in MB/s
+            "render_func": render.iobandwidth,
+            "label": "Write",
+            "in_service_output": True,
+        },
+    ),
     (
-        'average_wait',
+        "average_wait",
         {
-            'levels_scale': 1e-3,  # levels are specified in ms
-            'render_func': render.timespan,
-        }),
+            "levels_scale": 1e-3,  # levels are specified in ms
+            "render_func": render.timespan,
+        },
+    ),
     (
-        'average_read_wait',
+        "average_read_wait",
         {
-            'levels_key': 'read_wait',
-            'levels_scale': 1e-3,  # levels are specified in ms
-            'render_func': render.timespan,
-        }),
+            "levels_key": "read_wait",
+            "levels_scale": 1e-3,  # levels are specified in ms
+            "render_func": render.timespan,
+        },
+    ),
     (
-        'average_write_wait',
+        "average_write_wait",
         {
-            'levels_key': 'write_wait',
-            'levels_scale': 1e-3,  # levels are specified in ms
-            'render_func': render.timespan,
-        }),
-    ('queue_length', {
-        'render_func': lambda x: "%.2f" % x,
-        'label': 'Average queue length',
-    }),
-    ('read_ql', {
-        'render_func': lambda x: "%.2f" % x,
-        'label': 'Average read queue length',
-    }),
-    ('write_ql', {
-        'render_func': lambda x: "%.2f" % x,
-        'label': 'Average write queue length',
-    }),
-    ('read_ios', {
-        'render_func': lambda x: "%.2f/s" % x,
-        'label': 'Read operations',
-    }),
-    ('write_ios', {
-        'render_func': lambda x: "%.2f/s" % x,
-        'label': 'Write operations',
-    }),
+            "levels_key": "write_wait",
+            "levels_scale": 1e-3,  # levels are specified in ms
+            "render_func": render.timespan,
+        },
+    ),
     (
-        'latency',
+        "queue_length",
         {
-            'levels_scale': 1e-3,  # levels are specified in ms
-            'render_func': render.timespan,
-            'in_service_output': True
-        }),
+            "render_func": lambda x: "%.2f" % x,
+            "label": "Average queue length",
+        },
+    ),
     (
-        'read_latency',
+        "read_ql",
         {
-            'levels_scale': 1e-3,  # levels are specified in ms
-            'render_func': render.timespan,
-        }),
+            "render_func": lambda x: "%.2f" % x,
+            "label": "Average read queue length",
+        },
+    ),
     (
-        'write_latency',
+        "write_ql",
         {
-            'levels_scale': 1e-3,  # levels are specified in ms
-            'render_func': render.timespan,
-        }),
+            "render_func": lambda x: "%.2f" % x,
+            "label": "Average write queue length",
+        },
+    ),
+    (
+        "read_ios",
+        {
+            "render_func": lambda x: "%.2f/s" % x,
+            "label": "Read operations",
+        },
+    ),
+    (
+        "write_ios",
+        {
+            "render_func": lambda x: "%.2f/s" % x,
+            "label": "Write operations",
+        },
+    ),
+    (
+        "latency",
+        {
+            "levels_scale": 1e-3,  # levels are specified in ms
+            "render_func": render.timespan,
+            "in_service_output": True,
+        },
+    ),
+    (
+        "read_latency",
+        {
+            "levels_scale": 1e-3,  # levels are specified in ms
+            "render_func": render.timespan,
+        },
+    ),
+    (
+        "write_latency",
+        {
+            "levels_scale": 1e-3,  # levels are specified in ms
+            "render_func": render.timespan,
+        },
+    ),
 )
 
 
@@ -337,8 +366,10 @@ def _get_averaged_disk(
             key="check_diskstat_dict.%s.avg" % key,
             time=this_time,
             value=value,
-            backlog_minutes=averaging / 60.,
-        ) for key, value in list(disk.items()) if isinstance(value, (int, float))
+            backlog_minutes=averaging / 60.0,
+        )
+        for key, value in list(disk.items())
+        if isinstance(value, (int, float))
     }
 
 
@@ -347,7 +378,7 @@ def compute_rates(
     disk: Disk,
     value_store: MutableMapping[str, Any],
     this_time: float,
-    disk_name: str = '',
+    disk_name: str = "",
 ) -> Disk:
     """Compute rates for a single disk.
 
@@ -371,20 +402,21 @@ def compute_rates(
 
     """
     disk_with_rates = {}
-    ignore_res = False
+    initialized = []
     for key, value in disk.items():
+        counter = f"{key}{disk_name}"
         try:
             disk_with_rates[key] = get_rate(
                 value_store,
-                f'{key}{disk_name}',
+                counter,
                 this_time,
                 value,
                 raise_overflow=True,
             )
         except IgnoreResultsError:
-            ignore_res = True
-    if ignore_res:
-        raise IgnoreResultsError('Initializing counters')
+            initialized.append(counter)
+    if initialized:
+        raise IgnoreResultsError(f"Initialized counters: {', '.join(initialized)}")
     return disk_with_rates
 
 
@@ -423,12 +455,12 @@ def check_diskstat_dict(
     for key, specs in _METRICS:
         metric_val = disk.get(key)
         if metric_val is not None:
-            levels = params.get(specs.get('levels_key') or key)
+            levels = params.get(specs.get("levels_key") or key)
             metric_name = "disk_" + key
-            render_func = specs.get('render_func')
-            label = specs.get('label') or key.replace("_", " ").capitalize()
-            notice_only = not specs.get('in_service_output')
-            levels_scale = specs.get('levels_scale', 1)
+            render_func = specs.get("render_func")
+            label = specs.get("label") or key.replace("_", " ").capitalize()
+            notice_only = not specs.get("in_service_output")
+            levels_scale = specs.get("levels_scale", 1)
 
             if isinstance(levels, dict):
                 yield from check_levels_predictive(
@@ -449,14 +481,14 @@ def check_diskstat_dict(
                 )
 
     # make sure we have a latency.
-    if 'latency' not in disk and 'average_write_wait' in disk and 'average_read_wait' in disk:
-        latency = max(disk['average_write_wait'], disk['average_read_wait'])
-        levels = params.get('latency')
+    if "latency" not in disk and "average_write_wait" in disk and "average_read_wait" in disk:
+        latency = max(disk["average_write_wait"], disk["average_read_wait"])
+        levels = params.get("latency")
         yield from check_levels(
             latency,
             levels_upper=_scale_levels(levels, 1e-3),
             render_func=render.timespan,
-            label='Latency',
+            label="Latency",
         )
 
     # All the other metrics are currently not output in the plugin output - simply because

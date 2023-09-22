@@ -1,18 +1,13 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import (
-    Any,
-    Iterable,
-    List,
-    Mapping,
-    Sequence,
-    Tuple,
-    TypedDict,
-)
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any
+
+from typing_extensions import TypedDict
+
 from .agent_based_api.v1 import (
     check_levels,
     register,
@@ -20,7 +15,7 @@ from .agent_based_api.v1 import (
     Result,
     Service,
     SNMPTree,
-    State as state,
+    State,
     type_defs,
 )
 from .utils.netscaler import SNMP_DETECT
@@ -79,7 +74,7 @@ netscaler_vserver_entitytypes = {
 
 
 class VServer(TypedDict, total=False):
-    service_state: Tuple[int, str]
+    service_state: tuple[int, str]
     entity_service_type: str
     protocol: str
     socket: str
@@ -93,7 +88,7 @@ class VServer(TypedDict, total=False):
 Section = Mapping[str, VServer]
 
 
-def _to_vserver(line: Iterable[str]) -> Tuple[str, VServer]:
+def _to_vserver(line: Iterable[str]) -> tuple[str, VServer]:
     """
     >>> import pprint
     >>> pprint.pprint(_to_vserver([
@@ -109,24 +104,36 @@ def _to_vserver(line: Iterable[str]) -> Tuple[str, VServer]:
       'socket': '0.0.0.0:0',
       'tx_bytes': 0})
     """
-    (name, ip, port, svr_type, svr_state, svr_health, svr_entitytype, request_rate, rx_bytes,
-     tx_bytes, full_name) = line
+    (
+        name,
+        ip,
+        port,
+        svr_type,
+        svr_state,
+        svr_health,
+        svr_entitytype,
+        request_rate,
+        rx_bytes,
+        tx_bytes,
+        full_name,
+    ) = line
     vserver: VServer = {
-        'service_state': netscaler_vserver_states.get(svr_state, (1, "unknown")),
-        'entity_service_type': netscaler_vserver_entitytypes.get(svr_entitytype,
-                                                                 "unknown (%s)" % svr_entitytype),
-        'protocol': netscaler_vserver_types.get(svr_type, "service unknown (%s)" % svr_type),
-        'socket': '%s:%s' % (ip, port),
-        'request_rate': int(request_rate),
-        'rx_bytes': int(rx_bytes),
-        'tx_bytes': int(tx_bytes),
+        "service_state": netscaler_vserver_states.get(svr_state, (1, "unknown")),
+        "entity_service_type": netscaler_vserver_entitytypes.get(
+            svr_entitytype, "unknown (%s)" % svr_entitytype
+        ),
+        "protocol": netscaler_vserver_types.get(svr_type, "service unknown (%s)" % svr_type),
+        "socket": f"{ip}:{port}",
+        "request_rate": int(request_rate),
+        "rx_bytes": int(rx_bytes),
+        "tx_bytes": int(tx_bytes),
     }
     if svr_entitytype in {"1", "2"}:
-        vserver['health'] = float(svr_health)
+        vserver["health"] = float(svr_health)
     return full_name or name, vserver
 
 
-def parse_netscaler_vserver(string_table: List[type_defs.StringTable]) -> Section:
+def parse_netscaler_vserver(string_table: list[type_defs.StringTable]) -> Section:
     """
     >>> import pprint
     >>> pprint.pprint(parse_netscaler_vserver([[
@@ -230,29 +237,33 @@ def _check_netscaler_vservers(
     if not vsevers:
         return
 
-    cluster_status = params.get('cluster_status', 'best')
+    cluster_status = params.get("cluster_status", "best")
     stat_list = []
     req_rate_list, rx_list, tx_list = [0], [0], [0]
 
     for vserver in vsevers:
-        stat_list.append(vserver['service_state'][0])
-        req_rate_list.append(vserver['request_rate'])
-        rx_list.append(vserver['rx_bytes'])
-        tx_list.append(vserver['tx_bytes'])
+        stat_list.append(vserver["service_state"][0])
+        req_rate_list.append(vserver["request_rate"])
+        rx_list.append(vserver["rx_bytes"])
+        tx_list.append(vserver["tx_bytes"])
 
     min_state = min(stat_list)
-    yield from (Result(
-        state=state(min_state if cluster_status == 'best' else vserver['service_state'][0]),
-        summary="Status: %s%s" % (
-            vserver['service_state'][1],
-            " (%s)" % vserver['node'] if 'node' in vserver else "",
-        ),
-    ) for vserver in vsevers)
+    yield from (
+        Result(
+            state=State(min_state if cluster_status == "best" else vserver["service_state"][0]),
+            summary="Status: %s%s"
+            % (
+                vserver["service_state"][1],
+                " (%s)" % vserver["node"] if "node" in vserver else "",
+            ),
+        )
+        for vserver in vsevers
+    )
 
     first_vserver = vsevers[0]
-    if first_vserver['entity_service_type'] in ['loadbalancing', 'loadbalancing group']:
+    if first_vserver["entity_service_type"] in ["loadbalancing", "loadbalancing group"]:
         yield from check_levels(
-            value=first_vserver['health'],
+            value=first_vserver["health"],
             levels_lower=params["health_levels"],
             metric_name="health_perc",
             render_func=render.percent,
@@ -261,11 +272,12 @@ def _check_netscaler_vservers(
         )
 
     yield Result(
-        state=state.OK,
-        summary="Type: %s, Protocol: %s, Socket: %s" % (
-            first_vserver['entity_service_type'],
-            first_vserver['protocol'],
-            first_vserver['socket'],
+        state=State.OK,
+        summary="Type: %s, Protocol: %s, Socket: %s"
+        % (
+            first_vserver["entity_service_type"],
+            first_vserver["protocol"],
+            first_vserver["socket"],
         ),
     )
 
@@ -312,7 +324,7 @@ def check_netscaler_vserver(
 def cluster_check_netscaler_vserver(
     item: str,
     params: Mapping[str, Any],
-    section: Mapping[str, Section],
+    section: Mapping[str, Section | None],
 ) -> type_defs.CheckResult:
     """
     >>> par = {"health_levels": (100.0, 0.1), "cluster_status": "best"}
@@ -338,8 +350,10 @@ def cluster_check_netscaler_vserver(
             {
                 # mypy unfortunately only accepts string literals as valid keys for TypedDicts
                 **node_section[item],  # type: ignore[misc]
-                'node': node_name,
-            } for node_name, node_section in section.items() if item in node_section
+                "node": node_name,
+            }
+            for node_name, node_section in section.items()
+            if node_section is not None and item in node_section
         ],
     )
 

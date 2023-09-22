@@ -7,8 +7,8 @@
 
 #include <filesystem>
 
-#include "test_tools.h"
-#include "zip.h"
+#include "watest/test_tools.h"
+#include "wnx/zip.h"
 namespace fs = std::filesystem;
 
 namespace cma::tools::zip {
@@ -30,7 +30,7 @@ protected:
     fs::path cab_file_;
 };
 
-TEST_F(ZipFixture, UnZipIntegration) {
+TEST_F(ZipFixture, UnZipComponent) {
     auto target = target_ / "unzip";
     auto work_file = zip_file_;
 
@@ -46,12 +46,12 @@ TEST_F(ZipFixture, UnZipIntegration) {
     ASSERT_FALSE(Extract(target, target));
 }
 
-TEST_F(ZipFixture, UnCabIntegration) {
+TEST_F(ZipFixture, UnCabComponent) {
     auto target = target_ / "uncab";
     auto work_file = cab_file_;
 
     fs::copy_file(tst::GetUnitTestFilesRoot() / tst::cab_to_test, work_file);
-    ASSERT_FALSE(Extract((work_file / "1"), target_));
+    ASSERT_FALSE(Extract(work_file / "1", target_));
 
     ASSERT_FALSE(Extract(work_file, target));
     ASSERT_TRUE(fs::create_directories(target));
@@ -60,7 +60,7 @@ TEST_F(ZipFixture, UnCabIntegration) {
     ASSERT_FALSE(Extract(target, target));
     //
     ASSERT_TRUE(Extract(work_file, target));
-    for (auto& entry : {"systemd", "mtr.cfg", "systemd/check_mk.socket"}) {
+    for (auto &entry : {"systemd", "mtr.cfg", "systemd/check_mk.socket"}) {
         EXPECT_TRUE(fs::exists(target / entry));
     }
 }

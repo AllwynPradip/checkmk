@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,13 +8,15 @@
 
 import cProfile
 import getopt
-import os
+import shlex
 import subprocess
 import sys
+from pathlib import Path
 
 
 def usage():
-    sys.stderr.write("""Check_MK SVC / V7000 Agent
+    sys.stderr.write(
+        """Check_MK SVC / V7000 Agent
 
 USAGE: agent_ibmsvc [OPTIONS] HOST
        agent_ibmsvc -h
@@ -49,7 +50,8 @@ OPTIONS:
                                 You can define to use only view of them to optimize
                                 performance. The default is "all".
 
-""")
+"""
+    )
 
 
 #############################################################################
@@ -57,13 +59,19 @@ OPTIONS:
 #############################################################################
 
 
-def main(sys_argv=None):
+def main(sys_argv=None):  # pylint: disable=too-many-branches
     if sys_argv is None:
         sys_argv = sys.argv[1:]
 
-    short_options = 'hu:p:t:m:i:k'
+    short_options = "hu:p:t:m:i:k"
     long_options = [
-        'help', 'user=', 'debug', 'timeout=', 'profile', 'modules=', 'accept-any-hostkey'
+        "help",
+        "user=",
+        "debug",
+        "timeout=",
+        "profile",
+        "modules=",
+        "accept-any-hostkey",
     ]
 
     try:
@@ -77,105 +85,85 @@ def main(sys_argv=None):
     opt_any_hostkey = ""
 
     g_profile = None
-    g_profile_path = "ibmsvc_profile.out"
 
     host_address = None
     user = None
-    mortypes = ['all']
 
     command_options = {
-        "lshost": {
-            "section_header": "ibm_svc_host",
-            "active": False,
-            "command": "lshost -delim :"
-        },
+        "lshost": {"section_header": "ibm_svc_host", "command": "lshost -delim :"},
         "lslicense": {
             "section_header": "ibm_svc_license",
-            "active": False,
-            "command": "lslicense -delim :"
+            "command": "lslicense -delim :",
         },
         "lsmdisk": {
             "section_header": "ibm_svc_mdisk",
-            "active": False,
-            "command": "lsmdisk -delim :"
+            "command": "lsmdisk -delim :",
         },
         "lsmdiskgrp": {
             "section_header": "ibm_svc_mdiskgrp",
-            "active": False,
-            "command": "lsmdiskgrp -delim :"
+            "command": "lsmdiskgrp -delim :",
         },
-        "lsnode": {
-            "section_header": "ibm_svc_node",
-            "active": False,
-            "command": "lsnode -delim :"
-        },
+        "lsnode": {"section_header": "ibm_svc_node", "command": "lsnode -delim :"},
         "lsnodestats": {
             "section_header": "ibm_svc_nodestats",
-            "active": False,
-            "command": "lsnodestats -delim :"
+            "command": "lsnodestats -delim :",
         },
         "lssystem": {
             "section_header": "ibm_svc_system",
-            "active": False,
-            "command": "lssystem -delim :"
+            "command": "lssystem -delim :",
         },
         "lssystemstats": {
             "section_header": "ibm_svc_systemstats",
-            "active": False,
-            "command": "lssystemstats -delim :"
+            "command": "lssystemstats -delim :",
         },
         "lseventlog": {
             "section_header": "ibm_svc_eventlog",
-            "active": False,
-            "command": "lseventlog -expired no -fixed no -monitoring no -order severity -message no -delim : -nohdr"
+            "command": "lseventlog -expired no -fixed no -monitoring no -order severity -message no -delim : -nohdr",
         },
         "lsportfc": {
             "section_header": "ibm_svc_portfc",
-            "active": False,
-            "command": "lsportfc -delim :"
+            "command": "lsportfc -delim :",
         },
         "lsenclosure": {
             "section_header": "ibm_svc_enclosure",
-            "active": False,
-            "command": "lsenclosure -delim :"
+            "command": "lsenclosure -delim :",
         },
         "lsenclosurestats": {
             "section_header": "ibm_svc_enclosurestats",
-            "active": False,
-            "command": "lsenclosurestats -delim :"
+            "command": "lsenclosurestats -delim :",
         },
         "lsarray": {
             "section_header": "ibm_svc_array",
-            "active": False,
-            "command": "lsarray -delim :"
+            "command": "lsarray -delim :",
         },
         "lsportsas": {
             "section_header": "ibm_svc_portsas",
-            "active": False,
-            "command": "lsportsas -delim :"
+            "command": "lsportsas -delim :",
         },
         "disks": {
             "section_header": "ibm_svc_disks",
-            "active": False,
-            "command": "svcinfo lsdrive -delim :"
+            "command": "svcinfo lsdrive -delim :",
         },
     }
-
+    mortypes = set(command_options)
     for o, a in opts:
-        if o in ['--debug']:
+        if o in ["--debug"]:
             opt_debug = True
-        elif o in ['--profile']:
+        elif o in ["--profile"]:
             g_profile = cProfile.Profile()
             g_profile.enable()
-        elif o in ['-u', '--user']:
+        elif o in ["-u", "--user"]:
             user = a
-        elif o in ['-i', '--modules']:
-            mortypes = a.split(',')
-        elif o in ['-t', '--timeout']:
+        elif o in ["-i", "--modules"]:
+            provided_modules = set(a.split(","))
+            mortypes = (
+                mortypes if provided_modules == {"all"} else provided_modules.intersection(mortypes)
+            )
+        elif o in ["-t", "--timeout"]:
             opt_timeout = int(a)
-        elif o in ['-k', '--accept-any-hostkey']:
+        elif o in ["-k", "--accept-any-hostkey"]:
             opt_any_hostkey = "-o StrictHostKeyChecking=no"
-        elif o in ['-h', '--help']:
+        elif o in ["-h", "--help"]:
             usage()
             sys.exit(0)
 
@@ -192,67 +180,85 @@ def main(sys_argv=None):
         sys.stderr.write("ERROR: No user name given.\n")
         return 1
 
-    for module in command_options:
-        try:
-            if mortypes.index("all") >= 0:
-                command_options[module]["active"] = True
-        except ValueError:
-            pass
-
-        try:
-            if mortypes.index(module) >= 0:
-                command_options[module]["active"] = True
-        except ValueError:
-            pass
-
     #############################################################################
     # fetch information by ssh
     #############################################################################
 
-    cmd = "ssh -o ConnectTimeout=%s %s %s@%s '" % (opt_timeout, opt_any_hostkey, user, host_address)
+    remote_command = ""
+    for module in mortypes:
+        remote_command += (
+            r"echo \<\<\<%s:sep\(58\)\>\>\>;" % command_options[module]["section_header"]
+        )
+        remote_command += "%s || true;" % command_options[module]["command"]
 
-    for module in command_options:
-        if command_options[module]["active"]:
-            cmd += r"echo \<\<\<%s:sep\(58\)\>\>\>;" % command_options[module]["section_header"]
-            cmd += "%s || true;" % command_options[module]["command"]
-    cmd += "'"
+    result = _execute_ssh_command(
+        remote_command=remote_command,
+        opt_timeout=opt_timeout,
+        opt_any_hostkey=opt_any_hostkey,
+        user=user,
+        host_address=host_address,
+        opt_debug=opt_debug,
+    )
+
+    _check_ssh_result(result)
+
+    if g_profile:
+        g_profile_path = Path("ibmsvc_profile.out")
+        g_profile.dump_stats(g_profile_path)
+
+        show_profile = g_profile_path / "show_profile.py"
+        show_profile.write_text(
+            "#!/usr/bin/python\n"
+            "import pstats\n"
+            "stats = pstats.Stats('%s')\n"
+            "stats.sort_stats('cumtime').print_stats()\n" % g_profile_path
+        )
+        show_profile.chmod(0o755)
+
+        sys.stderr.write(f"Profile '{g_profile_path}' written. Please run {show_profile}.\n")
+    return None
+
+
+def _execute_ssh_command(
+    remote_command: str,
+    opt_timeout: int,
+    opt_any_hostkey: str,
+    user: str,
+    host_address: str,
+    opt_debug: bool,
+) -> subprocess.CompletedProcess:
+    cmd = "ssh -o ConnectTimeout={} {} {}@{} '{}'".format(
+        opt_timeout,
+        opt_any_hostkey,
+        shlex.quote(user),
+        shlex.quote(host_address),
+        remote_command,
+    )
 
     if opt_debug:
-        sys.stderr.write("executing external command: %s\n" % cmd)
+        sys.stderr.write(f"executing external command: {cmd}\n")
 
-    result = subprocess.Popen(  # nosec
+    return subprocess.run(  # nosec B602 # BNS:67522a
         cmd,
         shell=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         stdin=None,
         encoding="utf-8",
+        check=False,
     )
-    stdout, stderr = result.communicate()
-    exit_code = result.wait()
 
-    if exit_code not in [0, 1]:
-        sys.stderr.write("Error connecting via ssh: %s\n" % stderr)
+
+def _check_ssh_result(result: subprocess.CompletedProcess) -> None:
+    if result.returncode not in [0, 1]:
+        sys.stderr.write("Error connecting via ssh: %s\n" % result.stderr)
         sys.exit(2)
 
-    lines = stdout.split('\n')
+    lines = result.stdout.split("\n")
 
     if lines[0].startswith("CMMVC7016E") or (len(lines) > 1 and lines[1].startswith("CMMVC7016E")):
-        sys.stderr.write(stdout)
+        sys.stderr.write(result.stdout)
         sys.exit(2)
 
     # Quite strange.. Why not simply print stdout?
     for line in lines:
         print(line)
-
-    if g_profile:
-        g_profile.dump_stats(g_profile_path)
-        show_profile = os.path.join(os.path.dirname(g_profile_path), 'show_profile.py')
-        open(show_profile, "w")\
-            .write("#!/usr/bin/python\n"
-                   "import pstats\n"
-                   "stats = pstats.Stats('%s')\n"
-                   "stats.sort_stats('time').print_stats()\n" % g_profile_path)
-        os.chmod(show_profile, 0o755)
-
-        sys.stderr.write("Profile '%s' written. Please run %s.\n" % (g_profile_path, show_profile))

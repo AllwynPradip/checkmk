@@ -1,42 +1,45 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
-from typing import Type
-from six import ensure_str
+from __future__ import annotations
 
-import cmk
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from typing import Literal
+
 import cmk.utils.plugin_registry
-from cmk.utils.exceptions import MKGeneralException
 import cmk.utils.render
+from cmk.utils.exceptions import MKGeneralException
 
-import cmk.gui.i18n
-import cmk.gui.sites as sites
-import cmk.gui.config as config
-import cmk.gui.log as log
 import cmk.gui.background_job as background_job
-from cmk.gui.i18n import _, _l
-from cmk.gui.globals import g, html, request, timeout_manager, transactions
-from cmk.gui.utils.html import HTML
+import cmk.gui.log as log
+from cmk.gui.background_job import BackgroundJob, BackgroundStatusSnapshot
 from cmk.gui.breadcrumb import Breadcrumb
+from cmk.gui.htmllib.generator import HTMLWriter
+from cmk.gui.htmllib.html import html
+from cmk.gui.http import request
+from cmk.gui.i18n import _, _l
+from cmk.gui.logged_in import user
 from cmk.gui.permissions import (
+    Permission,
+    permission_registry,
     permission_section_registry,
     PermissionSection,
-    permission_registry,
-    Permission,
 )
-from cmk.gui.utils.urls import makeuri_contextless, make_confirm_link, makeactionuri
+from cmk.gui.utils.html import HTML
+from cmk.gui.utils.transaction_manager import transactions
+from cmk.gui.utils.urls import make_confirm_delete_link, makeactionuri, makeuri_contextless
 
 
 @permission_section_registry.register
 class PermissionSectionBackgroundJobs(PermissionSection):
     @property
-    def name(self):
+    def name(self) -> str:
         return "background_jobs"
 
     @property
-    def title(self):
+    def title(self) -> str:
         return _("Background jobs")
 
 
@@ -47,7 +50,8 @@ permission_registry.register(
         title=_l("Manage background jobs"),
         description=_l("Allows you to see the job overview page."),
         defaults=["admin"],
-    ))
+    )
+)
 
 permission_registry.register(
     Permission(
@@ -58,7 +62,8 @@ permission_registry.register(
             "Configures the permission to stop background jobs. Note: some jobs cannot be stopped."
         ),
         defaults=["user", "admin"],
-    ))
+    )
+)
 
 permission_registry.register(
     Permission(
@@ -69,7 +74,8 @@ permission_registry.register(
             "Configures the permission to delete background jobs. Note: some jobs cannot be deleted."
         ),
         defaults=["user", "admin"],
-    ))
+    )
+)
 
 permission_registry.register(
     Permission(
@@ -78,7 +84,8 @@ permission_registry.register(
         title=_l("See foreign background jobs"),
         description=_l("Allows you to see jobs of other users."),
         defaults=["admin"],
-    ))
+    )
+)
 
 permission_registry.register(
     Permission(
@@ -86,9 +93,11 @@ permission_registry.register(
         name="stop_foreign_jobs",
         title=_l("Stop foreign background jobs"),
         description=_l(
-            "Allows you to stop jobs of other users. Note: some jobs cannot be stopped."),
+            "Allows you to stop jobs of other users. Note: some jobs cannot be stopped."
+        ),
         defaults=["admin"],
-    ))
+    )
+)
 
 permission_registry.register(
     Permission(
@@ -96,251 +105,96 @@ permission_registry.register(
         name="delete_foreign_jobs",
         title=_l("Delete foreign background jobs"),
         description=_l(
-            "Allows you to delete jobs of other users. Note: some jobs cannot be deleted"),
+            "Allows you to delete jobs of other users. Note: some jobs cannot be deleted"
+        ),
         defaults=["admin"],
-    ))
+    )
+)
 
 
-class GUIBackgroundProcess(background_job.BackgroundProcess):
-    def initialize_environment(self):
-        # setup logging
-        log.init_logging()  # NOTE: We run in a subprocess!
-        self._logger = log.logger.getChild("background-job")
-        self._log_path_hint = _("More information can be found in ~/var/log/web.log")
-
-        # Disable html request timeout
-        if timeout_manager:
-            timeout_manager.disable_timeout()
-
-        # Close livestatus connections inherited from the parent process
-        if g:
-            sites.disconnect()
-
-        super(GUIBackgroundProcess, self).initialize_environment()
-
-
-# These functions here are included in a frozen snapshot of a background job
-# Restrictions for newly added functions: no function arguments, only getters
-class GUIBackgroundJobSnapshottedFunctions(background_job.BackgroundJob):
-    def has_exception(self):
-        return self.get_status().get("state") == background_job.JobStatusStates.EXCEPTION
-
-    def acknowledged_by(self):
-        return self.get_status().get("acknowledged_by")
-
-    def is_available(self):
-        return self.exists() and self.is_visible()
-
-    def is_deletable(self):
-        return self.get_status().get("deletable", True)
-
-    def is_visible(self):
-        if config.user.may("background_jobs.see_foreign_jobs"):
-            return True
-        return config.user.id == self.get_status().get("user")
-
-    def may_stop(self):
-        if not self.is_stoppable():
-            return False
-
-        if not config.user.may("background_jobs.stop_jobs"):
-            return False
-
-        if self.is_foreign() and not config.user.may("background_jobs.stop_foreign_jobs"):
-            return False
-
-        if not self.is_active():
-            return False
-
-        return True
-
-    def may_delete(self):
-        if not self.is_deletable():
-            return False
-
-        if not self.is_stoppable() and self.is_active():
-            return False
-
-        if not config.user.may("background_jobs.delete_jobs"):
-            return False
-
-        if self.is_foreign() and not config.user.may("background_jobs.delete_foreign_jobs"):
-            return False
-
-        return True
-
-    def is_foreign(self):
-        return self.get_status().get("user") != config.user.id
-
-    # FIXME: There is some arcane metaprogramming Kung Fu going on in
-    # GUIBackgroundStatusSnapshot which needs the methods *in this class*,
-    # although they are actually totally useless here.
-    def is_active(self):  # pylint: disable=useless-super-delegation
-        return super(GUIBackgroundJobSnapshottedFunctions, self).is_active()
-
-    def exists(self):  # pylint: disable=useless-super-delegation
-        return super(GUIBackgroundJobSnapshottedFunctions, self).exists()
-
-    def get_job_id(self):  # pylint: disable=useless-super-delegation
-        return super(GUIBackgroundJobSnapshottedFunctions, self).get_job_id()
-
-    def get_title(self):  # pylint: disable=useless-super-delegation
-        return super(GUIBackgroundJobSnapshottedFunctions, self).get_title()
-
-
-class GUIBackgroundJob(GUIBackgroundJobSnapshottedFunctions):
-    _background_process_class = GUIBackgroundProcess
-
-    def __init__(self, job_id, **kwargs):
-        logger = log.logger.getChild("background-job")
-        kwargs["user"] = config.user.id
-        kwargs["logfile_path"] = "~/var/log/web.log"
-        # Deletable is currently a GUI only feature, not known in background_job
-        self._deletable = kwargs.get("deletable", True)
-
-        super(GUIBackgroundJob, self).__init__(job_id, logger=logger, **kwargs)
-
-    @classmethod
-    def gui_title(cls) -> str:
-        # FIXME: This method cannot be made abstract since GUIBackgroundJob is
-        # instantiated in various places.
-        raise NotImplementedError()
-
-    def get_status_snapshot(self):
-        return GUIBackgroundStatusSnapshot(self)
-
-    def acknowledge(self, user_id):
-        self.update_status({"acknowledged_by": user_id})
-
-    def detail_url(self):
-        """Returns the URL that displays the job detail page"""
-        return makeuri_contextless(
-            request,
-            [
-                ("mode", "background_job_details"),
-                ("job_id", self.get_job_id()),
-                ("back_url", self._back_url()),
-            ],
-            filename="wato.py",
-        )
-
-    def _back_url(self):
-        """Returns either None or the URL that the job detail page may be link back"""
-        return None
-
-
-class GUIBackgroundJobRegistry(cmk.utils.plugin_registry.Registry[Type[GUIBackgroundJob]]):
-    def plugin_name(self, instance):
-        return instance.__name__
-
-
-job_registry = GUIBackgroundJobRegistry()
-
-
-# GUI pages are built in several phases, and each face can take a non-trivial
-# amount of time. Nevertheless, it is crucial to render a consistent state of
-# the background job in question. The class below provides such a status
-# snapshot for the job given to the constructor.
-#
-# TODO: BackgroundJob should provide an explicit status object, which we can use
-# here without any metaprogramming Kung Fu and arcane inheritance hierarchies.
-class GUIBackgroundStatusSnapshot:
-    def __init__(self, job):
-        super(GUIBackgroundStatusSnapshot, self).__init__()
-        self._job_status = job.get_status()
-        self._logger = job._logger.getChild("snapshot")
-
-        for name, value in GUIBackgroundJobSnapshottedFunctions.__dict__.items():
-            if hasattr(value, "__call__"):
-                self._job_status[name] = getattr(job, name)()
-
-    def get_status_as_dict(self):
-        return {self.get_job_id(): self._job_status}
-
-    def __getattr__(self, name):
-        if name not in self._job_status:
-            raise MKGeneralException(
-                _("The function %s is not in the snapshotted functions.") % name)
-        return lambda: self._job_status[name]
+@dataclass
+class JobInfo:
+    status: background_job.JobStatusSpec
+    may_stop: bool
+    may_delete: bool
 
 
 class GUIBackgroundJobManager(background_job.BackgroundJobManager):
-    def __init__(self):
-        super(GUIBackgroundJobManager,
-              self).__init__(logger=log.logger.getChild("background-job.manager"))
+    def __init__(self) -> None:
+        super().__init__(logger=log.logger.getChild("background-job.manager"))
 
-    def get_running_job_ids(self, job_class):
-        job_ids = super(GUIBackgroundJobManager, self).get_running_job_ids(job_class)
+    def get_running_job_ids(
+        self, job_class: type[background_job.BackgroundJob]
+    ) -> list[background_job.JobId]:
+        job_ids = super().get_running_job_ids(job_class)
         return self._filter_available_jobs(job_ids)
 
-    def get_all_job_ids(self, job_class):
-        job_ids = super(GUIBackgroundJobManager, self).get_all_job_ids(job_class)
+    def get_all_job_ids(
+        self, job_class: type[background_job.BackgroundJob]
+    ) -> list[background_job.JobId]:
+        job_ids = super().get_all_job_ids(job_class)
         return self._filter_available_jobs(job_ids)
 
-    def _filter_available_jobs(self, job_ids):
+    def _filter_available_jobs(
+        self, job_ids: Sequence[background_job.JobId]
+    ) -> list[background_job.JobId]:
         visible_jobs = []
         for job_id in job_ids:
             try:
-                job = GUIBackgroundJob(job_id)
+                job = BackgroundJob(job_id)
                 if job.is_available():
                     visible_jobs.append(job_id)
             except Exception as e:
-                self._logger.error("Exception parsing background job %s: %s" % (job_id, e))
+                self._logger.error(f"Exception parsing background job {job_id}: {e}")
                 continue
         return visible_jobs
 
-    def show_status_of_job_classes(self, job_classes, **kwargs):
-        job_class_infos = {}
+    def show_status_of_job_classes(
+        self, job_classes: Iterable[type[BackgroundJob]], job_details_back_url: str
+    ) -> None:
+        job_class_infos: dict[
+            type[BackgroundJob],
+            dict[background_job.JobId, JobInfo],
+        ] = {}
         for job_class in job_classes:
             all_job_ids = self.get_all_job_ids(job_class)
             if not all_job_ids:
                 continue  # Skip job classes without current jobs
             job_class_infos[job_class] = self._get_job_infos(all_job_ids)
 
-        JobRenderer.show_job_class_infos(job_class_infos, **kwargs)
+        JobRenderer.show_job_class_infos(job_class_infos, job_details_back_url)
 
-    def get_status_all_jobs(self, job_class):
-        all_job_ids = self.get_all_job_ids(job_class)
-        return self._get_job_infos(all_job_ids)
+    def show_job_details_from_snapshot(self, job_snapshot: BackgroundStatusSnapshot) -> None:
+        if not job_snapshot.exists:
+            raise MKGeneralException(
+                "Background job with id <i>%s</i> not found" % job_snapshot.job_id
+            )
+        JobRenderer.show_job_details(
+            job_snapshot.job_id, job_snapshot.status, job_snapshot.may_stop, job_snapshot.may_delete
+        )
 
-    def show_job_details(self, job_id=None, job_snapshot=None):
-        job_info = self._get_job_infos([job_id])
-        if not job_info:
-            raise MKGeneralException("Background job with id <i>%s</i> not found" % job_id)
-
-        job_id, job_status = list(job_info.items())[0]
-        JobRenderer.show_job_details(job_id, job_status)
-
-    def show_job_details_from_snapshot(self, job_snapshot):
-        if job_snapshot.exists():
-            job_info = job_snapshot.get_status_as_dict()
-            job_id, job_status = list(job_info.items())[0]
-            JobRenderer.show_job_details(job_id, job_status)
-        else:
-            raise MKGeneralException("Background job with id <i>%s</i> not found" %
-                                     job_snapshot.get_job_id())
-
-    def _get_job_infos(self, jobs):
+    def _get_job_infos(
+        self, jobs: Sequence[background_job.JobId]
+    ) -> dict[background_job.JobId, JobInfo]:
         all_jobs = {}
         for job_id in jobs:
             try:
-                job = GUIBackgroundJob(job_id)
+                job = BackgroundJob(job_id)
                 job_status = job.get_status()
                 is_active = job.is_active()
             except Exception as e:
-                self._logger.error("Exception parsing background job %s: %s" % (job_id, str(e)))
+                self._logger.error(f"Exception parsing background job {job_id}: {str(e)}")
                 continue
 
-            if is_active and job.may_stop():
-                job_status["may_stop"] = True
-
-            if job.may_delete():
-                job_status["may_delete"] = True
-            all_jobs[job_id] = job_status
+            all_jobs[job_id] = JobInfo(
+                status=job_status,
+                may_stop=is_active and job.may_stop(),
+                may_delete=job.may_delete(),
+            )
         return all_jobs
 
 
-#.
+# .
 #   .--Rendering-----------------------------------------------------------.
 #   |            ____                _           _                         |
 #   |           |  _ \ ___ _ __   __| | ___ _ __(_)_ __   __ _             |
@@ -353,16 +207,22 @@ class GUIBackgroundJobManager(background_job.BackgroundJobManager):
 
 class JobRenderer:
     @classmethod
-    def show_job_details(cls, job_id, job_status):
+    def show_job_details(
+        cls,
+        job_id: background_job.JobId,
+        job_status: background_job.JobStatusSpec,
+        may_stop: bool,
+        may_delete: bool,
+    ) -> None:
         """Renders the complete job details in a single table with left headers"""
         html.open_table(class_=["data", "headerleft", "job_details"])
 
         # Static info
         for left, right in [
             (_("ID"), job_id),
-            (_("Title"), job_status.get("title", "")),
-            (_("Started"), cmk.utils.render.date_and_time(job_status["started"])),
-            (_("Owner"), job_status.get("user", "")),
+            (_("Title"), job_status.title),
+            (_("Started"), cmk.utils.render.date_and_time(job_status.started)),
+            (_("Owner"), job_status.user),
         ]:
             html.open_tr()
             html.th(left)
@@ -373,22 +233,30 @@ class JobRenderer:
         html.open_tr()
         html.th(_("Actions"))
         html.open_td()
-        if job_status.get("may_stop"):
+        if may_stop:
             html.icon_button(
-                make_confirm_link(
-                    url=makeactionuri(request, transactions,
-                                      [(ActionHandler.stop_job_var, job_id)]),
-                    message=_("Stop job %s%s?") % (job_id, cls._get_extra_info(job_status)),
+                make_confirm_delete_link(
+                    url=makeactionuri(
+                        request, transactions, [(ActionHandler.stop_job_var, job_id)]
+                    ),
+                    title=_("Stop job"),
+                    suffix=job_status.title,
+                    message=_("ID: %s") % job_id,
+                    confirm_button=_("Stop"),
+                    cancel_button=_("Cancel"),
                 ),
                 _("Stop this job"),
                 "disable_test",
             )
-        if job_status.get("may_delete"):
+        if may_delete:
             html.icon_button(
-                make_confirm_link(
-                    url=makeactionuri(request, transactions,
-                                      [(ActionHandler.delete_job_var, job_id)]),
-                    message=_("Delete job %s%s?") % (job_id, cls._get_extra_info(job_status)),
+                make_confirm_delete_link(
+                    url=makeactionuri(
+                        request, transactions, [(ActionHandler.delete_job_var, job_id)]
+                    ),
+                    title=_("Delete job"),
+                    suffix=job_status.title,
+                    message=_("ID: %s") % job_id,
                 ),
                 _("Delete this job"),
                 "delete",
@@ -399,26 +267,29 @@ class JobRenderer:
         # Job state
         html.open_tr()
         html.th(_("State"))
-        html.td(job_status["state"], css=cls.get_css_for_jobstate(job_status["state"]))
+        html.td(job_status.state, css=cls.get_css_for_jobstate(job_status.state))
         html.close_tr()
 
-        if job_status["state"] == background_job.JobStatusStates.EXCEPTION:
+        if job_status.state == background_job.JobStatusStates.EXCEPTION:
             html.open_tr()
             html.th(_("Acknowledged by"))
-            html.td(job_status.get("acknowledged_by", ""))
+            html.td(job_status.acknowledged_by or "")
             html.close_tr()
 
         # Dynamic data
-        loginfo = job_status.get("loginfo")
-        runtime_info = ensure_str(cmk.utils.render.timespan(job_status.get("duration", 0)))
-        if job_status["state"] == background_job.JobStatusStates.RUNNING \
-            and job_status.get("estimated_duration") is not None:
-            runtime_info += u" (%s: %s)" % (
+        loginfo = job_status.loginfo
+        runtime_info = cmk.utils.render.timespan(job_status.duration)
+        if (
+            job_status.state == background_job.JobStatusStates.RUNNING
+            and (estimated_duration := job_status.estimated_duration) is not None
+        ):
+            runtime_info += " ({}: {})".format(
                 _("estimated duration"),
-                ensure_str(cmk.utils.render.timespan(job_status["estimated_duration"])))
+                cmk.utils.render.timespan(estimated_duration),
+            )
         for left, right in [
             (_("Runtime"), runtime_info),
-            (_("PID"), str(job_status["pid"]) or ""),
+            (_("PID"), str(job_status.pid) or ""),
             (_("Result"), "<br>".join(loginfo["JobResult"])),
         ]:
             if right is None:
@@ -429,14 +300,15 @@ class JobRenderer:
             html.close_tr()
 
         # Exceptions
-        exceptions = loginfo["JobException"]
+        exceptions = list(loginfo["JobException"])
         if exceptions:
             html.open_tr()
             html.th(_("Exceptions"))
             html.open_td()
-            if exceptions and "logfile_path" in job_status:
+            if exceptions:
                 exceptions.append(
-                    _("More information can be found in %s") % job_status["logfile_path"])
+                    _("More information can be found in %s") % job_status.logfile_path
+                )
             html.open_div(class_="log_output", id_="exception_log")
             html.pre("\n".join(exceptions))
             html.close_div()
@@ -445,24 +317,30 @@ class JobRenderer:
 
         # Progress Update
         html.open_tr()
-        html.th(_("Progress Info"))
+        html.th(_("Progress info"))
         html.open_td()
         html.open_div(class_="log_output", style="height: 400px;", id_="progress_log")
         html.pre(HTML("\n").join(loginfo["JobProgressUpdate"]))
+        html.pre(HTML("\n".join(loginfo["JobResult"])))
         html.close_div()
         html.close_td()
         html.close_tr()
 
         html.close_table()
-        html.javascript(
-            "var log = document.getElementById('progress_log'); log.scrollTop = log.scrollHeight;")
 
     @classmethod
-    def _get_extra_info(cls, job_status) -> str:
-        return " (%s)" % job_status["title"] if job_status.get("title") else ""
+    def _get_extra_info(cls, job_status: background_job.JobStatusSpec) -> str:
+        return " (%s)" % job_status.title
 
     @classmethod
-    def show_job_class_infos(cls, job_class_infos, **kwargs):
+    def show_job_class_infos(
+        cls,
+        job_class_infos: dict[
+            type[BackgroundJob],
+            dict[background_job.JobId, JobInfo],
+        ],
+        job_details_back_url: str,
+    ) -> None:
         """Renders all jobs from the job_class_infos in a single multi-table"""
         html.open_table(css="job_table data")
         for job_class, jobs_info in sorted(job_class_infos.items(), key=lambda x: x[0].gui_title()):
@@ -481,22 +359,22 @@ class JobRenderer:
                 continue
 
             cls.show_job_row_headers()
-            odd = "even"
-            for job_id, job_status in sorted(jobs_info.items(),
-                                             key=lambda x: x[1]["started"],
-                                             reverse=True):
-                cls.render_job_row(job_id, job_status, odd, **kwargs)
+            odd: Literal["odd", "even"] = "even"
+            for job_id, job_info in sorted(
+                jobs_info.items(), key=lambda x: x[1].status.started, reverse=True
+            ):
+                cls.render_job_row(job_id, job_info, odd, job_details_back_url)
                 odd = "even" if odd == "odd" else "odd"
 
     @classmethod
-    def show_job_row_headers(cls):
+    def show_job_row_headers(cls) -> None:
         html.open_tr()
         for header in cls.get_headers():
             html.th(header)
         html.close_tr()
 
     @classmethod
-    def get_headers(cls):
+    def get_headers(cls) -> list[str]:
         return [
             _("Actions"),
             _("Job ID"),
@@ -507,23 +385,35 @@ class JobRenderer:
             _("PID"),
             _("Runtime"),
             _("Last progress info"),
-            _("Results")
+            _("Results"),
         ]
 
     @classmethod
-    def render_job_row(cls, job_id, job_status, odd, job_details_back_url=None):
+    def render_job_row(
+        cls,
+        job_id: background_job.JobId,
+        job_info: JobInfo,
+        odd: Literal["odd", "even"],
+        job_details_back_url: str,
+    ) -> None:
+        job_status = job_info.status
+
         html.open_tr(css="data %s0" % odd)
 
         # Actions
         html.open_td(css="job_actions")
-        if job_status.get("may_stop"):
+        if job_info.may_stop:
             html.icon_button(
                 makeactionuri(request, transactions, [(ActionHandler.stop_job_var, job_id)]),
-                _("Stop this job"), "disable_test")
-        if job_status.get("may_delete"):
+                _("Stop this job"),
+                "disable_test",
+            )
+        if job_info.may_delete:
             html.icon_button(
                 makeactionuri(request, transactions, [(ActionHandler.delete_job_var, job_id)]),
-                _("Delete this job"), "delete")
+                _("Delete this job"),
+                "delete",
+            )
         html.close_td()
 
         # Job ID
@@ -541,28 +431,30 @@ class JobRenderer:
         html.close_td()
 
         # Title
-        html.td(job_status.get("title", _("Background Job")), css="job_title")
+        html.td(job_status.title, css="job_title")
 
         # State
-        html.td(html.render_span(job_status["state"]),
-                css=cls.get_css_for_jobstate(job_status["state"]))
+        html.td(
+            HTMLWriter.render_span(job_status.state),
+            css=cls.get_css_for_jobstate(job_status.state),
+        )
 
         # Started
-        html.td(cmk.utils.render.date_and_time(job_status["started"]), css="job_started")
+        html.td(cmk.utils.render.date_and_time(job_status.started), css="job_started")
 
         # Owner
-        html.td(job_status.get("user", _("Unknown user")), css="job_owner")
+        html.td(job_status.user or _("Internal user"), css="job_owner")
 
         # PID
-        html.td(job_status["pid"] or "", css="job_pid")
+        html.td(job_status.pid or "", css="job_pid")
 
         # Druation
-        html.td(cmk.utils.render.timespan(job_status.get("duration", 0)), css="job_runtime")
+        html.td(cmk.utils.render.timespan(job_status.duration), css="job_runtime")
 
         # Progress info
-        loginfo = job_status.get("loginfo")
+        loginfo = job_status.loginfo
         if loginfo:
-            if job_status.get("state") == background_job.JobStatusStates.EXCEPTION:
+            if job_status.state == background_job.JobStatusStates.EXCEPTION:
                 html.td(HTML("<br>".join(loginfo["JobException"])), css="job_last_progress")
             else:
                 progress_text = ""
@@ -576,18 +468,18 @@ class JobRenderer:
             html.td("", css="job_result")
 
     @classmethod
-    def get_css_for_jobstate(cls, job_state):
+    def get_css_for_jobstate(cls, job_state: str) -> str:
         job_css_map = {
             background_job.JobStatusStates.INITIALIZED: "state statep",
             background_job.JobStatusStates.RUNNING: "state job_running",
             background_job.JobStatusStates.EXCEPTION: "state state2",
-            background_job.JobStatusStates.STOPPED: "state state2",  # same css as exception
-            background_job.JobStatusStates.FINISHED: "state state0"
+            background_job.JobStatusStates.STOPPED: "state state1",  # same css as warn
+            background_job.JobStatusStates.FINISHED: "state state0",
         }
         return job_css_map.get(job_state, "")
 
 
-#.
+# .
 #   .--Actions-------------------------------------------------------------.
 #   |                     _        _   _                                   |
 #   |                    / \   ___| |_(_) ___  _ __  ___                   |
@@ -603,8 +495,8 @@ class ActionHandler:
     delete_job_var = "_delete_job"
     acknowledge_job_var = "_acknowledge_job"
 
-    def __init__(self, breadcrumb: Breadcrumb):
-        super(ActionHandler, self).__init__()
+    def __init__(self, breadcrumb: Breadcrumb) -> None:
+        super().__init__()
         self._breadcrumb = breadcrumb
         self._did_acknowledge_job = False
         self._did_stop_job = False
@@ -638,20 +530,17 @@ class ActionHandler:
         return self._did_delete_job
 
     def acknowledge_job(self):
-        job_id = request.var(self.acknowledge_job_var)
-        job = GUIBackgroundJob(job_id)
+        job_id = request.get_ascii_input_mandatory(self.acknowledge_job_var)
+        job = BackgroundJob(job_id)
         if not job.is_available():
             return
 
         self._did_acknowledge_job = True
-        job.acknowledge(config.user.id)
+        job.acknowledge(user.id)
 
     def stop_job(self):
-        job_id = request.var(self.stop_job_var)
-        if not job_id:
-            return
-
-        job = GUIBackgroundJob(job_id)
+        job_id = request.get_ascii_input_mandatory(self.stop_job_var)
+        job = BackgroundJob(job_id)
         if not job.is_available():
             return
 
@@ -665,11 +554,8 @@ class ActionHandler:
             html.show_message(_("Background job has been stopped"))
 
     def delete_job(self):
-        job_id = request.var(self.delete_job_var)
-        if not job_id:
-            return
-
-        job = GUIBackgroundJob(job_id=job_id)
+        job_id = request.get_ascii_input_mandatory(self.delete_job_var)
+        job = BackgroundJob(job_id)
         if not job.is_available():
             return
 

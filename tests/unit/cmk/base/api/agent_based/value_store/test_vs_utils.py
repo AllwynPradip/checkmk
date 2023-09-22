@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# pylint: disable=protected-access
+from ast import literal_eval
+from pathlib import Path
+from unittest.mock import Mock
+
 import pytest
 
 from cmk.utils import store
-from cmk.utils.type_defs import CheckPluginName
+from cmk.utils.hostaddress import HostName
+
+from cmk.checkengine.checking import CheckPluginName, ServiceID
+
 from cmk.base.api.agent_based.value_store._utils import (
-    _DynamicValueStore,
-    _EffectiveValueStore,
-    _StaticValueStore,
+    _DiskSyncedMapping,
+    _DynamicDiskSyncedMapping,
+    _StaticDiskSyncedMapping,
     _ValueStore,
     ValueStoreManager,
 )
@@ -20,113 +25,112 @@ from cmk.base.api.agent_based.value_store._utils import (
 _TEST_KEY = ("check", "item", "user-key")
 
 
-class Test_DynamicValueStore:
+class Test_DynamicDiskSyncedMapping:
     @staticmethod
-    def test_init():
-        dad = _DynamicValueStore()
-        assert not dad
-        assert not dad.removed_keys
+    def _get_ddsm() -> _DynamicDiskSyncedMapping[tuple[str, str, str], object]:
+        return _DynamicDiskSyncedMapping()
 
-    @staticmethod
-    def test_removed_del():
-        dad = _DynamicValueStore()
+    def test_init(self) -> None:
+        ddsm = self._get_ddsm()
+        assert not ddsm
+        assert not ddsm.removed_keys
+
+    def test_removed_del(self) -> None:
+        ddsm = self._get_ddsm()
         try:
-            del dad[_TEST_KEY]
+            del ddsm[_TEST_KEY]
         except KeyError:
             pass
-        assert dad.removed_keys == {_TEST_KEY}
+        assert ddsm.removed_keys == {_TEST_KEY}
 
-    @staticmethod
-    def test_removed_pop():
-        dad = _DynamicValueStore()
-        dad.pop(_TEST_KEY, None)
-        assert dad.removed_keys == {_TEST_KEY}
+    def test_removed_pop(self) -> None:
+        ddsm = self._get_ddsm()
+        ddsm.pop(_TEST_KEY, None)
+        assert ddsm.removed_keys == {_TEST_KEY}
 
-    @staticmethod
-    def test_setitem():
-        dad = _DynamicValueStore()
+    def test_setitem(self) -> None:
+        ddsm = self._get_ddsm()
         value = object()
-        dad[_TEST_KEY] = value
-        assert dad[_TEST_KEY] is value
-        assert not dad.removed_keys
+        ddsm[_TEST_KEY] = value
+        assert ddsm[_TEST_KEY] is value
+        assert not ddsm.removed_keys
 
         # remove and re-add (no, this is not trivial!)
-        dad.pop(_TEST_KEY)
-        dad[_TEST_KEY] = value
-        assert not dad.removed_keys
+        ddsm.pop(_TEST_KEY)
+        ddsm[_TEST_KEY] = value
+        assert not ddsm.removed_keys
 
-    @staticmethod
-    def test_delitem():
-        dad = _DynamicValueStore()
-        dad[_TEST_KEY] = None
-        assert _TEST_KEY in dad  # setup
+    def test_delitem(self) -> None:
+        ddsm = self._get_ddsm()
+        ddsm[_TEST_KEY] = None
+        assert _TEST_KEY in ddsm  # setup
 
-        del dad[_TEST_KEY]
-        assert _TEST_KEY not in dad
+        del ddsm[_TEST_KEY]
+        assert _TEST_KEY not in ddsm
 
-    @staticmethod
-    def test_popitem():
-        dad = _DynamicValueStore()
-        dad[_TEST_KEY] = None
-        assert _TEST_KEY in dad  # setup
+    def test_popitem(self) -> None:
+        ddsm = self._get_ddsm()
+        ddsm[_TEST_KEY] = None
+        assert _TEST_KEY in ddsm  # setup
 
-        dad.pop(_TEST_KEY)
-        assert _TEST_KEY not in dad
+        ddsm.pop(_TEST_KEY)
+        assert _TEST_KEY not in ddsm
 
 
-class Test_StaticValueStore:
+class Test_StaticDiskSyncedMapping:
     def _mock_load(self, mocker):
-        stored_item_states = {
-            (
-                "check1",
-                None,
-                "stored-user-key-1",
-            ): 23,
-            (
-                "check2",
-                "item",
-                "stored-user-key-2",
-            ): 42,
-        }
+        stored_item_states = (
+            '{("check1", None, "stored-user-key-1"): 23,'
+            ' ("check2", "item", "stored-user-key-2"): 42}'
+        )
 
         mocker.patch.object(
             store,
-            "load_object_from_file",
+            "load_text_from_file",
             side_effect=lambda *a, **kw: stored_item_states,
         )
 
     def _mock_store(self, mocker):
         mocker.patch.object(
             store,
-            "save_object_to_file",
+            "save_text_to_file",
             autospec=True,
         )
 
-    def test_mapping_features(self, mocker):
+    @staticmethod
+    def _get_sdsm(
+        tmp_path: Path,
+    ) -> _StaticDiskSyncedMapping[tuple[str, str | None, str], object]:
+        return _StaticDiskSyncedMapping(
+            path=tmp_path / "test-host",
+            log_debug=lambda msg: None,
+            serializer=repr,
+            deserializer=literal_eval,
+        )
 
+    def test_mapping_features(self, mocker: Mock, tmp_path: Path) -> None:
         self._mock_load(mocker)
-        svs = _StaticValueStore("test-host", lambda msg: None)
-        assert svs.get(("check_no", None, "moo")) is None
+        sdsm = self._get_sdsm(tmp_path)
+        assert sdsm.get(("check_no", None, "moo")) is None
         with pytest.raises(KeyError):
-            _ = svs[("check_no", None, "moo")]
-        assert len(svs) == 2
+            _ = sdsm[("check_no", None, "moo")]
+        assert len(sdsm) == 2
 
-        assert svs.get(("check1", None, "stored-user-key-1")) == 23
-        assert svs[("check2", "item", "stored-user-key-2")] == 42
-        assert list(svs) == [
+        assert sdsm.get(("check1", None, "stored-user-key-1")) == 23
+        assert sdsm[("check2", "item", "stored-user-key-2")] == 42
+        assert list(sdsm) == [
             ("check1", None, "stored-user-key-1"),
             ("check2", "item", "stored-user-key-2"),
         ]
-        assert len(svs) == 2
+        assert len(sdsm) == 2
 
-    def test_store(self, mocker):
-
+    def test_store(self, mocker: Mock, tmp_path: Path) -> None:
         self._mock_load(mocker)
         self._mock_store(mocker)
 
-        svs = _StaticValueStore("test-host", lambda msg: None)
+        sdsm = self._get_sdsm(tmp_path)
 
-        svs.disksync(
+        sdsm.disksync(
             removed={("check2", "item", "stored-user-key-2")},
             updated=[(("check3", "el Barto", "Ay caramba"), "ASDF")],
         )
@@ -135,91 +139,98 @@ class Test_StaticValueStore:
             ("check1", None, "stored-user-key-1"): 23,
             ("check3", "el Barto", "Ay caramba"): "ASDF",
         }
-        written = store.save_object_to_file.call_args.args[1]  # type: ignore[attr-defined]
-        assert written == expected_values
-        assert list(svs.items()) == list(expected_values.items())
+        written = store.save_text_to_file.call_args.args[1]  # type: ignore[attr-defined]
+        assert written == repr(expected_values)
+        assert list(sdsm.items()) == list(expected_values.items())
 
 
-class Test_EffectiveValueStore:
+class Test_DiskSyncedMapping:
     @staticmethod
-    def _get_store() -> _EffectiveValueStore:
-        dynstore = _DynamicValueStore()
-        dynstore.update({
-            ("dyn", "key", "1"): "dyn-val-1",
-            ("dyn", "key", "2"): "dyn-val-2",
-        })
-        return _EffectiveValueStore(
+    def _get_dsm() -> _DiskSyncedMapping:
+        dynstore: _DynamicDiskSyncedMapping[tuple[str, str, str], str] = _DynamicDiskSyncedMapping()
+        dynstore.update(
+            {
+                ("dyn", "key", "1"): "dyn-val-1",
+                ("dyn", "key", "2"): "dyn-val-2",
+            }
+        )
+        return _DiskSyncedMapping(
             dynamic=dynstore,
-            static=
-            {  # type: ignore[arg-type]
+            static={  # type: ignore[arg-type]
                 ("stat", "key", "1"): "stat-val-1",
                 ("stat", "key", "2"): "stat-val-2",
             },
         )
 
-    def test_getitem(self):
-        evs = self._get_store()
-        assert evs[("stat", "key", "1")] == "stat-val-1"
-        assert evs.get(("stat", "key", "2")) == "stat-val-2"
-        assert evs.get(("stat", "key", "3")) is None
-        assert evs[("dyn", "key", "1")] == "dyn-val-1"
-        assert evs.get(("dyn", "key", "2")) == "dyn-val-2"
-        assert evs.get(("dyn", "key", "3")) is None
+    def test_getitem(self) -> None:
+        dsm = self._get_dsm()
+        assert dsm[("stat", "key", "1")] == "stat-val-1"
+        assert dsm.get(("stat", "key", "2")) == "stat-val-2"
+        assert dsm.get(("stat", "key", "3")) is None
+        assert dsm[("dyn", "key", "1")] == "dyn-val-1"
+        assert dsm.get(("dyn", "key", "2")) == "dyn-val-2"
+        assert dsm.get(("dyn", "key", "3")) is None
 
-    def test_delitem(self):
-        evs = self._get_store()
-        assert ("stat", "key", "1") in evs
-        assert ("dyn", "key", "2") in evs
+    def test_delitem(self) -> None:
+        dsm = self._get_dsm()
+        assert ("stat", "key", "1") in dsm
+        assert ("dyn", "key", "2") in dsm
 
-        del evs[("stat", "key", "1")]
-        assert ("stat", "key", "1") not in evs
+        del dsm[("stat", "key", "1")]
+        assert ("stat", "key", "1") not in dsm
 
         with pytest.raises(KeyError):
-            del evs[("stat", "key", "1")]
+            del dsm[("stat", "key", "1")]
 
-        del evs[("dyn", "key", "1")]
-        assert ("dyn", "key", "1") not in evs
+        del dsm[("dyn", "key", "1")]
+        assert ("dyn", "key", "1") not in dsm
 
-    def test_pop(self):
-        evs = self._get_store()
-        assert ("stat", "key", "1") in evs
-        assert ("dyn", "key", "2") in evs
+    def test_pop(self) -> None:
+        dsm = self._get_dsm()
+        assert ("stat", "key", "1") in dsm
+        assert ("dyn", "key", "2") in dsm
 
-        evs.pop(("stat", "key", "1"))
-        assert ("stat", "key", "1") not in evs
+        dsm.pop(("stat", "key", "1"))
+        assert ("stat", "key", "1") not in dsm
 
-        evs.pop(("dyn", "key", "1"))
-        assert ("dyn", "key", "1") not in evs
+        dsm.pop(("dyn", "key", "1"))
+        assert ("dyn", "key", "1") not in dsm
 
-    def test_iter(self):
-        evs = self._get_store()
-        assert sorted(evs) == [("dyn", "key", "1"), ("dyn", "key", "2"), ("stat", "key", "1"),
-                               ("stat", "key", "2")]
+    def test_iter(self) -> None:
+        dsm = self._get_dsm()
+        assert sorted(dsm) == [
+            ("dyn", "key", "1"),
+            ("dyn", "key", "2"),
+            ("stat", "key", "1"),
+            ("stat", "key", "2"),
+        ]
 
-        evs.pop(("stat", "key", "1"))
-        assert sorted(evs) == [("dyn", "key", "1"), ("dyn", "key", "2"), ("stat", "key", "2")]
+        dsm.pop(("stat", "key", "1"))
+        assert sorted(dsm) == [("dyn", "key", "1"), ("dyn", "key", "2"), ("stat", "key", "2")]
 
-        evs.pop(("dyn", "key", "2"))
-        assert sorted(evs) == [("dyn", "key", "1"), ("stat", "key", "2")]
+        dsm.pop(("dyn", "key", "2"))
+        assert sorted(dsm) == [("dyn", "key", "1"), ("stat", "key", "2")]
 
 
 class Test_ValueStore:
     @staticmethod
     def _get_store() -> _ValueStore:
+        host_name = HostName("moritz")
         return _ValueStore(
             data={
-                ("check1", "item", "key1"): 42,
-                ("check2", "item", "key2"): 23,
+                (host_name, "check1", "item", "key1"): 42,
+                (host_name, "check2", "item", "key2"): 23,
             },
             service_id=(CheckPluginName("check1"), "item"),
+            host_name=host_name,
         )
 
-    def test_separation(self):
+    def test_separation(self) -> None:
         s_store = self._get_store()
         assert "key1" in s_store
         assert "key2" not in s_store
 
-    def test_invalid_key(self):
+    def test_invalid_key(self) -> None:
         s_store = self._get_store()
         with pytest.raises(TypeError):
             s_store[2] = "key must be string!"  # type: ignore[index]
@@ -227,10 +238,10 @@ class Test_ValueStore:
 
 class TestValueStoreManager:
     @staticmethod
-    def test_namespace_context():
-        vsm = ValueStoreManager("test-host")
-        service_inner = (CheckPluginName("unit_test_inner"), None)
-        service_outer = (CheckPluginName("unit_test_outer"), None)
+    def test_namespace_context() -> None:
+        vsm = ValueStoreManager(HostName("test-host"))
+        service_inner = ServiceID(CheckPluginName("unit_test_inner"), None)
+        service_outer = ServiceID(CheckPluginName("unit_test_outer"), None)
 
         assert vsm.active_service_interface is None
 

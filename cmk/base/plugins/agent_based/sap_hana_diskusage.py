@@ -1,24 +1,21 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Any, Mapping, Dict
+from collections.abc import Mapping, Sequence
+from typing import Any
 
-from .utils import sap_hana, df
 from .agent_based_api.v1 import (
-    register,
-    Service,
-    Result,
-    State,
     get_value_store,
+    IgnoreResultsError,
+    register,
+    Result,
+    Service,
+    State,
 )
-from .agent_based_api.v1.type_defs import (
-    DiscoveryResult,
-    StringTable,
-    CheckResult,
-)
+from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult, StringTable
+from .utils import df, sap_hana
 
 
 def parse_sap_hana_diskusage(string_table: StringTable) -> sap_hana.ParsedSection:
@@ -28,9 +25,12 @@ def parse_sap_hana_diskusage(string_table: StringTable) -> sap_hana.ParsedSectio
         for line in lines:
             if len(line) < 3:
                 continue
-            inst = section.setdefault("%s - %s" % (sid_instance, line[0]), {
-                "state_name": line[1],
-            })
+            inst = section.setdefault(
+                f"{sid_instance} - {line[0]}",
+                {
+                    "state_name": line[1],
+                },
+            )
             inst.update(_extract_size_and_used_from_line(line))
     return section
 
@@ -41,9 +41,9 @@ register.agent_section(
 )
 
 
-def _extract_size_and_used_from_line(line: str) -> Dict[str, float]:
+def _extract_size_and_used_from_line(line: Sequence[str]) -> dict[str, float]:
     # Values are measured in GB. Are other factors possible? (Query)
-    inst_values: Dict[str, float] = {}
+    inst_values: dict[str, float] = {}
     splitted_line = line[-1].split()
     for key, index in [
         ("size", 1),
@@ -61,11 +61,12 @@ def discovery_sap_hana_diskusage(section: sap_hana.ParsedSection) -> DiscoveryRe
         yield Service(item=item)
 
 
-def check_sap_hana_diskusage(item: str, params: Mapping[str, Any],
-                             section: sap_hana.ParsedSection) -> CheckResult:
+def check_sap_hana_diskusage(
+    item: str, params: Mapping[str, Any], section: sap_hana.ParsedSection
+) -> CheckResult:
     data = section.get(item)
     if not data:
-        return
+        raise IgnoreResultsError("Login into database failed.")
 
     state_name = data["state_name"]
     if state_name == "OK":
@@ -93,6 +94,5 @@ register.check_plugin(
     discovery_function=discovery_sap_hana_diskusage,
     check_function=check_sap_hana_diskusage,
     check_ruleset_name="filesystem",
-    check_default_parameters=df.FILESYSTEM_DEFAULT_LEVELS,
-    cluster_check_function=sap_hana.get_cluster_check_with_params(check_sap_hana_diskusage),
+    check_default_parameters=df.FILESYSTEM_DEFAULT_PARAMS,
 )

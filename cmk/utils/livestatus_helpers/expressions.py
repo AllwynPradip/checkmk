@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2020 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2020 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """
@@ -13,35 +12,38 @@ string concatenation.
 It's implementation is still a bit rudimentary but supports most necessary concepts already.
 
 """
+from __future__ import annotations
 
 import abc
-from typing import Any, List, Tuple, cast
+
+Primitives = str | int | bool | float | list[str] | tuple[str, ...]
 
 # TODO: column functions
 # TODO: more tests
 
-RenderIntermediary = List[Tuple[str, str]]
+RenderIntermediary = list[tuple[str, str]]
 
 LIVESTATUS_OPERATORS = [
-    '=',
-    '<',
-    '>',
-    '<=',
-    '>=',
-    '~',
-    '~~',
-    '!=',
-    '!<',
-    '!>',
-    '!<=',
-    '!>=',
-    '!~',
-    '!~~',
+    "=",
+    "<",
+    ">",
+    "<=",
+    ">=",
+    "~",
+    "~~",
+    "!=",
+    "!<",
+    "!>",
+    "!<=",
+    "!>=",
+    "!~",
+    "!~~",
 ]
 
 
 class QueryExpression(abc.ABC):
     """Baseclass of all 'Filter:' expressions."""
+
     @abc.abstractmethod
     def render(self) -> RenderIntermediary:
         raise NotImplementedError()
@@ -69,59 +71,68 @@ class NothingExpression(QueryExpression):
     [('Filter', 'foo = bar')]
 
     """
+
     def render(self) -> RenderIntermediary:
         return []
 
 
 class UnaryExpression(abc.ABC):
     """Base class of all concrete single parts of BinaryExpression."""
-    def __init__(self, value):
+
+    def __init__(self, value: str) -> None:
+        # The value is used in the __repr__, if we don't set it before raising
+        # the exception we get a new exception when the __repr__ is called,
+        # e.g. by the crash reporting
         self.value = value
+        if "\n" in value:
+            raise ValueError("Illegal newline character in query")
 
-    def op(self, operator: str, other: Any) -> 'BinaryExpression':
-        # TODO: typing
+    def op(self, operator: str, other: UnaryExpression | Primitives) -> BinaryExpression:
+        other_expr: UnaryExpression
         if isinstance(other, (list, tuple)):
-            other = LiteralExpression(' '.join(other))
-        if not isinstance(other, UnaryExpression):
-            other = LiteralExpression(other)
-        return BinaryExpression(self, other, operator)
+            other_expr = LiteralExpression(" ".join(other))
+        elif isinstance(other, UnaryExpression):
+            other_expr = other
+        else:
+            other_expr = LiteralExpression(str(other))
+        return BinaryExpression(self, other_expr, operator)
 
-    def __repr__(self):
-        return "<%s %s 0x%x>" % (self.__class__.__name__, self.value, id(self))
+    def __repr__(self) -> str:
+        return f"<{self.__class__.__name__} {self.value} 0x{id(self):x}>"
 
     @abc.abstractmethod
-    def __eq__(self, other):
+    def __eq__(self, other: Primitives) -> BinaryExpression:  # type: ignore[override]
         raise NotImplementedError()
 
-    def __lt__(self, other):
+    def __lt__(self, other: Primitives) -> BinaryExpression:
         return self.op("<", other)
 
-    def __gt__(self, other):
+    def __gt__(self, other: Primitives) -> BinaryExpression:
         return self.op(">", other)
 
-    def __le__(self, other):
+    def __le__(self, other: Primitives) -> BinaryExpression:
         return self.op("<=", other)
 
-    def __ge__(self, other):
+    def __ge__(self, other: Primitives) -> BinaryExpression:
         return self.op(">=", other)
 
-    def __ne__(self, other):
+    def __ne__(self, other: Primitives) -> Not:  # type: ignore[override]
         return Not(self.__eq__(other))
 
     @abc.abstractmethod
-    def equals(self, other, ignore_case=False):
+    def equals(self, other: Primitives, ignore_case: bool = False) -> BinaryExpression:
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def contains(self, other, ignore_case=False):
+    def contains(self, other: Primitives, ignore_case: bool = False) -> BinaryExpression:
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def disparity(self, other, ignore_case=False):
+    def disparity(self, other: Primitives, ignore_case: bool = False) -> BinaryExpression:
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def empty(self):
+    def empty(self) -> BinaryExpression:
         raise NotImplementedError()
 
 
@@ -144,25 +155,26 @@ class ScalarExpression(UnaryExpression):
     <= 	Smaller or equal 	Lexicographically smaller or equal
     >= 	Larger or equal 	Lexicographically larger or equal
     """
-    def __eq__(self, other):
+
+    def __eq__(self, other: Primitives) -> BinaryExpression:  # type: ignore[override]
         return self.op("=", other)
 
-    def equals(self, other, ignore_case=False):
+    def equals(self, other: Primitives, ignore_case: bool = False) -> BinaryExpression:
         if ignore_case:
             return self.op("=~", other)
 
         return self.op("=", other)
 
-    def contains(self, other, ignore_case=False):
+    def contains(self, other: Primitives, ignore_case: bool = False) -> BinaryExpression:
         if ignore_case:
             return self.op("~~", other)
 
         return self.op("~", other)
 
-    def empty(self):
+    def empty(self) -> BinaryExpression:
         raise NotImplementedError("Not implemented for this type.")
 
-    def disparity(self, other, ignore_case=False):
+    def disparity(self, other: Primitives, ignore_case: bool = False) -> BinaryExpression:
         raise NotImplementedError("Not implemented for this type.")
 
 
@@ -180,10 +192,11 @@ class ListExpression(UnaryExpression):
     Filter(column = )
 
     """
-    def __eq__(self, other):
+
+    def __eq__(self, other: Primitives) -> BinaryExpression:  # type: ignore[override]
         return self.equals(other)
 
-    def equals(self, other, ignore_case=False):
+    def equals(self, other: Primitives, ignore_case: bool = False) -> BinaryExpression:
         if not other:
             # Check for empty list
             op = "="
@@ -196,17 +209,17 @@ class ListExpression(UnaryExpression):
                 op = ">="
         return self.op(op, other)
 
-    def disparity(self, other, ignore_case=False):
+    def disparity(self, other: Primitives, ignore_case: bool = False) -> BinaryExpression:
         if ignore_case:
             op = ">"
         else:
             op = "<"
         return self.op(op, other)
 
-    def contains(self, other, ignore_case=False):
+    def contains(self, other: Primitives, ignore_case: bool = False) -> BinaryExpression:
         return self.op("~~", other)
 
-    def empty(self):
+    def empty(self) -> BinaryExpression:
         return self.op("=", LiteralExpression(""))
 
 
@@ -221,17 +234,19 @@ class LiteralExpression(ScalarExpression):
       We make sure not to accidentally send query terminating newlines.
 
         >>> LiteralExpression("blah\\n\\n").render()
-        [('', 'blah')]
-
+        Traceback (most recent call last):
+            ...
+        ValueError: Illegal newline character in query
     """
-    def disparity(self, other, ignore_case=False):
+
+    def disparity(self, other: Primitives, ignore_case: bool = False) -> BinaryExpression:
         raise NotImplementedError("Not implemented for this type.")
 
-    def empty(self):
+    def empty(self) -> BinaryExpression:
         raise NotImplementedError("Not implemented for this type.")
 
     def render(self) -> RenderIntermediary:
-        return [('', self.value.replace("\n", ""))]
+        return [("", self.value.replace("\n", ""))]
 
 
 LivestatusOperator = str
@@ -242,16 +257,19 @@ class BinaryExpression(QueryExpression):
 
     Examples:
 
-        >>> fexp = LiteralExpression("hurz") == LiteralExpression("blah")
+        >>> fexp: BinaryExpression = LiteralExpression("hurz") == LiteralExpression("blah")
         >>> fexp.render()
         [('Filter', 'hurz = blah')]
 
     """
-    def __init__(self,
-                 left: UnaryExpression,
-                 right: UnaryExpression,
-                 operator: LivestatusOperator,
-                 header: str = 'Filter'):
+
+    def __init__(
+        self,
+        left: UnaryExpression,
+        right: UnaryExpression,
+        operator: LivestatusOperator,
+        header: str = "Filter",
+    ):
         """Represent a binary operation.
 
         Note:
@@ -280,35 +298,32 @@ class BinaryExpression(QueryExpression):
         self.operator = operator
         self._header = header
 
-    def __repr__(self):
-        return "%s(%s %s %s)" % (
+    def __repr__(self) -> str:
+        return "{}({} {} {})".format(
             self._header,
             self.left.value,
             self.operator,
             self.right.value,
         )
 
-    def __str__(self):
-        return "%s %s %s" % (self.left.value, self.operator, self.right.value)
+    def __str__(self) -> str:
+        return f"{self.left.value} {self.operator} {self.right.value}"
 
     def render(self) -> RenderIntermediary:
         return [(self._header, str(self))]
 
 
 class BoolExpression(QueryExpression):
-    @property
-    @abc.abstractmethod
-    def expr(self):
-        raise NotImplementedError()
+    expr: str
 
-    def __init__(self, *args: QueryExpression):
+    def __init__(self, *args: QueryExpression) -> None:
         self.args = args
         if not args:
             # For now this seems reasonable, but there are cases where it could be advantageous
             # to have empty arguments, though we'd have to decide on an actual use-case to be sure.
             raise ValueError("Need at least one parameter.")
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"{self.expr}{self.args!r}"
 
     def render(self) -> RenderIntermediary:
@@ -339,6 +354,7 @@ class And(BoolExpression):
     [('Filter', 'blah = 1'), ('Filter', 'hallo = 0'), ('And', '2')]
 
     """
+
     expr = "And"
 
 
@@ -349,6 +365,7 @@ class Or(BoolExpression):
     [('Filter', 'blah = 1'), ('Filter', 'hallo = 0'), ('Or', '2')]
 
     """
+
     expr = "Or"
 
 
@@ -359,134 +376,12 @@ class Not(QueryExpression):
     [('Filter', 'hurz = 1'), ('Negate', '1')]
 
     """
-    def __init__(self, other: QueryExpression):
+
+    def __init__(self, other: QueryExpression) -> None:
         self.other = other
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"Not({self.other!r})"
 
     def render(self) -> RenderIntermediary:
         return self.other.render() + [("Negate", "1")]
-
-
-def lookup_column(table_name, column_name) -> UnaryExpression:
-    from cmk.utils.livestatus_helpers import tables
-    if isinstance(table_name, str):
-        table_class = getattr(tables, table_name.title())
-    else:
-        table_class = table_name
-        table_name = table_class.__tablename__
-
-    try:
-        column = getattr(table_class, column_name)
-    except AttributeError as e:
-        raise ValueError(f"Table {table_name!r} has no column {column_name!r}.") from e
-    return column.expr
-
-
-def tree_to_expr(filter_dict, table: Any = None) -> QueryExpression:
-    """Turn a filter-dict into a QueryExpression.
-
-    Examples:
-
-        >>> tree_to_expr({'op': '=', 'left': 'hosts.name', 'right': 'example.com'})
-        Filter(name = example.com)
-
-        >>> tree_to_expr({'op': '!=', 'left': 'hosts.name', 'right': 'example.com'})
-        Filter(name != example.com)
-
-        >>> tree_to_expr({'op': '!=', 'left': 'name', 'right': 'example.com'}, 'hosts')
-        Filter(name != example.com)
-
-        >>> tree_to_expr({'op': 'and', \
-                          'expr': [{'op': '=', 'left': 'hosts.name', 'right': 'example.com'}, \
-                          {'op': '=', 'left': 'hosts.state', 'right': 0}]})
-        And(Filter(name = example.com), Filter(state = 0))
-
-        >>> tree_to_expr({'op': 'or', \
-                          'expr': [{'op': '=', 'left': 'hosts.name', 'right': 'example.com'}, \
-                          {'op': '=', 'left': 'hosts.name', 'right': 'heute'}]})
-        Or(Filter(name = example.com), Filter(name = heute))
-
-        >>> tree_to_expr({'op': 'not', \
-                          'expr': {'op': '=', 'left': 'hosts.name', 'right': 'example.com'}})
-        Not(Filter(name = example.com))
-
-        >>> tree_to_expr({'op': 'not', \
-                          'expr': {'op': 'not', \
-                                   'expr': {'op': '=', \
-                                            'left': 'hosts.name', \
-                                            'right': 'example.com'}}})
-        Not(Not(Filter(name = example.com)))
-
-        >>> from cmk.utils.livestatus_helpers.tables import Hosts
-        >>> tree_to_expr({'op': 'not', 'expr': Hosts.name == 'example.com'})
-        Not(Filter(name = example.com))
-
-        >>> tree_to_expr({'op': 'no_way', \
-                          'expr': {'op': '=', 'left': 'hosts.name', 'right': 'example.com'}})
-        Traceback (most recent call last):
-        ...
-        ValueError: Unknown operator: no_way
-
-    Args:
-        filter_dict:
-            A filter-dict, which can either be persisted or passed over the wire.
-
-        table:
-            Optionally a table name. Only used when the columns are used in plain form
-            (without table name prefixes).
-
-    Returns:
-        A valid LiveStatus query expression.
-
-    Raises:
-        ValueError: when unknown columns are queried
-
-    """
-    if not isinstance(filter_dict, dict):
-        # FIXME
-        #   Because of not having correct Python packages at the root-level, sometimes a
-        #   locally defined class ends up having a relative dotted path, like for example
-        #       <class 'expressions.BinaryExpression'>
-        #   instead of
-        #       <class 'cmk.utils.livestatus_helpers.expressions.BinaryExpression'>
-        #   While these classes are actually the same, Python treats them distinct, so we can't
-        #   just say `isinstance(filter_dict, BinaryExpression)` (or their super-type) here.
-        return cast(QueryExpression, filter_dict)
-    op = filter_dict['op']
-    if op in LIVESTATUS_OPERATORS:
-        left = filter_dict['left']
-        if "." in left:
-            _table, column = left.split(".")
-            if table is not None and _table_name(table) != _table:
-                raise ValueError(
-                    f"This field can only query table {_table_name(table)!r}. ({left})")
-        else:
-            if table is None:
-                raise ValueError("Missing table parameter.")
-            _table = _table_name(table)
-            column = left
-        return BinaryExpression(
-            lookup_column(_table, column),
-            LiteralExpression(filter_dict['right']),
-            op,
-        )
-
-    if op == 'and':
-        return And(*[tree_to_expr(expr, table) for expr in filter_dict['expr']])
-
-    if op == 'or':
-        return Or(*[tree_to_expr(expr, table) for expr in filter_dict['expr']])
-
-    if op == 'not':
-        return Not(tree_to_expr(filter_dict['expr'], table))
-
-    raise ValueError(f"Unknown operator: {op}")
-
-
-def _table_name(table) -> str:
-    if isinstance(table, str):
-        return table
-
-    return table.__tablename__

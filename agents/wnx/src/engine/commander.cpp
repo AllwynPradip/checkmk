@@ -1,16 +1,16 @@
-// Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+// Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 // This file is part of Checkmk (https://checkmk.com). It is subject to the
 // terms and conditions defined in the file COPYING, which is part of this
 // source code package.
 
 #include "stdafx.h"
 
-#include "commander.h"
+#include "wnx/commander.h"
 
-#include <string>
+#include <string_view>
 
-#include "cfg.h"
-#include "logger.h"
+#include "wnx/cfg.h"
+#include "wnx/logger.h"
 
 namespace cma::commander {
 
@@ -20,31 +20,34 @@ std::mutex g_run_command_processor_lock{};
 }  // namespace
 
 bool RunCommand(std::string_view peer, std::string_view cmd) {
-    if (!cma::tools::IsEqual(peer, kMainPeer)) {
+    if (!tools::IsEqual(peer, kMainPeer)) {
         XLOG::d("Peer name '{}' is invalid", peer);
         return false;
     }
 
-    if (cmd.empty()) return false;
+    if (cmd.empty()) {
+        return false;
+    }
 
-    if (cma::tools::IsEqual(cmd, kReload)) {
+    if (tools::IsEqual(cmd, kReload)) {
         XLOG::l.t("Commander: Reload");
 
-        cma::ReloadConfig();  // command line
+        ReloadConfig();  // command line
         return true;
     }
 
-    if (cma::tools::IsEqual(cmd, kPassTrue)) {
+    if (tools::IsEqual(cmd, kPassTrue)) {
         XLOG::l.t("Commander: Pass True");
         return true;
     }
 
-    if (cma::tools::IsEqual(cmd, kUninstallAlert)) {
+    if (tools::IsEqual(cmd, kUninstallAlert)) {
         XLOG::l.t("Commander: Alert of Uninstall");
-        if (cma::IsTest()) return false;
-        if (!cma::IsService()) return false;
+        if (GetModus() != Modus::service) {
+            return false;
+        }
 
-        cma::g_uninstall_alert.set();
+        g_uninstall_alert.set();
         return true;
     }
 

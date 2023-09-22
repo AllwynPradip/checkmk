@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import NamedTuple
 import argparse
-import time
 import json
 import sys
+import time
+from typing import NamedTuple
+
 import requests
-import urllib3  # type: ignore[import]
+import urllib3
+
 import cmk.utils.password_store
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 cmk.utils.password_store.replace_passwords()
 
-GraylogSection = NamedTuple("GraylogSection", [
-    ("name", str),
-    ("uri", str),
-])
+
+class GraylogSection(NamedTuple):
+    name: str
+    uri: str
 
 
 def main(argv=None):
@@ -46,6 +47,7 @@ def main(argv=None):
         GraylogSection(name="sidecars", uri="/sidecars/all"),
         GraylogSection(name="sources", uri="/sources"),
         GraylogSection(name="streams", uri="/streams"),
+        GraylogSection(name="events", uri="/events/search"),
     ]
 
     try:
@@ -57,8 +59,8 @@ def main(argv=None):
     return 0
 
 
-def handle_request(args, sections):
-    url_base = "%s://%s:%s/api" % (args.proto, args.hostname, args.port)
+def handle_request(args, sections):  # pylint: disable=too-many-branches
+    url_base = f"{args.proto}://{args.hostname}:{args.port}/api"
 
     for section in sections:
         if section.name not in args.sections:
@@ -66,7 +68,10 @@ def handle_request(args, sections):
 
         url = url_base + section.uri
 
-        value = handle_response(url, args).json()
+        if section.name == "events":
+            value = handle_response(url, args, "POST").json()
+        else:
+            value = handle_response(url, args).json()
 
         # add failure details
         if section.name == "failures":
@@ -101,7 +106,6 @@ def handle_request(args, sections):
 
             new_value = {}
             for metric in value["metrics"]:
-
                 metric_value = metric.get("metric", {}).get("value")
                 metric_name = metric.get("full_name")
                 if metric_value is None or metric_name is None:
@@ -124,32 +128,120 @@ def handle_request(args, sections):
                 if sidecar_list:
                     handle_output(sidecar_list, section.name, args)
 
+        if section.name == "events":
+            num_of_events = value.get("total_events", 0)
+            num_of_events_in_range = 0
+            events_since_argument = args.events_since
+
+            if events_since_argument:
+                num_of_events_in_range = (
+                    handle_response(
+                        url=url,
+                        args=args,
+                        method="POST",
+                        events_since=args.events_since,
+                    )
+                    .json()
+                    .get("total_events", 0)
+                )
+
+            events = {
+                "events": {
+                    "num_of_events": num_of_events,
+                    "has_since_argument": bool(events_since_argument),
+                    "events_since": events_since_argument if events_since_argument else None,
+                    "num_of_events_in_range": num_of_events_in_range,
+                }
+            }
+            handle_output([events], section.name, args)
+
+        if section.name == "alerts":
+            num_of_alerts = value.get("total", 0)
+            num_of_alerts_in_range = 0
+            alerts_since_argument = args.alerts_since
+
+            if alerts_since_argument:
+                url_alerts_in_range = f"{url}%since={str(alerts_since_argument)}"
+                num_of_alerts_in_range = (
+                    handle_response(url_alerts_in_range, args).json().get("total", 0)
+                )
+
+            alerts = {
+                "alerts": {
+                    "num_of_alerts": num_of_alerts,
+                    "has_since_argument": bool(alerts_since_argument),
+                    "alerts_since": alerts_since_argument if alerts_since_argument else None,
+                    "num_of_alerts_in_range": num_of_alerts_in_range,
+                }
+            }
+            handle_output([alerts], section.name, args)
+
         if section.name == "sources":
-            sources = value.get("sources")
-            if sources is not None:
-                source_list = []
+            sources_in_range = {}
+            source_since_argument = args.source_since
+
+            if source_since_argument:
+                url_sources_in_range = f"{url_base}/sources?range={str(source_since_argument)}"
+                sources_in_range = (
+                    handle_response(url_sources_in_range, args).json().get("sources", {})
+                )
+
+            if (sources := value.get("sources")) is None:
+                continue
+
+            value = {"sources": {}}
+            for source, messages in sources.items():
+                value["sources"].setdefault(
+                    source,
+                    {
+                        "messages": messages,
+                        "has_since_argument": bool(source_since_argument),
+                        "source_since": source_since_argument if source_since_argument else None,
+                    },
+                )
+
+                if source in sources_in_range:
+                    value["sources"][source].update(
+                        {
+                            "messages_since": sources_in_range[source],
+                        }
+                    )
+
                 if args.display_source_details == "source":
-                    for source, messages in sources.items():
-                        value = {"sources": {source: messages}}
-                        handle_piggyback(value, args, source, section.name)
-                        continue
-                else:
-                    source_list.append(value)
+                    handle_piggyback(value, args, source, section.name)
+                    value = {"sources": {}}
 
-                if source_list:
-                    handle_output(source_list, section.name, args)
+            if args.display_source_details == "host":
+                handle_output([value], section.name, args)
 
-        if section.name not in ["nodes", "sidecars", "sources"]:
+        if section.name not in ["nodes", "sidecars", "sources", "alerts", "events"]:
             handle_output(value, section.name, args)
 
 
-def handle_response(url, args):
-    try:
-        response = requests.get(url, auth=(args.user, args.password))
-    except requests.exceptions.RequestException as e:
-        sys.stderr.write("Error: %s\n" % e)
-        if args.debug:
-            raise
+def handle_response(url, args, method="GET", events_since=86400):
+    if method == "POST":
+        try:
+            response = requests.post(  # nosec B113
+                url,
+                auth=(args.user, args.password),
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Requested-By": args.user,
+                },
+                json={"timerange": {"type": "relative", "range": events_since}},
+            )
+        except requests.exceptions.RequestException as e:
+            sys.stderr.write("Error: %s\n" % e)
+            if args.debug:
+                raise
+
+    else:
+        try:
+            response = requests.get(url, auth=(args.user, args.password))  # nosec B113
+        except requests.exceptions.RequestException as e:
+            sys.stderr.write("Error: %s\n" % e)
+            if args.debug:
+                raise
 
     return response
 
@@ -181,56 +273,93 @@ def handle_piggyback(value, args, piggyback_name, section):
 
 def parse_arguments(argv):
     sections = [
-        "alerts", "cluster_stats", "cluster_traffic", "failures", "jvm", "license", "messages",
-        "nodes", "sidecars", "sources", "streams"
+        "alerts",
+        "cluster_stats",
+        "cluster_traffic",
+        "failures",
+        "jvm",
+        "license",
+        "messages",
+        "nodes",
+        "sidecars",
+        "sources",
+        "streams",
+        "events",
     ]
 
     parser = argparse.ArgumentParser(description=__doc__)
 
     parser.add_argument("-u", "--user", default=None, help="Username for graylog login")
     parser.add_argument("-s", "--password", default=None, help="Password for graylog login")
-    parser.add_argument("-P",
-                        "--proto",
-                        default="https",
-                        help="Use 'http' or 'https' for connection to graylog (default=https)")
-    parser.add_argument("-p",
-                        "--port",
-                        default=443,
-                        type=int,
-                        help="Use alternative port (default: 443)")
-    parser.add_argument("-t",
-                        "--since",
-                        default=1800,
-                        type=int,
-                        help="The time in seconds, since when failures should be covered")
+    parser.add_argument(
+        "-P",
+        "--proto",
+        default="https",
+        help="Use 'http' or 'https' for connection to graylog (default=https)",
+    )
+    parser.add_argument(
+        "-p", "--port", default=443, type=int, help="Use alternative port (default: 443)"
+    )
+    parser.add_argument(
+        "-t",
+        "--since",
+        default=1800,
+        type=int,
+        help="The time in seconds, since when failures should be covered",
+    )
+    parser.add_argument(
+        "--source_since",
+        default=None,
+        type=int,
+        help="The time in seconds, since when source messages should be covered",
+    )
+    parser.add_argument(
+        "--alerts_since",
+        default=None,
+        type=int,
+        help="The time in seconds, since when alerts should be covered",
+    )
+    parser.add_argument(
+        "--events_since",
+        default=None,
+        type=int,
+        help="The time in seconds, since when events should be covered",
+    )
     parser.add_argument(
         "-m",
         "--sections",
         default=sections,
-        help="""Comma seperated list of data to query. Possible values: %s (default: all)""" %
-        ", ".join(sections))
-    parser.add_argument("--display_node_details",
-                        default=None,
-                        choices=('host', 'node'),
-                        help="""You can optionally choose, where the node details are shown.
-        Default is the queried graylog host. Possible values: host, node (default: host)""")
-    parser.add_argument("--display_sidecar_details",
-                        default="host",
-                        choices=('host', 'sidecar'),
-                        help="""You can optionally choose, where the sidecar details are shown.
-        Default is the queried graylog host. Possible values: host, sidecar (default: host)""")
-    parser.add_argument("--display_source_details",
-                        default="host",
-                        choices=('host', 'source'),
-                        help="""You can optionally choose, where the source details are shown.
-        Default is the queried graylog host. Possible values: host, source (default: host)""")
-    parser.add_argument("--debug",
-                        action="store_true",
-                        help="Debug mode: let Python exceptions come through")
+        help="""Comma seperated list of data to query. Possible values: %s (default: all)"""
+        % ", ".join(sections),
+    )
+    parser.add_argument(
+        "--display_node_details",
+        default=None,
+        choices=("host", "node"),
+        help="""You can optionally choose, where the node details are shown.
+        Default is the queried graylog host. Possible values: host, node (default: host)""",
+    )
+    parser.add_argument(
+        "--display_sidecar_details",
+        default="host",
+        choices=("host", "sidecar"),
+        help="""You can optionally choose, where the sidecar details are shown.
+        Default is the queried graylog host. Possible values: host, sidecar (default: host)""",
+    )
+    parser.add_argument(
+        "--display_source_details",
+        default="host",
+        choices=("host", "source"),
+        help="""You can optionally choose, where the source details are shown.
+        Default is the queried graylog host. Possible values: host, source (default: host)""",
+    )
+    parser.add_argument(
+        "--debug", action="store_true", help="Debug mode: let Python exceptions come through"
+    )
 
-    parser.add_argument("hostname",
-                        metavar="HOSTNAME",
-                        help="Name of the graylog instance to query.")
+    parser.add_argument(
+        "hostname", metavar="HOSTNAME", help="Name of the graylog instance to query."
+    )
 
     return parser.parse_args(argv)
 

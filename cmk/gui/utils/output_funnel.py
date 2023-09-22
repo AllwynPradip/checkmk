@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Iterator, List
 
-from cmk.gui.http import Response
+from flask import Response
+
+from cmk.gui.ctx_stack import request_local_attr
 
 
 class OutputFunnel:
@@ -26,8 +27,9 @@ class OutputFunnel:
            html_code = html.drain()
         print(html_code)
     """
+
     def __init__(self, response: Response) -> None:
-        self._response_stack: List[Response] = [response]
+        self._response_stack: list[Response] = [response]
 
     def write(self, data: bytes) -> None:
         self._response_stack[-1].stream.write(data)
@@ -54,3 +56,6 @@ class OutputFunnel:
         text = self._response_stack.pop().get_data(as_text=True)
         self._response_stack.append(Response())
         return text
+
+
+output_funnel = request_local_attr("output_funnel", OutputFunnel)

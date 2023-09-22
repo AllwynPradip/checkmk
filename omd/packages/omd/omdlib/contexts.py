@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- encoding: utf-8; py-indent-offset: 4 -*-
 #
 #       U  ___ u  __  __   ____
 #        \/"_ \/U|' \/ '|u|  _"\
@@ -26,51 +25,56 @@
 import abc
 import os
 import sys
-from typing import cast, Optional
-
-from cmk.utils.exceptions import MKTerminate
+from pathlib import Path
+from typing import cast
 
 import omdlib
 import omdlib.utils
 from omdlib.init_scripts import check_status
-from omdlib.config_hooks import call_hook, sort_hooks
-from omdlib.utils import is_dockerized
-from omdlib.type_defs import Config, Replacements
 from omdlib.skel_permissions import load_skel_permissions, load_skel_permissions_from, Permissions
+from omdlib.type_defs import Config, Replacements
+from omdlib.utils import is_containerized
+
+from cmk.utils.exceptions import MKTerminate
+from cmk.utils.version import edition
 
 
-class AbstractSiteContext(metaclass=abc.ABCMeta):
+class AbstractSiteContext(abc.ABC):
     """Object wrapping site specific information"""
-    def __init__(self, sitename: Optional[str]) -> None:
-        super(AbstractSiteContext, self).__init__()
+
+    def __init__(self, sitename: str | None) -> None:
+        super().__init__()
         self._sitename = sitename
         self._config_loaded = False
         self._config: Config = {}
 
     @property
-    def name(self) -> Optional[str]:
+    def name(self) -> str | None:
         return self._sitename
 
-    @abc.abstractproperty
-    def version(self) -> Optional[str]:
+    @property
+    @abc.abstractmethod
+    def version(self) -> str | None:
         raise NotImplementedError()
 
-    @abc.abstractproperty
+    @property
+    @abc.abstractmethod
     def dir(self) -> str:
         raise NotImplementedError()
 
-    @abc.abstractproperty
+    @property
+    @abc.abstractmethod
     def tmp_dir(self) -> str:
         raise NotImplementedError()
 
-    @abc.abstractproperty
-    def real_dir(self):
-        # type: () -> str
+    @property
+    @abc.abstractmethod
+    def real_dir(self) -> str:
         raise NotImplementedError()
 
-    @abc.abstractproperty
-    def real_tmp_dir(self):
-        # type: () -> str
+    @property
+    @abc.abstractmethod
+    def real_tmp_dir(self) -> str:
         raise NotImplementedError()
 
     @property
@@ -85,7 +89,7 @@ class AbstractSiteContext(metaclass=abc.ABCMeta):
         return self._config
 
     @abc.abstractmethod
-    def load_config(self) -> None:
+    def load_config(self, defaults: dict[str, str]) -> None:
         raise NotImplementedError()
 
     @abc.abstractmethod
@@ -124,7 +128,7 @@ class SiteContext(AbstractSiteContext):
         return "%s/tmp" % self.real_dir
 
     @property
-    def version(self) -> Optional[str]:
+    def version(self) -> str | None:
         """The version of a site is solely determined by the link ~SITE/version
         In case the version of a site can not be determined, it reports None."""
         version_link = self.dir + "/version"
@@ -134,59 +138,55 @@ class SiteContext(AbstractSiteContext):
             return None
 
     @property
+    def hook_dir(self) -> str | None:
+        if self.version is None:
+            return None
+        return "/omd/versions/%s/lib/omd/hooks/" % self.version
+
+    @property
     def replacements(self) -> Replacements:
         """Dictionary of key/value for replacing macros in skel files"""
         return {
             "###SITE###": self.name,
             "###ROOT###": self.dir,
+            "###EDITION###": edition().long,
         }
 
-    def load_config(self) -> None:
+    def load_config(self, defaults: dict[str, str]) -> None:
         """Load all variables from omd/sites.conf. These variables always begin with
         CONFIG_. The reason is that this file can be sources with the shell.
 
         Puts these variables into the config dict without the CONFIG_. Also
         puts the variables into the process environment."""
-        self._config = self.read_site_config()
-
-        # Get the default values of all config hooks that are not contained
-        # in the site configuration. This can happen if there are new hooks
-        # after an update or when a site is being created.
-        hook_dir = self.dir + "/lib/omd/hooks"
-        if os.path.exists(hook_dir):
-            for hook_name in sort_hooks(os.listdir(hook_dir)):
-                if hook_name[0] != '.' and hook_name not in self._config:
-                    content = call_hook(self, hook_name, ["default"])[1]
-                    self._config[hook_name] = content
-
+        self._config = {**defaults, **self.read_site_config()}
         self._config_loaded = True
 
     def read_site_config(self) -> Config:
         """Read and parse the file site.conf of a site into a dictionary and returns it"""
         config: Config = {}
-        confpath = "%s/etc/omd/site.conf" % (self.dir)
-        if not os.path.exists(confpath):
+        if not (confpath := Path(self.dir, "etc/omd/site.conf")).exists():
             return {}
 
-        for line in open(confpath):
-            line = line.strip()
-            if line == "" or line[0] == "#":
-                continue
-            var, value = line.split("=", 1)
-            if not var.startswith("CONFIG_"):
-                sys.stderr.write("Ignoring invalid variable %s.\n" % var)
-            else:
-                config[var[7:].strip()] = value.strip().strip("'")
+        with confpath.open() as conf_file:
+            for line in conf_file:
+                line = line.strip()
+                if line == "" or line[0] == "#":
+                    continue
+                var, value = line.split("=", 1)
+                if not var.startswith("CONFIG_"):
+                    sys.stderr.write("Ignoring invalid variable %s.\n" % var)
+                else:
+                    config[var[7:].strip()] = value.strip().strip("'")
 
         return config
 
     def exists(self) -> bool:
-        # In dockerized environments the tmpfs may be managed by docker (when
+        # In container environments the tmpfs may be managed by the container runtime (when
         # using the --tmpfs option).  In this case the site directory is
         # created as parent of the tmp directory to mount the tmpfs during
         # container initialization. Detect this situation and don't treat the
         # site as existing in that case.
-        if is_dockerized():
+        if is_containerized():
             if not os.path.exists(self.dir):
                 return False
             if os.listdir(self.dir) == ["tmp"]:
@@ -197,13 +197,13 @@ class SiteContext(AbstractSiteContext):
 
     def is_empty(self) -> bool:
         for entry in os.listdir(self.dir):
-            if entry not in ['.', '..']:
+            if entry not in [".", ".."]:
                 return False
         return True
 
     def is_autostart(self) -> bool:
         """Determines whether a specific site is set to autostart."""
-        return self.conf.get('AUTOSTART', 'on') == 'on'
+        return self.conf.get("AUTOSTART", "on") == "on"
 
     def is_disabled(self) -> bool:
         """Whether or not this site has been disabled with 'omd disable'"""
@@ -212,7 +212,7 @@ class SiteContext(AbstractSiteContext):
 
     def is_stopped(self) -> bool:
         """Check if site is completely stopped"""
-        return check_status(self, display=False) == 1
+        return check_status(self.dir, display=False) == 1
 
     @staticmethod
     def is_site_context() -> bool:
@@ -254,7 +254,7 @@ class SiteContext(AbstractSiteContext):
 
 class RootContext(AbstractSiteContext):
     def __init__(self) -> None:
-        super(RootContext, self).__init__(sitename=None)
+        super().__init__(sitename=None)
 
     @property
     def dir(self) -> str:
@@ -278,7 +278,7 @@ class RootContext(AbstractSiteContext):
     def version(self) -> str:
         return omdlib.__version__
 
-    def load_config(self) -> None:
+    def load_config(self, defaults: dict[str, str]) -> None:
         pass
 
     def exists(self) -> bool:

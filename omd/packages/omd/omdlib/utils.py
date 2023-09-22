@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- encoding: utf-8; py-indent-offset: 4 -*-
 #
 #       U  ___ u  __  __   ____
 #        \/"_ \/U|' \/ '|u|  _"\
@@ -23,17 +22,18 @@
 # to the Free Software Foundation, Inc., 51 Franklin St,  Fifth Floor,
 # Boston, MA 02110-1301 USA.
 
-import os
-import sys
-import shutil
 import contextlib
-from typing import Iterator
+import os
+import shutil
+from collections.abc import Iterator
 
-import cmk.utils.tty as tty
 
-
-def is_dockerized() -> bool:
-    return os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
+def is_containerized() -> bool:
+    return (
+        os.path.exists("/.dockerenv")
+        or os.path.exists("/run/.containerenv")
+        or os.environ.get("CMK_CONTAINERIZED") == "TRUE"
+    )
 
 
 @contextlib.contextmanager
@@ -47,10 +47,6 @@ def chdir(path: str) -> Iterator[None]:
         os.chdir(prev_cwd)
 
 
-def ok() -> None:
-    sys.stdout.write(tty.ok + "\n")
-
-
 def delete_user_file(user_path: str) -> None:
     if not os.path.islink(user_path) and os.path.isdir(user_path):
         shutil.rmtree(user_path)
@@ -60,7 +56,7 @@ def delete_user_file(user_path: str) -> None:
 
 def delete_directory_contents(d: str) -> None:
     for f in os.listdir(d):
-        delete_user_file(d + '/' + f)
+        delete_user_file(d + "/" + f)
 
 
 def omd_base_path() -> str:

@@ -1,81 +1,106 @@
 #!/bin/bash
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 # Find and print the absolute paths of all Python source code files
-set -e
 
-if [ $# != 0 ]; then
-    echo "usage: $(basename $0)" >&2
+usage() {
+    cat >&2 <<-HERE
+usage: $(basename "${0}") [--omit-legacy-checks|--filter]
+
+   --filter:             read file candidates from lines of stdin (one file per line)
+HERE
     exit 1
-fi
+}
 
-cd "$(dirname $(dirname $(realpath "$0")))"
+get_candidates_from_stdin() {
+    while read -r line; do
+        # gracefully ignore non-existing files
+        [ -e "${line}" ] && printf "%s\000" "${line}"
+    done
+}
 
-SEARCH=
-PRUNE=
-SEARCH+=" active_checks"
-SEARCH+=" agents"
-SEARCH+=" bin"
-PRUNE+=" -path $(realpath bin)/cmk -prune -o" # symlink to bin/check_mk + confusion with cmk/ directory
-SEARCH+=" checks"
-SEARCH+=" cmk"
-SEARCH+=" doc"
-PRUNE+=" -path $(realpath doc/treasures) -prune -o" # our "treasures" need much more love before they can be linted
-if [ -d "enterprise" ]; then
-    SEARCH+=" enterprise/agents/plugins"
-    SEARCH+=" enterprise/alert_handlers"
-    SEARCH+=" enterprise/bin"
-    SEARCH+=" enterprise/cmk"
-    SEARCH+=" enterprise/core/src/test"
-    PRUNE+=" -path $(realpath enterprise/cmk/cee) -prune -o"                        # cmk/cee symlink points here
-    PRUNE+=" -path $(realpath enterprise/cmk/gui/cee) -prune -o"                    # cmk/gui/cee symlink points here
-    PRUNE+=" -path $(realpath enterprise/cmk/base/automations/cee.py) -prune -o"    # cmk/base/automations/cee.py symlink points here
-    PRUNE+=" -path $(realpath enterprise/cmk/base/cee) -prune -o"                   # cmk/base/cee symlink points here
-    PRUNE+=" -path $(realpath enterprise/cmk/base/default_config/cee.py) -prune -o" # cmk/base/default_config/cme.py symlink points here
-    PRUNE+=" -path $(realpath enterprise/cmk/base/modes/cee.py) -prune -o"          # cmk/base/modes/cee.py symlink points here
-fi
-SEARCH+=" inventory"
-SEARCH+=" livestatus/api/python"
-SEARCH+=" locale"
-if [ -d "managed" ]; then
-    SEARCH+=" managed"
-    PRUNE+=" -path $(realpath managed/cmk/gui/cme) -prune -o"                    # cmk/gui/cme symlink points here
-    PRUNE+=" -path $(realpath managed/cmk/base/default_config/cme.py) -prune -o" # cmk/base/default_config/cme.py symlink points here
-fi
-SEARCH+=" notifications"
-# Do not search whole omd/ because it may contain unpacked sub-packages
-SEARCH+=" omd/packages/appliance"
-SEARCH+=" omd/packages/maintenance"
-SEARCH+=" omd/packages/omd"
-SEARCH+=" scripts"
-SEARCH+=" tests"
-SEARCH+=" web/app"
-SEARCH+=" werk"
-PRUNE+=" -path $(realpath agents/wnx/test_files/config_files/mk_logwatch.py) -prune -o"
+get_candidates_from_filesystem() {
+    cd "$(dirname "$(dirname "$(realpath "$0")")")" || exit $?
 
-# Resolve search paths to real paths before the search for performance reasons
-REAL_SEARCH=$(realpath $SEARCH)
-
-# TODO: What about conftest.py files?
-# NOTE 1: while read F is used to deal with files containing whitespaces
-# NOTE 2: We explicitly filter out the targets of symbolic links, too, otherwise
-# we would see files twice.
-find -L \
-    $REAL_SEARCH \
-    -name .mypy_cache -prune -o \
-    -name .venv -prune -o \
-    -name test_docker_parse_node_images.py -prune -o \
-    -name typeshed -prune -o \
-    -name run-clang-tidy.py -prune -o \
-    -name iwyu_tool -prune -o \
-    -name chroot -prune -o \
-    -name conftest.py -prune -o \
-    -name py2 -prune -o \
-    $PRUNE \
-    -type f -print | sort | while read F; do
-    if head -n 1 "$F" | grep -q '^#!.*python3$' >/dev/null 2>&1; then
-        echo "$F"
+    SEARCH=
+    PRUNE=
+    SEARCH+=" active_checks"
+    SEARCH+=" agent-receiver"
+    PRUNE+=" -path $(realpath agent-receiver/build) -prune -o"
+    SEARCH+=" agents"
+    SEARCH+=" bin"
+    PRUNE+=" -path $(realpath bin)/cmk -prune -o" # symlink to bin/check_mk + confusion with cmk/ directory
+    SEARCH+=" cmk"
+    SEARCH+=" cmk_commands"
+    SEARCH+=" cmk_metrics"
+    SEARCH+=" doc"
+    PRUNE+=" -path $(realpath doc/treasures) -prune -o" # our "treasures" need much more love before they can be linted
+    if [ -d "enterprise" ]; then
+        SEARCH+=" enterprise/agents/plugins"
+        SEARCH+=" enterprise/alert_handlers"
+        SEARCH+=" enterprise/bin"
+        SEARCH+=" packages/cmc/test"
     fi
-done
+    SEARCH+=" livestatus/api/python"
+    SEARCH+=" locale"
+    SEARCH+=" notifications"
+    # Do not search whole omd/ because it may contain unpacked sub-packages
+    SEARCH+=" omd/packages/appliance"
+    SEARCH+=" omd/packages/maintenance"
+    SEARCH+=" omd/packages/omd"
+    SEARCH+=" omd/packages/check_mk"
+    SEARCH+=" scripts"
+    SEARCH+=" tests"
+    SEARCH+=" web/app"
+    SEARCH+=" werk"
+
+    # Resolve search paths to real paths before the search for performance reasons
+    # shellcheck disable=SC2086
+    REAL_SEARCH=$(realpath $SEARCH)
+
+    # TODO: What about conftest.py files?
+    # NOTE 1: -print0, -z and -0 are null byte delimiters used to deal with files containing whitespaces
+    # NOTE 2: We explicitly filter out the targets of symbolic links, too, otherwise we would see files twice.
+    # NOTE 3: We filter out types_pb2.py as a file generated by protobuf compiler
+
+    # shellcheck disable=SC2086
+    find -L \
+        $REAL_SEARCH \
+        -name .mypy_cache -prune -o \
+        -name .venv -prune -o \
+        -name test_docker_parse_node_images.py -prune -o \
+        -name typeshed -prune -o \
+        -name chroot -prune -o \
+        -name py2 -prune -o \
+        -name types_pb2.py -prune -o \
+        $PRUNE \
+        -type f -print0
+}
+
+filter_for_python_files() {
+    sort --zero-terminated |
+        xargs --no-run-if-empty --null \
+            grep --binary-files=without-match --files-with-matches '^#!.*python3$'
+}
+
+main() {
+    if [ $# -eq 0 ]; then
+        get_candidates_from_filesystem | filter_for_python_files
+    elif [ $# -eq 1 ]; then
+        case $1 in
+            --filter)
+                # in the filtering case, no match by grep is OK!
+                get_candidates_from_stdin | filter_for_python_files || true
+                ;;
+            *)
+                usage
+                ;;
+        esac
+    else
+        usage
+    fi
+}
+
+[ -z "${MK_SOURCE_ONLY}" ] && main "$@"

@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2020 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2020 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 from cmk.utils.livestatus_helpers.types import Column, Table
 
-# yapf: disable
+# fmt: off
 
 
 class Status(Table):
@@ -25,12 +24,12 @@ class Status(Table):
     )
     """Whether passive service checks are activated in general (0/1)"""
 
-    average_latency_cmk = Column(
-        'average_latency_cmk',
+    average_latency_checker = Column(
+        'average_latency_checker',
         col_type='float',
-        description='The average latency for executing Check_MK checks (i.e. the time the start of the execution is behind the schedule)',
+        description='The average latency for executing Check_MK checkers (i.e. the time the start of the execution is behind the schedule)',
     )
-    """The average latency for executing Check_MK checks (i.e. the time the start of the execution is behind the schedule)"""
+    """The average latency for executing Check_MK checkers (i.e. the time the start of the execution is behind the schedule)"""
 
     average_latency_fetcher = Column(
         'average_latency_fetcher',
@@ -74,6 +73,48 @@ class Status(Table):
     )
     """The current number of log messages MK Livestatus keeps in memory"""
 
+    carbon_bytes_sent = Column(
+        'carbon_bytes_sent',
+        col_type='float',
+        description='The number of number of bytes sent over the carbon connections since program start',
+    )
+    """The number of number of bytes sent over the carbon connections since program start"""
+
+    carbon_bytes_sent_rate = Column(
+        'carbon_bytes_sent_rate',
+        col_type='float',
+        description='The averaged number of number of bytes sent over the carbon connections per second',
+    )
+    """The averaged number of number of bytes sent over the carbon connections per second"""
+
+    carbon_overflows = Column(
+        'carbon_overflows',
+        col_type='float',
+        description='The number of times a Carbon connection could not send the metrics since program start',
+    )
+    """The number of times a Carbon connection could not send the metrics since program start"""
+
+    carbon_overflows_rate = Column(
+        'carbon_overflows_rate',
+        col_type='float',
+        description='The averaged number of times a Carbon connection could not send the metrics per second',
+    )
+    """The averaged number of times a Carbon connection could not send the metrics per second"""
+
+    carbon_queue_usage = Column(
+        'carbon_queue_usage',
+        col_type='float',
+        description='The number of number of elements in the queue / size of the queue since program start',
+    )
+    """The number of number of elements in the queue / size of the queue since program start"""
+
+    carbon_queue_usage_rate = Column(
+        'carbon_queue_usage_rate',
+        col_type='float',
+        description='The averaged number of number of elements in the queue / size of the queue per second',
+    )
+    """The averaged number of number of elements in the queue / size of the queue per second"""
+
     check_external_commands = Column(
         'check_external_commands',
         col_type='int',
@@ -84,16 +125,16 @@ class Status(Table):
     check_host_freshness = Column(
         'check_host_freshness',
         col_type='int',
-        description='Whether host freshness checking is activated in general (0/1), always enabled in CMC',
+        description='Whether host freshness checking is activated in general (0/1)',
     )
-    """Whether host freshness checking is activated in general (0/1), always enabled in CMC"""
+    """Whether host freshness checking is activated in general (0/1)"""
 
     check_service_freshness = Column(
         'check_service_freshness',
         col_type='int',
-        description='Whether service freshness checking is activated in general (0/1), always enabled in CMC',
+        description='Whether service freshness checking is activated in general (0/1)',
     )
-    """Whether service freshness checking is activated in general (0/1), always enabled in CMC"""
+    """Whether service freshness checking is activated in general (0/1)"""
 
     connections = Column(
         'connections',
@@ -115,6 +156,13 @@ class Status(Table):
         description='The process ID of the monitoring core',
     )
     """The process ID of the monitoring core"""
+
+    edition = Column(
+        'edition',
+        col_type='string',
+        description='The edition of the site',
+    )
+    """The edition of the site"""
 
     enable_event_handlers = Column(
         'enable_event_handlers',
@@ -214,13 +262,6 @@ class Status(Table):
     )
     """The average usage of the checker helpers, ranging from 0.0 (0%) up to 1.0 (100%)"""
 
-    helper_usage_cmk = Column(
-        'helper_usage_cmk',
-        col_type='float',
-        description='The average usage of the Check_MK check helpers, ranging from 0.0 (0%) up to 1.0 (100%)',
-    )
-    """The average usage of the Check_MK check helpers, ranging from 0.0 (0%) up to 1.0 (100%)"""
-
     helper_usage_fetcher = Column(
         'helper_usage_fetcher',
         col_type='float',
@@ -231,9 +272,9 @@ class Status(Table):
     helper_usage_generic = Column(
         'helper_usage_generic',
         col_type='float',
-        description='The average usage of the generic check helpers, ranging from 0.0 (0%) up to 1.0 (100%)',
+        description='The average usage of the active check helpers, ranging from 0.0 (0%) up to 1.0 (100%)',
     )
-    """The average usage of the generic check helpers, ranging from 0.0 (0%) up to 1.0 (100%)"""
+    """The average usage of the active check helpers, ranging from 0.0 (0%) up to 1.0 (100%)"""
 
     helper_usage_real_time = Column(
         'helper_usage_real_time',
@@ -256,26 +297,61 @@ class Status(Table):
     )
     """The averaged number of host checks per second"""
 
+    influxdb_bytes_sent = Column(
+        'influxdb_bytes_sent',
+        col_type='float',
+        description='The number of number of bytes sent over the InfluxDB connections (payload only) since program start',
+    )
+    """The number of number of bytes sent over the InfluxDB connections (payload only) since program start"""
+
+    influxdb_bytes_sent_rate = Column(
+        'influxdb_bytes_sent_rate',
+        col_type='float',
+        description='The averaged number of number of bytes sent over the InfluxDB connections (payload only) per second',
+    )
+    """The averaged number of number of bytes sent over the InfluxDB connections (payload only) per second"""
+
+    influxdb_overflows = Column(
+        'influxdb_overflows',
+        col_type='float',
+        description='The number of times an InfluxDB connection could not send the metrics since program start',
+    )
+    """The number of times an InfluxDB connection could not send the metrics since program start"""
+
+    influxdb_overflows_rate = Column(
+        'influxdb_overflows_rate',
+        col_type='float',
+        description='The averaged number of times an InfluxDB connection could not send the metrics per second',
+    )
+    """The averaged number of times an InfluxDB connection could not send the metrics per second"""
+
+    influxdb_queue_usage = Column(
+        'influxdb_queue_usage',
+        col_type='float',
+        description='The number of number of elements in the queue / size of the queue since program start',
+    )
+    """The number of number of elements in the queue / size of the queue since program start"""
+
+    influxdb_queue_usage_rate = Column(
+        'influxdb_queue_usage_rate',
+        col_type='float',
+        description='The averaged number of number of elements in the queue / size of the queue per second',
+    )
+    """The averaged number of number of elements in the queue / size of the queue per second"""
+
     interval_length = Column(
         'interval_length',
         col_type='int',
-        description='The default interval length, this is fixed to 60 in Check_MK Micro Core',
+        description='The default interval length',
     )
-    """The default interval length, this is fixed to 60 in Check_MK Micro Core"""
-
-    is_trial_expired = Column(
-        'is_trial_expired',
-        col_type='int',
-        description='Whether or not expired trial of demo version',
-    )
-    """Whether or not expired trial of demo version"""
+    """The default interval length"""
 
     last_command_check = Column(
         'last_command_check',
-        col_type='int',
-        description='The time of the last check for a command as UNIX timestamp, also 0 for Check_MK Micro Core',
+        col_type='time',
+        description='The time of the last check for a command as UNIX timestamp',
     )
-    """The time of the last check for a command as UNIX timestamp, also 0 for Check_MK Micro Core"""
+    """The time of the last check for a command as UNIX timestamp"""
 
     last_log_rotation = Column(
         'last_log_rotation',
@@ -329,9 +405,9 @@ class Status(Table):
     livestatus_queued_connections = Column(
         'livestatus_queued_connections',
         col_type='int',
-        description='The current number of queued connections to MK Livestatus, always 0 for Check_MK Micro Core',
+        description='The current number of queued connections to MK Livestatus',
     )
-    """The current number of queued connections to MK Livestatus, always 0 for Check_MK Micro Core"""
+    """The current number of queued connections to MK Livestatus"""
 
     livestatus_threads = Column(
         'livestatus_threads',
@@ -368,9 +444,23 @@ class Status(Table):
     )
     """The averaged number of new log messages per second"""
 
+    metrics_count = Column(
+        'metrics_count',
+        col_type='float',
+        description='The number of number of metrics processed by the core since program start',
+    )
+    """The number of number of metrics processed by the core since program start"""
+
+    metrics_count_rate = Column(
+        'metrics_count_rate',
+        col_type='float',
+        description='The averaged number of number of metrics processed by the core per second',
+    )
+    """The averaged number of number of metrics processed by the core per second"""
+
     mk_inventory_last = Column(
         'mk_inventory_last',
-        col_type='int',
+        col_type='time',
         description='The timestamp of the last time a host has been inventorized by Check_MK HW/SW-Inventory',
     )
     """The timestamp of the last time a host has been inventorized by Check_MK HW/SW-Inventory"""
@@ -427,16 +517,30 @@ class Status(Table):
     obsess_over_hosts = Column(
         'obsess_over_hosts',
         col_type='int',
-        description='Whether Nagios will obsess over host checks (0/1), always 0, not supported by CMC',
+        description='Whether Nagios will obsess over host checks (0/1)',
     )
-    """Whether Nagios will obsess over host checks (0/1), always 0, not supported by CMC"""
+    """Whether Nagios will obsess over host checks (0/1)"""
 
     obsess_over_services = Column(
         'obsess_over_services',
         col_type='int',
-        description='Whether Nagios will obsess over service checks and run the ocsp_command (0/1), not supported by CMC',
+        description='Whether Nagios will obsess over service checks and run the ocsp_command (0/1)',
     )
-    """Whether Nagios will obsess over service checks and run the ocsp_command (0/1), not supported by CMC"""
+    """Whether Nagios will obsess over service checks and run the ocsp_command (0/1)"""
+
+    perf_data_count = Column(
+        'perf_data_count',
+        col_type='float',
+        description='The number of number of performance data processed by the core since program start',
+    )
+    """The number of number of performance data processed by the core since program start"""
+
+    perf_data_count_rate = Column(
+        'perf_data_count_rate',
+        col_type='float',
+        description='The averaged number of number of performance data processed by the core per second',
+    )
+    """The averaged number of number of performance data processed by the core per second"""
 
     process_performance_data = Column(
         'process_performance_data',
@@ -472,6 +576,48 @@ class Status(Table):
         description='The averaged number of requests to Livestatus per second',
     )
     """The averaged number of requests to Livestatus per second"""
+
+    rrdcached_bytes_sent = Column(
+        'rrdcached_bytes_sent',
+        col_type='float',
+        description='The number of number of bytes sent over to the RRDs since program start',
+    )
+    """The number of number of bytes sent over to the RRDs since program start"""
+
+    rrdcached_bytes_sent_rate = Column(
+        'rrdcached_bytes_sent_rate',
+        col_type='float',
+        description='The averaged number of number of bytes sent over to the RRDs per second',
+    )
+    """The averaged number of number of bytes sent over to the RRDs per second"""
+
+    rrdcached_overflows = Column(
+        'rrdcached_overflows',
+        col_type='float',
+        description='The number of times an RRDCacheD connection could not send the metrics since program start',
+    )
+    """The number of times an RRDCacheD connection could not send the metrics since program start"""
+
+    rrdcached_overflows_rate = Column(
+        'rrdcached_overflows_rate',
+        col_type='float',
+        description='The averaged number of times an RRDCacheD connection could not send the metrics per second',
+    )
+    """The averaged number of times an RRDCacheD connection could not send the metrics per second"""
+
+    rrdcached_queue_usage = Column(
+        'rrdcached_queue_usage',
+        col_type='float',
+        description='The number of number of elements in the queue / size of the queue since program start',
+    )
+    """The number of number of elements in the queue / size of the queue since program start"""
+
+    rrdcached_queue_usage_rate = Column(
+        'rrdcached_queue_usage_rate',
+        col_type='float',
+        description='The averaged number of number of elements in the queue / size of the queue per second',
+    )
+    """The averaged number of number of elements in the queue / size of the queue per second"""
 
     service_checks = Column(
         'service_checks',

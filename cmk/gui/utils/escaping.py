@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from html import escape as html_escape
 import re
-from typing import Union
-from urllib.parse import urlparse
+from functools import lru_cache
 
-from six import ensure_str
+from cmk.utils.escaping import escape, escape_permissive
 
 from cmk.gui.utils.html import HTML
+from cmk.gui.utils.speaklater import LazyString
 
-#.
+# .
 #   .--Escaper-------------------------------------------------------------.
 #   |                 _____                                                |
 #   |                | ____|___  ___ __ _ _ __   ___ _ __                  |
@@ -27,28 +25,39 @@ from cmk.gui.utils.html import HTML
 
 # TODO: Figure out if this should actually be HTMLTagValue or HTMLContent or...
 # All the HTML-related types are slightly chaotic...
-EscapableEntity = Union[None, int, HTML, str]
+EscapableEntity = int | HTML | str | LazyString | None
 
-_UNESCAPER_TEXT = re.compile(
-    r'&lt;(/?)(h1|h2|b|tt|i|u|br(?: /)?|nobr(?: /)?|pre|a|sup|p|li|ul|ol)&gt;')
-_A_HREF = re.compile(
-    r'&lt;a href=(?:(?:&quot;|&#x27;)(.*?)(?:&quot;|&#x27;))(?: target=(?:(?:&quot;|&#x27;)(.*?)(?:&quot;|&#x27;)))?&gt;'
-)
+_COMMENT_RE = re.compile("(<!--.*?-->)")
+_TAG_RE = re.compile(r"(<[^>]+?>)")
 
 
-def escape_html(value: str) -> HTML:
+def escape_to_html(value: str) -> HTML:
     """Escape HTML and return as HTML object"""
-    return HTML(html_escape(value))
+    return HTML(escape(value))
 
 
-def escape_html_permissive(value: str) -> HTML:
-    """Escape HTML in permissive mode (keep simple markup tags) and return as HTML object"""
-    return HTML(escape_text(value))
+def escape_to_html_permissive(value: str, escape_links: bool = True) -> HTML:
+    """Escape HTML in permissive mode (keep simple markup tags) and return as HTML object
+
+    >>> escape_to_html_permissive("Hello this is <b>dog</b>!")
+    HTML("Hello this is <b>dog</b>!")
+
+    >>> escape_to_html_permissive('<a href="mailto:security@checkmk.com">')
+    HTML("&lt;a href=&quot;mailto:security@checkmk.com&quot;&gt;")
+
+    >>> escape_to_html_permissive('<a href="mailto:security@checkmk.com">', escape_links=True)
+    HTML("&lt;a href=&quot;mailto:security@checkmk.com&quot;&gt;")
+
+    >>> escape_to_html_permissive('<a href="mailto:security@checkmk.com">no closing a', escape_links=False)
+    HTML("<a href="mailto:security@checkmk.com">no closing a")
+    """
+    return HTML(escape_text(value, escape_links=escape_links))
 
 
 # TODO: Cleanup the accepted types!
 # TODO: The name of the function is missleading. This does not care about HTML tag attribute
 # escaping.
+@lru_cache(maxsize=8192)
 def escape_attribute(value: EscapableEntity) -> str:
     """Escape HTML attributes.
 
@@ -71,31 +80,20 @@ def escape_attribute(value: EscapableEntity) -> str:
     Returns:
 
     """
-    attr_type = type(value)
-    if value is None:
-        return ''
-    if attr_type == int:
-        return str(value)
+    if isinstance(value, str):
+        return escape(value)
     if isinstance(value, HTML):
-        return str(value)  # This is HTML code which must not be escaped
-    if isinstance(attr_type, str):
-        return html_escape(value, quote=True)
-    if isinstance(attr_type, bytes):  # TODO: Not in the signature!
-        return html_escape(ensure_str(value), quote=True)
-    # TODO: What is this case for? Exception?
-    return html_escape(str(value), quote=True)  # TODO: Not in the signature!
+        return str(value)  # HTML code which must not be escaped
+    if value is None:
+        return ""
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, LazyString):
+        return escape(str(value))
+    raise TypeError(f"Unsupported type {type(value)}")
 
 
-def unescape_attributes(value: str) -> str:
-    # In python3 use html.unescape
-    return ensure_str(value  #
-                      .replace("&amp;", "&")  #
-                      .replace("&quot;", "\"")  #
-                      .replace("&lt;", "<")  #
-                      .replace("&gt;", ">"))
-
-
-def escape_text(text: EscapableEntity) -> str:
+def escape_text(value: EscapableEntity, escape_links: bool = False) -> str:
     """Escape HTML text
 
     We only strip some tags and allow some simple tags
@@ -113,33 +111,42 @@ def escape_text(text: EscapableEntity) -> str:
 
         This is lame.
 
-        >>> escape_text("Hello this <a href=\"\">is dog</a>!")
+        >>> escape_text(None)
+        ''
+
+        >>> text = "Hello this <a href=>is dog</a>!"
+        >>> escape_text(text, escape_links=False)
         'Hello this &lt;a href=&gt;is dog</a>!'
 
-    Returns:
+        >>> text = 'Hello this <a href="">is dog</a>!'
+        >>> escape_text(text, escape_links=False)
+        'Hello this &lt;a href=&quot;&quot;&gt;is dog</a>!'
 
+        >>> text = 'Hello this <a href="http://some.site">is dog</a>!'
+        >>> escape_text(text)
+        'Hello this <a href="http://some.site">is dog</a>!'
+
+        >>> text = 'Hello this <a href="http://some.site">is dog</a>!'
+        >>> escape_text(text, escape_links=False)
+        'Hello this <a href="http://some.site">is dog</a>!'
+        >>> escape_text(text, escape_links=True)
+        'Hello this &lt;a href=&quot;http://some.site&quot;&gt;is dog&lt;/a&gt;!'
     """
-    if isinstance(text, HTML):
-        return str(text)
 
-    text = escape_attribute(text)
-    text = _UNESCAPER_TEXT.sub(r'<\1\2>', text)
-    for a_href in _A_HREF.finditer(text):
-        href = a_href.group(1)
+    if isinstance(value, HTML):
+        return str(value)
 
-        parsed = urlparse(href)
-        if parsed.scheme != "" and parsed.scheme not in ["http", "https"]:
-            continue  # Do not unescape links containing disallowed URLs
-
-        target = a_href.group(2)
-
-        if target:
-            unescaped_tag = "<a href=\"%s\" target=\"%s\">" % (href, target)
-        else:
-            unescaped_tag = "<a href=\"%s\">" % href
-
-        text = text.replace(a_href.group(0), unescaped_tag)
-    return text.replace("&amp;nbsp;", u"&nbsp;")
+    if value is None:
+        text = ""
+    elif isinstance(value, (int, float)):
+        text = str(value)
+    elif isinstance(value, LazyString):
+        text = str(value)
+    elif isinstance(value, str):
+        text = value
+    else:
+        raise TypeError(f"Unsupported type {type(value)}")
+    return escape_permissive(text, escape_links=escape_links)
 
 
 def strip_scripts(ht: str) -> str:
@@ -169,13 +176,13 @@ def strip_scripts(ht: str) -> str:
     prev = None
     while prev != ht:
         prev = ht
-        x = ht.lower().find('<script')
+        x = ht.lower().find("<script")
         if x == -1:
             break
-        y = ht.lower().find('</script')
+        y = ht.lower().find("</script")
         if y == -1:
             break
-        ht = ht[0:x] + ht[y + 9:]
+        ht = ht[0:x] + ht[y + 9 :]
 
     return ht
 
@@ -183,36 +190,67 @@ def strip_scripts(ht: str) -> str:
 def strip_tags(ht: EscapableEntity) -> str:
     """Strip all HTML tags from a text.
 
+    This function does not handle all the possible edge cases. Beware.
+
     Args:
-        ht: A text with possible HTML tags in it.
+        ht: A text with possible html in it.
 
     Examples:
-        >>> strip_tags("<b>foobar</b> blah")
+
+        >>> strip_tags('<b>Important Message</b>')
+        'Important Message'
+
+        >>> strip_tags('<a hr<!-- hallo hallo -->ef="">hello&nbsp;world</ <!-- blah -->  a>')
+        'hello world'
+
+        Even split HTML entities are recognized.
+
+        >>> strip_tags("<b>foobar</b>&nb<a href="">s</a>p;blah")
         'foobar blah'
+
+        >>> strip_tags("<scr<!-- foo -->ipt>alert();</scr<!-- foo -->ipt> blah")
+        'alert(); blah'
 
         Edge cases.
 
         >>> strip_tags("<p<b<>re>foobar</</b>b> blah")
         're>foobarb> blah'
 
+        Even HTML objects get stripped.
+
+        >>> strip_tags(HTML('<a href="https://example.com">click here</a>'))
+        'click here'
+
+        Everything we don't know about won't get stripped.
+
+        >>> strip_tags(object())  # type: ignore[arg-type]  # doctest: +ELLIPSIS
+        '<object object at ...>'
+
     Returns:
         A string without working HTML tags.
 
     """
-    if isinstance(ht, HTML):
-        ht = str(ht)
-
-    if not isinstance(ht, str):
+    if not isinstance(ht, (str, HTML, LazyString)):
         return str(ht)
 
-    ht = ensure_str(ht)
-
+    string = str(ht)
     while True:
-        x = ht.find('<')
-        if x == -1:
-            break
-        y = ht.find('>', x)
-        if y == -1:
-            break
-        ht = ht[0:x] + ht[y + 1:]
-    return ht.replace("&nbsp;", " ")
+        prev = string
+        string = string.replace("&nbsp;", " ")
+        string = _COMMENT_RE.sub("", string)
+        string = _TAG_RE.sub("", string)
+        if string == prev:
+            return string
+
+
+def strip_tags_for_tooltip(ht: EscapableEntity) -> str:
+    string = str(ht)
+    # Some painters render table and cell tags that would be stripped away in the next step and
+    # result in the content of tables being joined together to a single word.
+    # We replace the tags here with spaces to prevent that.
+    #
+    # For the moment we keep it simple and only fix the special case we stumbled upon.
+    # In the future it might be better to find a more generic approach
+    # that solves the problem for different tag combinations.
+    string = string.replace("</th><td>", " ")
+    return strip_tags(string)

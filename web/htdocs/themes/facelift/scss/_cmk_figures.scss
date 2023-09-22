@@ -1,5 +1,5 @@
 @charset "UTF-8";
-// Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+// Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 // This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 // conditions defined in the file COPYING, which is part of this source code package.
 
@@ -24,7 +24,7 @@ div.cmk_tab {
       position: relative;
       float: left;
       min-width: 10rem;
-      font-weight: bold;
+      font-weight: $font-weight-bold;
       line-height: 2rem;
       text-align: center;
       cursor: pointer;
@@ -62,28 +62,30 @@ div.cmk_tab {
   }
 }
 
-.bar_chart {
+.bar_chart,
+.barplot {
   a {
     outline: none;
   }
 
-  rect.bar.bar_chart {
+  rect.bar.bar_chart,
+  rect.bar {
     fill: $bar-fill-color;
-    stroke: rgba(0, 0, 0, 0.2);
+    stroke: rgba($black, 0.2);
 
     &:hover {
       fill: $bar-hover-fill-color;
-      stroke: rgb(0, 0, 0);
+      stroke: $black;
     }
   }
 
   rect.bar.bar_chart.barbar_chart {
     fill: $barbar-fill-color;
-    stroke: rgba(0, 0, 0, 0.3);
+    stroke: rgba($black, 0.3);
 
     &:hover {
       fill: $barbar-hover-fill-color;
-      stroke: rgb(0, 0, 0);
+      stroke: $black;
     }
   }
 }
@@ -111,7 +113,7 @@ div.cmk_figure {
     position: absolute;
     z-index: 1;
     padding: 10px;
-    color: $graph-hover-popup-font-color;
+    color: $font-color;
     pointer-events: none;
     background-color: $graph-hover-popup-bg-color;
     border: $graph-hover-popup-border;
@@ -147,8 +149,7 @@ div.cmk_figure {
   }
 
   g.axis {
-    // axis edges invisible because designer made them so
-    color: $bg-color-secondary;
+    color: transparent; // graph axis edges are invisible
   }
 
   &.average_scatterplot {
@@ -206,20 +207,12 @@ div.cmk_figure {
           }
         }
 
-        tr.mean td:nth-child(2) {
-          color: $dc-graph-color-1;
-        }
-
-        tr.median td:nth-child(2) {
-          color: $dc-graph-color-2;
-        }
-
         tr.top_matches td:nth-child(2) {
-          color: rgb(255, 40, 40);
+          color: $font-color-red;
         }
 
         tr.bottom_matches td:nth-child(2) {
-          color: rgb(31, 150, 240);
+          color: $font-color-green;
         }
       }
 
@@ -257,7 +250,7 @@ div.cmk_figure {
     }
 
     path.host.hilite {
-      stroke: rgb(70, 130, 180);
+      stroke: $scatterplot-hilite-color;
     }
 
     circle.scatterdot {
@@ -349,7 +342,7 @@ div.dc_table .options {
       }
 
       input:disabled {
-        color: $grey-2;
+        color: $font-color-dimmed;
       }
 
       input:active,

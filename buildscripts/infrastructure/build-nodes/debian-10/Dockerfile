@@ -1,4 +1,6 @@
-FROM debian:10
+ARG IMAGE_DEBIAN_10
+# hadolint ignore=DL3006
+FROM ${IMAGE_DEBIAN_10} as base
 
 SHELL ["/bin/bash", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive LC_ALL=C.UTF-8 LANG=C.UTF-8 PATH="/opt/bin:${PATH}"
@@ -16,7 +18,6 @@ RUN apt-get update \
     libssl-dev \
     make \
     python-dev \
-    python-dev \
     python3-pip \
     rrdtool \
     strace \
@@ -29,7 +30,7 @@ RUN apt-get update \
     apache2 \
     apache2-dev \
     build-essential \
-    chrpath \
+    bison \
     curl \
     default-libmysqlclient-dev \
     dietlibc-dev \
@@ -42,7 +43,6 @@ RUN apt-get update \
     iputils-ping \
     joe \
     libcurl4-openssl-dev \
-    libdbi-dev \
     libevent-dev \
     libffi-dev \
     libfreeradius-dev \
@@ -72,8 +72,8 @@ RUN apt-get update \
     texinfo \
     tk-dev \
     uuid-dev \
-    valgrind \
     vim \
+    libc6-dbg \
     && rm -rf /var/lib/apt/lists/*
 
 # Install our standard tool chain for building
@@ -81,6 +81,7 @@ RUN apt-get update \
 # - cmake is needed for e.g. building re2
 # - openssl is needed by Python 3.7+
 # - python is needed by our build / test chain
+FROM base as builder
 ARG NEXUS_ARCHIVES_URL
 ARG NEXUS_USERNAME
 ARG NEXUS_PASSWORD
@@ -90,19 +91,56 @@ ENV NEXUS_ARCHIVES_URL="$NEXUS_ARCHIVES_URL" NEXUS_USERNAME="$NEXUS_USERNAME" NE
 
 COPY scripts/* /opt/
 RUN /opt/install-gnu-toolchain.sh
+RUN /opt/install-valgrind.sh
 RUN /opt/install-cmake.sh
+RUN /opt/install-protobuf-cpp.sh
 RUN /opt/install-openssl.sh
-RUN /opt/install-python2.sh
 RUN /opt/install-python.sh
-RUN /opt/install-pipenv.sh
-RUN /opt/install-nodejs.sh
 RUN /opt/install-freetds.sh
+RUN /opt/install-rust-cargo.sh
+
+# Now shrink all the binaries and libraries we produced to build a small image
+# in the next step
+RUN /opt/strip_binaries /opt
+
+# Run this AFTER strip_binaries!!
+RUN /opt/install-bazel.sh
+
+### Actual Image ###
+FROM base
+
+# Copy our standard tool chain for building
+COPY --from=builder /opt /opt
+ARG DISTRO
+ARG BRANCH_VERSION
+ENV DISTRO="$DISTRO" BRANCH_VERSION="$BRANCH_VERSION"
+
+# Set symlinks
+RUN /opt/install-gnu-toolchain.sh link-only
+RUN /opt/install-valgrind.sh link-only
+RUN /opt/install-cmake.sh link-only
+RUN /opt/install-protobuf-cpp.sh --link-only
+RUN /opt/install-python.sh link-only
+RUN /opt/install-freetds.sh link-only
+RUN /opt/install-bazel.sh link-only
+RUN /opt/install-rust-cargo.sh link-only
+
+# Install non cached dependencies
+RUN /opt/install-pipenv.sh
 RUN /opt/install-cmk-dependencies.sh
+RUN /opt/install-patchelf.sh
 
 # Ensure all our build containers have the jenkins user (with same uid/gid). The non privileged
 # jobs will be executed as this user in the container
 RUN groupadd -g 1000 jenkins \
     && useradd -m -u 1001 -g 1000 -s /bin/bash jenkins
 
+RUN mkdir -p /home/jenkins/.cache/ \
+    && chown jenkins:jenkins /home/jenkins/.cache/
+
 ARG VERS_TAG
 RUN echo $VERS_TAG > /version.txt
+
+ENV RUSTUP_HOME=/opt/rust/rustup
+LABEL \
+    com.tribe29.image_type="build-image"

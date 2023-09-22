@@ -1,0 +1,14 @@
+Title: Monitoring of mobileiron devices
+Class: feature
+Compatible: compat
+Component: checks
+Date: 1644239901
+Edition: cre
+Knowledge: undoc
+Level: 1
+Version: 2.2.0b1
+
+The special agent mobileiron queries the mobileiron REST API.
+
+2 checks were added: Compliance, Versions
+3 services added: Inventory, Uptime, df

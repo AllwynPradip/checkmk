@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
-from typing import Any, Mapping
 import json
+from collections.abc import Mapping
+from typing import Any
 
-from cmk.base.plugins.agent_based.utils.memory import check_element
 from cmk.base.plugins.agent_based.agent_based_api.v1 import register, Service
 from cmk.base.plugins.agent_based.agent_based_api.v1.type_defs import (
     CheckResult,
     DiscoveryResult,
     StringTable,
 )
+from cmk.base.plugins.agent_based.utils.memory import check_element
 
 Section = Mapping[str, float]
 
@@ -57,5 +57,5 @@ register.check_plugin(
     discovery_function=discover_single,
     check_function=check_proxmox_ve_mem_usage,
     check_ruleset_name="proxmox_ve_mem_usage",
-    check_default_parameters={"levels": (80., 90.)},
+    check_default_parameters={"levels": (80.0, 90.0)},
 )

@@ -4,22 +4,17 @@
 
 #include "providers/check_mk.h"
 
-#include <chrono>
 #include <string>
 
 //
-#include "asio.h"
+#include "wnx/asio.h"
 //
-#include <asio/ip/address_v4.hpp>
-#include <asio/ip/address_v6.hpp>
-#include <asio/ip/network_v4.hpp>
-#include <asio/ip/network_v6.hpp>
 
-#include "cfg.h"
-#include "check_mk.h"
 #include "common/version.h"
-#include "install_api.h"
-#include "onlyfrom.h"
+#include "wnx/agent_controller.h"
+#include "wnx/cfg.h"
+#include "wnx/install_api.h"
+#include "wnx/onlyfrom.h"
 
 using namespace std::string_literals;
 
@@ -28,18 +23,16 @@ namespace cma::provider {
 // function to provide format compatibility for monitoring site
 // probably, a bit to pedantic
 std::string AddressToCheckMkString(std::string_view entry) {
-    if (cfg::of::IsNetwork(entry)) return std::string{entry};
+    if (cfg::of::IsNetwork(entry)) {
+        return std::string{entry};
+    }
 
     try {
-        if (cfg::of::IsAddressV4(entry)) {
+        if (cfg::of::IsAddressV4(entry) || cfg::of::IsAddressV6(entry)) {
             return std::string{entry};
         }
-
-        if (cfg::of::IsAddressV6(entry)) {
-            return std::string{entry};
-        }
-    } catch (const std::exception& e) {
-        XLOG::l("Entry '{}' is bad, exception '{}'", entry, e.what());
+    } catch (const std::exception &e) {
+        XLOG::l("Entry '{}' is bad, exception '{}'", entry, e);
     }
 
     XLOG::l("Entry '{}' is bad, we return nothing", entry);
@@ -47,18 +40,23 @@ std::string AddressToCheckMkString(std::string_view entry) {
 }
 
 std::string CheckMk::makeOnlyFrom() {
-    auto only_from =
+    const auto only_from =
         cfg::GetInternalArray(cfg::groups::kGlobal, cfg::vars::kOnlyFrom);
-    if (only_from.empty()) return {};
-    if (only_from.size() == 1 && only_from[0] == "~") return {};
-
-    std::string out;
-    for (auto& entry : only_from) {
-        auto value = AddressToCheckMkString(entry);
-        if (!value.empty()) out += value + " ";
+    if (only_from.empty() || only_from.size() == 1 && only_from[0] == "~") {
+        return {};
     }
 
-    if (!out.empty()) out.pop_back();  // last space
+    std::string out;
+    for (auto &entry : only_from) {
+        auto value = AddressToCheckMkString(entry);
+        if (!value.empty()) {
+            out += value + " ";
+        }
+    }
+
+    if (!out.empty()) {
+        out.pop_back();  // last space
+    }
 
     return out;
 }
@@ -73,7 +71,7 @@ std::string MakeInfo() {
         {"Architecture", tgt::Is64bit() ? "64bit" : "32bit"},
     };
     std::string out;
-    for (const auto& info : infos) {
+    for (const auto &info : infos) {
         out += fmt::format("{}: {}\n", info.first, info.second);
     }
 
@@ -94,7 +92,7 @@ std::string MakeDirs() {
         {"LocalDirectory", cfg::GetLocalDir()}};
 
     std::string out;
-    for (const auto& d : directories) {
+    for (const auto &d : directories) {
         out += fmt::format("{}: {}\n", d.first, wtools::ToUtf8(d.second));
     }
 
@@ -107,9 +105,18 @@ std::string CheckMk::makeBody() {
     auto out = MakeInfo();
     out += MakeDirs();
     out += "OnlyFrom: "s + makeOnlyFrom() + "\n"s;
+    out += section::MakeHeader(section::kCheckMkCtlStatus);
 
-    if (install::GetLastInstallFailReason()) {
-        // We deliver fixed strings because it is a prototype solution.
+    if (const auto json = ac::DetermineAgentCtlStatus(); !json.empty()) {
+        out += json + "\n";
+    }
+
+    if (auto install_api_err = install::api_err::Get()) {
+        out += "<<<check_mk>>>\n";
+        out += fmt::format("UpdateFailed: The last agent update failed. {}\n",
+                           wtools::ToUtf8(*install_api_err));
+        out += "UpdateRecoverAction: Contact with system administrator.\n";
+    } else if (install::GetLastMsiFailReason()) {
         out += "<<<check_mk>>>\n";
         out +=
             "UpdateFailed: The last agent update failed. Supplied Python environment is not compatible with OS. \n";
@@ -120,4 +127,4 @@ std::string CheckMk::makeBody() {
     return out;
 }
 
-};  // namespace cma::provider
+}  // namespace cma::provider

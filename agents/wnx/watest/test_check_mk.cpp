@@ -3,13 +3,12 @@
 
 #include "pch.h"
 
-#include "cfg.h"
+#include "wnx/cfg.h"
 #include "providers/check_mk.h"
 
 namespace cma::provider {
 TEST(CheckMkHeader, Convert) {
-    using namespace cma::provider;
-    auto local_host = cma::provider::AddressToCheckMkString("127.0.0.1");
+    auto local_host = AddressToCheckMkString("127.0.0.1");
     EXPECT_EQ(local_host, "127.0.0.1");
 
     auto usual_addr = AddressToCheckMkString("10.1.2.3");

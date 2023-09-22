@@ -1,22 +1,28 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+import contextlib
 import logging
+import queue
+from collections.abc import Iterator
+from pathlib import Path
 
-from testlib import on_time
+from pytest import CaptureFixture
+
+from tests.testlib import on_time
 
 import cmk.utils.log as log
+import cmk.utils.log.security_event as se
 
 
-def test_get_logger():
+def test_get_logger() -> None:
     l = logging.getLogger("cmk.asd")
     assert l.parent == log.logger
 
 
-def test_setup_console_logging(capsys):
+def test_setup_console_logging(capsys: CaptureFixture[str]) -> None:
     out, err = capsys.readouterr()
     log.clear_console_logging()
 
@@ -41,21 +47,23 @@ def test_setup_console_logging(capsys):
     assert err == ""
 
 
-def test_open_log(tmp_path):
+def test_open_log(tmp_path: Path) -> None:
     log_file = tmp_path / "test.log"
     log.open_log(log_file)
 
-    with on_time('2018-04-15 16:50', 'CET'):
+    with on_time("2018-04-15 16:50", "CET"):
         log.logger.warning("abc")
         log.logger.warning("äbc")
 
     with log_file.open("rb") as f:
-        assert f.read() == (b"2018-04-15 18:50:00,000 [30] [cmk] abc\n"
-                            b"2018-04-15 18:50:00,000 [30] [cmk] \xc3\xa4bc\n")
+        assert f.read() == (
+            b"2018-04-15 18:50:00,000 [30] [cmk] abc\n"
+            b"2018-04-15 18:50:00,000 [30] [cmk] \xc3\xa4bc\n"
+        )
 
 
-def test_set_verbosity():
-    root = logging.getLogger('cmk')
+def test_set_verbosity() -> None:
+    root = logging.getLogger("cmk")
     root.setLevel(logging.INFO)
 
     l = logging.getLogger("cmk.test_logger")
@@ -86,3 +94,34 @@ def test_set_verbosity():
 
     # Reset verbosity for next test run.
     log.logger.setLevel(log.verbosity_to_log_level(0))
+
+
+@contextlib.contextmanager
+def queue_log_sink(logger: logging.Logger) -> Iterator[queue.Queue[logging.LogRecord]]:
+    old_level = logger.level
+
+    logger.setLevel(logging.INFO)
+    q: queue.Queue[logging.LogRecord] = queue.Queue()
+    queue_handler = logging.handlers.QueueHandler(q)
+    logger.addHandler(queue_handler)
+    yield q
+
+    logger.setLevel(old_level)
+    logger.removeHandler(queue_handler)
+
+
+def test_security_event(tmp_path: Path) -> None:
+    event = se.SecurityEvent(
+        "test security event",
+        {"a": ["serialize", "me"], "b": {"b.1": 42.23}},
+        se.SecurityEvent.Domain.auth,
+    )
+
+    with queue_log_sink(se._root_logger()) as log_queue:
+        se.log_security_event(event)
+        entry = log_queue.get_nowait()
+        assert entry.name == "cmk_security.auth"
+        assert (
+            entry.getMessage() == '{"summary": "test security event", '
+            '"details": {"a": ["serialize", "me"], "b": {"b.1": 42.23}}}'
+        )

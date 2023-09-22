@@ -52,8 +52,8 @@ White-box overall system and interfaces
 
 .. _arch-comp-hosts-agent:
 
-Agent-based hosts
-~~~~~~~~~~~~~~~~~
+TCP hosts
+~~~~~~~~~~~~~~~~~~~~~~
 
 The data on the agent-based hosts are collected by a so-called agent.
 The monitoring core requests these data to the hosts, typically over

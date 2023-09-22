@@ -1,117 +1,113 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from testlib.base import Scenario
+from pytest import MonkeyPatch
+
+from tests.testlib.base import Scenario
 
 import cmk.utils.version as cmk_version
+from cmk.utils.hostaddress import HostName
+from cmk.utils.rulesets.ruleset_matcher import RuleSpec
+
+from cmk.automations.results import AnalyseHostResult, GetServicesLabelsResult
+
 import cmk.base.automations
 import cmk.base.automations.check_mk as automations
-import cmk.base.config as config
 
 
-def test_registered_automations():
+def test_registered_automations() -> None:
     needed_automations = [
-        'active-check',
-        'analyse-host',
-        'analyse-service',
-        'create-diagnostics-dump',
-        'delete-hosts',
-        'diag-host',
-        'get-agent-output',
-        'get-check-information',
-        'get-configuration',
-        'get-labels-of',
-        'get-section-information',
-        'get-service-configurations',
-        'inventory',
-        'notification-analyse',
-        'notification-get-bulks',
-        'notification-replay',
-        'reload',
-        'rename-hosts',
-        'restart',
-        'scan-parents',
-        'set-autochecks',
-        'try-inventory',
-        'update-dns-cache',
-        'update-host-labels',
+        "active-check",
+        "analyse-host",
+        "get-services-labels",
+        "analyse-service",
+        "create-diagnostics-dump",
+        "delete-hosts",
+        "delete-hosts-known-remote",
+        "diag-host",
+        "autodiscovery",
+        "service-discovery",
+        "service-discovery-preview",
+        "get-agent-output",
+        "get-check-information",
+        "get-configuration",
+        "get-section-information",
+        "inventory",
+        "notification-analyse",
+        "notification-get-bulks",
+        "notification-replay",
+        "reload",
+        "rename-hosts",
+        "restart",
+        "scan-parents",
+        "set-autochecks",
+        "try-inventory",
+        "update-dns-cache",
+        "update-host-labels",
     ]
 
-    if not cmk_version.is_raw_edition():
+    if cmk_version.edition() is not cmk_version.Edition.CRE:
         needed_automations += [
-            'bake-agents',
+            "bake-agents",
         ]
 
     assert sorted(needed_automations) == sorted(
-        cmk.base.automations.automations._automations.keys())
+        cmk.base.automations.automations._automations.keys()
+    )
 
 
-def test_get_labels_of_host(monkeypatch):
-    automation = automations.AutomationGetLabelsOf()
-
-    ts = Scenario().add_host("test-host")
-    ts.set_option("host_labels", {
-        "test-host": {
-            "explicit": "ding",
-        },
-    })
-    ts.apply(monkeypatch)
-
-    assert automation.execute(["host", "test-host"]) == {
-        "labels": {
-            "explicit": "ding"
-        },
-        "label_sources": {
-            "explicit": "explicit"
-        },
-    }
-
-
-def test_get_labels_of_service(monkeypatch):
-    automation = automations.AutomationGetLabelsOf()
-
-    ts = Scenario().add_host("test-host")
-    ts.set_ruleset("service_label_rules", [
-        ({
-            "label1": "val1"
-        }, [], config.ALL_HOSTS, ["CPU load$"], {}),
-        ({
-            "label2": "val2"
-        }, [], config.ALL_HOSTS, ["CPU load$"], {}),
-    ])
-    ts.apply(monkeypatch)
-
-    assert automation.execute(["service", "test-host", "CPU load"]) == {
-        "labels": {
-            "label1": "val1",
-            "label2": "val2"
-        },
-        "label_sources": {
-            "label1": "ruleset",
-            "label2": "ruleset"
-        }
-    }
-
-
-def test_analyse_host(monkeypatch):
+def test_analyse_host(monkeypatch: MonkeyPatch) -> None:
     automation = automations.AutomationAnalyseHost()
 
-    ts = Scenario().add_host("test-host")
-    ts.set_option("host_labels", {
-        "test-host": {
-            "explicit": "ding",
+    ts = Scenario()
+    ts.add_host(HostName("test-host"))
+    ts.set_option(
+        "host_labels",
+        {
+            "test-host": {
+                "explicit": "ding",
+            },
         },
-    })
+    )
     ts.apply(monkeypatch)
 
-    assert automation.execute(["test-host"]) == {
-        "labels": {
-            "explicit": "ding"
-        },
-        "label_sources": {
-            "explicit": "explicit"
-        },
-    }
+    assert automation.execute(["test-host"]) == AnalyseHostResult(
+        label_sources={"cmk/site": "discovered", "explicit": "explicit"},
+        labels={"cmk/site": "NO_SITE", "explicit": "ding"},
+    )
+
+
+def test_service_labels(monkeypatch):
+    automation = automations.AutomationGetServicesLabels()
+
+    ts = Scenario()
+    ts.add_host(HostName("test-host"))
+    ts.set_ruleset(
+        "service_label_rules",
+        list[RuleSpec[dict[str, str]]](
+            [
+                {
+                    "condition": {"service_description": [{"$regex": "CPU load"}]},
+                    "value": {"label1": "val1"},
+                },
+                {
+                    "condition": {"service_description": [{"$regex": "CPU load"}]},
+                    "value": {"label2": "val2"},
+                },
+                {
+                    "condition": {"service_description": [{"$regex": "CPU temp"}]},
+                    "value": {"label1": "val1"},
+                },
+            ]
+        ),
+    )
+    ts.apply(monkeypatch)
+
+    assert automation.execute(["test-host", "CPU load", "CPU temp"]) == GetServicesLabelsResult(
+        {
+            "CPU load": {"label1": "val1", "label2": "val2"},
+            "CPU temp": {"label1": "val1"},
+        }
+    )

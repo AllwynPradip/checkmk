@@ -1,11 +1,11 @@
-title: MySQL: Status of Deamon
+title: MySQL: Status of Daemon
 agents: linux
 catalog: app/mysql
-license: GPL
+license: GPLv2
 distribution: check_mk
 description:
- This check checks if the MySQL deamon is alive and a connection is possible.
- Otherwiese it returns {CRIT}. This check can also be used to detect wrong or
+ This check checks if the MySQL daemon is alive and a connection is possible.
+ Otherwise it returns {CRIT}. This check can also be used to detect wrong or
  unconfigured mk_mysql plugins.
 
  This check needs the agent plugin {mk_mysql} to be installed.
@@ -16,7 +16,6 @@ description:
 item:
  Name of the MySQL service
 
-inventory:
+discovery:
  One service is created for each instance on each host where the agent plugin
  {mk_mysql} is installed.
-

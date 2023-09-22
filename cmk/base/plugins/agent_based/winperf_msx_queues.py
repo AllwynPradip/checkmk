@@ -1,20 +1,12 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
-from .agent_based_api.v1.type_defs import (
-    DiscoveryResult,
-    StringTable,
-    CheckResult,
-)
-from .agent_based_api.v1 import (
-    check_levels,
-    register,
-    Service,
-)
+from .agent_based_api.v1 import check_levels, register, Service
+from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult, StringTable
 
 ParsedSection = Mapping[int, int]
 
@@ -64,7 +56,7 @@ def discover_winperf_msx_queues(
     params: Mapping[str, Any],
     section: ParsedSection,
 ) -> DiscoveryResult:
-    for item_name, offset in params['queue_names']:
+    for item_name, offset in params["queue_names"]:
         if offset in section:
             yield Service(item=item_name, parameters={"offset": offset})
 
@@ -102,7 +94,7 @@ register.check_plugin(
     discovery_ruleset_name="winperf_msx_queues_inventory",
     discovery_function=discover_winperf_msx_queues,
     check_default_parameters={
-        'levels': _DEFAULT_LEVELS,
+        "levels": _DEFAULT_LEVELS,
     },
     check_ruleset_name="msx_queues",
     check_function=check_winperf_msx_queues,

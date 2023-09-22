@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -17,7 +17,7 @@
 unset LANG
 
 pidof_nsca2mkeventd() {
-    pgrep -u $OMD_SITE -f -x "/usr/bin/python $OMD_ROOT/local/bin/nsca2mkeventd"
+    pgrep -u "$OMD_SITE" -f -x "/usr/bin/python $OMD_ROOT/local/bin/nsca2mkeventd"
 }
 
 case "$1" in
@@ -29,14 +29,13 @@ case "$1" in
             exit 1
         }
 
-        $OMD_ROOT/local/bin/nsca2mkeventd
-        if [ $? -eq 0 ]; then
+        if "$OMD_ROOT"/local/bin/nsca2mkeventd; then
             echo OK
         else
             echo ERROR
             exit 1
         fi
-    ;;
+        ;;
     stop)
         echo -n 'Stopping nsca2mkeventd... '
         PID=$(pidof_nsca2mkeventd) || {
@@ -45,40 +44,39 @@ case "$1" in
         }
 
         I=0
-        kill $PID
-        while kill -0 $PID >/dev/null 2>&1; do
+        kill "$PID"
+        while kill -0 "$PID" >/dev/null 2>&1; do
             if [ $I = '5' ]; then
                 echo -e 'sending SIGKILL... '
-                kill -9 $PID
+                kill -9 "$PID"
             elif [ $I = '10' ]; then
                 echo ERROR
                 exit 1
             fi
 
             echo -n '.'
-            I=$(($I+1))
+            I=$((I + 1))
             sleep 1
         done
 
         echo OK
-    ;;
+        ;;
     status)
         PID=$(pidof_nsca2mkeventd) && {
             echo "Running (PID: $PID)."
             exit 0
-        } || {
-            echo "Not running."
-            exit 1
         }
-    ;;
+        echo "Not running."
+        exit 1
+        ;;
     restart)
         $0 stop
         $0 start
-    ;;
+        ;;
     *)
         echo 'Usage: /etc/init.d/nsca2mkeventd {start|stop|restart|status}'
         exit 1
-    ;;
+        ;;
 esac
 
 exit 0

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """Run all possible tests on every dataset found in generictests/datasets/
@@ -21,28 +20,34 @@ required variables manually (as in ''veritas_vcs_*.py''), or create a
 regression test dataset as described in ''checks/generictests/regression.py''
 """
 from importlib import import_module
+
 import pytest
 
-from testlib import on_time
-import generictests
+from tests.testlib import on_time
 
-pytestmark = pytest.mark.checks
+from tests.unit.conftest import FixPluginLegacy
+
+from . import generictests
+
+# Making this a single test with a loop instead of a parameterized test cuts down the runtime
+# from 15.7s to 4.3s. Furthermore, freezing the time only once is a big win, too. OTOH, if
+# something goes wrong, pinning down the exact dataset is very helpful, so we use the "slow"
+# marker below for the latter use case.
 
 
-# TODO: Shouldn't we enable this by default for all unit tests?
-@pytest.fixture(name="mock_time", scope="module")
-def fixture_mock_time():
-    """Use this fixture for simple time + zone mocking
-
-    Use this fixture instead of directly invoking on_time in case you don't need a specific time.
-    Calling this once instead of on_time() a lot of times saves execution time.
-    """
+def test_all_datasets(fix_plugin_legacy: FixPluginLegacy) -> None:
     with on_time(1572247138, "CET"):
-        yield
+        for datasetname in generictests.DATASET_NAMES:
+            run_tests_for(datasetname, fix_plugin_legacy)
 
 
-@pytest.mark.usefixtures("mock_time")
+@pytest.mark.slow
 @pytest.mark.parametrize("datasetname", generictests.DATASET_NAMES)
-def test_dataset(datasetname, fix_plugin_legacy):
-    dataset = import_module("generictests.datasets.%s" % datasetname)
+def test_dataset_one_by_one(datasetname: str, fix_plugin_legacy: FixPluginLegacy) -> None:
+    with on_time(1572247138, "CET"):
+        run_tests_for(datasetname, fix_plugin_legacy)
+
+
+def run_tests_for(datasetname: str, fix_plugin_legacy: FixPluginLegacy) -> None:
+    dataset = import_module(f"tests.unit.checks.generictests.datasets.{datasetname}")
     generictests.run(fix_plugin_legacy.check_info, dataset)

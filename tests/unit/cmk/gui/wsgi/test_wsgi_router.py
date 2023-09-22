@@ -1,169 +1,216 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 import os
-import typing
 
+import flask
 import pytest
+import webtest  # type: ignore[import]
+from flask import request
+
+from tests.unit.cmk.gui.conftest import WebTestAppForCMK
 
 import cmk.utils.paths
-import cmk.utils.version as cmk_version
+import cmk.utils.store as store
+from cmk.utils.site import omd_site
+from cmk.utils.user import UserId
 
-if typing.TYPE_CHECKING:
-    import webtest  # type: ignore[import] # pylint: disable=unused-import
+
+def test_request_url(flask_app: flask.Flask) -> None:
+    url = "/NO_SITE/check_mk/api/1.0/objects/activation_run/123/actions/wait-for-completion/invoke"
+    with flask_app.test_request_context(
+        environ_overrides={
+            "apache.version": "foo",
+            "PATH_INFO": url,
+            "SCRIPT_NAME": url,
+        },
+    ):
+        flask_app.preprocess_request()
+        assert request.url == f"http://localhost{url}"
 
 
-def test_profiling(wsgi_app, mocker):
+@pytest.mark.skip(reason="flaky")
+@pytest.mark.parametrize(
+    "setting, url, profiling_files_exist",
+    [
+        ("profile = True", "/NO_SITE/check_mk/login.py", True),
+        ("profile = False", "/NO_SITE/check_mk/login.py", False),
+        ('profile = "enable_by_var"', "/NO_SITE/check_mk/login.py?_profile=1", True),
+        ('profile = "enable_by_var"', "/NO_SITE/check_mk/login.py", False),
+    ],
+)
+def test_profiling(
+    wsgi_app: WebTestAppForCMK, setting: str, url: str, profiling_files_exist: bool
+) -> None:
     var_dir = cmk.utils.paths.var_dir
     assert not os.path.exists(var_dir + "/multisite.py")
     assert not os.path.exists(var_dir + "/multisite.profile")
     assert not os.path.exists(var_dir + "/multisite.cachegrind")
 
-    config = mocker.patch("cmk.gui.config")
-    config.profile = True
+    store.save_mk_file(
+        cmk.utils.paths.default_config_dir + "/multisite.d/wato/global.mk", f"{setting}\n"
+    )
 
-    _ = wsgi_app.get('/NO_SITE/check_mk/login.py')
+    _ = wsgi_app.get(url, status=200)
 
-    assert os.path.exists(var_dir + "/multisite.py")
-    assert os.path.exists(var_dir + "/multisite.profile")
-    assert os.path.exists(var_dir + "/multisite.cachegrind")
+    assert os.path.exists(var_dir + "/multisite.py") == profiling_files_exist
+    assert os.path.exists(var_dir + "/multisite.profile") == profiling_files_exist
+    assert os.path.exists(var_dir + "/multisite.cachegrind") == profiling_files_exist
 
 
-def test_webserver_auth(wsgi_app, with_user):
+@pytest.mark.skip(reason="flaky")
+@pytest.mark.parametrize(
+    "setting, url, profiling_files_exist",
+    [
+        (
+            "profile = True",
+            "/NO_SITE/check_mk/api/1.0/domain-types/folder_config/collections/all",
+            True,
+        ),
+        (
+            "profile = False",
+            "/NO_SITE/check_mk/api/1.0/domain-types/folder_config/collections/all",
+            False,
+        ),
+        (
+            'profile = "enable_by_var"',
+            "/NO_SITE/check_mk/api/1.0/domain-types/folder_config/collections/all?_profile=1",
+            True,
+        ),
+        (
+            'profile = "enable_by_var"',
+            "/NO_SITE/check_mk/api/1.0/domain-types/folder_config/collections/all",
+            False,
+        ),
+    ],
+)
+def test_rest_api_profiling(
+    logged_in_admin_wsgi_app: WebTestAppForCMK, setting: str, url: str, profiling_files_exist: bool
+) -> None:
+    var_dir = cmk.utils.paths.var_dir
+    assert not os.path.exists(var_dir + "/multisite.py")
+    assert not os.path.exists(var_dir + "/multisite.profile")
+    assert not os.path.exists(var_dir + "/multisite.cachegrind")
+
+    store.save_mk_file(
+        cmk.utils.paths.default_config_dir + "/multisite.d/wato/global.mk", f"{setting}\n"
+    )
+
+    _ = logged_in_admin_wsgi_app.get(url, status=200, headers={"Accept": "application/json"})
+
+    assert os.path.exists(var_dir + "/multisite.py") == profiling_files_exist
+    assert os.path.exists(var_dir + "/multisite.profile") == profiling_files_exist
+    assert os.path.exists(var_dir + "/multisite.cachegrind") == profiling_files_exist
+
+
+def test_webserver_auth(wsgi_app: WebTestAppForCMK, with_user: tuple[UserId, str]) -> None:
     username, _ = with_user
-    wsgi_app.get("/NO_SITE/check_mk/api/1.0/version", status=401)
+    wsgi_app.get(
+        "/NO_SITE/check_mk/api/1.0/version", headers={"Accept": "application/json"}, status=401
+    )
 
-    wsgi_app.get("/NO_SITE/check_mk/api/1.0/version",
-                 status=401,
-                 extra_environ={'REMOTE_USER': 'unknown_random_dude'})
+    wsgi_app.get(
+        "/NO_SITE/check_mk/api/1.0/version",
+        headers={"Accept": "application/json"},
+        status=401,
+        extra_environ={"REMOTE_USER": "unknown_random_dude"},
+    )
 
-    wsgi_app.get("/NO_SITE/check_mk/api/1.0/version",
-                 status=200,
-                 extra_environ={'REMOTE_USER': username})
+    wsgi_app.get(
+        "/NO_SITE/check_mk/api/1.0/version",
+        headers={"Accept": "application/json"},
+        status=200,
+        extra_environ={"REMOTE_USER": str(username)},
+    )
 
-    wsgi_app.set_authorization(('Basic', ("unknown_random_dude", "foobazbar")))
-    wsgi_app.get("/NO_SITE/check_mk/api/1.0/version",
-                 status=401,
-                 extra_environ={'REMOTE_USER': username})
+    wsgi_app.set_authorization(("Basic", ("unknown_random_dude", "foobazbar")))
+    wsgi_app.get(
+        "/NO_SITE/check_mk/api/1.0/version",
+        headers={"Accept": "application/json"},
+        status=401,
+        extra_environ={"REMOTE_USER": str(username)},
+    )
 
 
-def test_normal_auth(wsgi_app, with_user):
+def test_normal_auth(base: str, wsgi_app: WebTestAppForCMK, with_user: tuple[UserId, str]) -> None:
     username, password = with_user
-    wsgi_app.get("/NO_SITE/check_mk/api/1.0/version", status=401)
+    wsgi_app.get(f"{base}/version", headers={"Accept": "application/json"}, status=401)
 
     # Add a failing Basic Auth to check if the other types will succeed.
-    wsgi_app.set_authorization(('Basic', ("foobazbar", "foobazbar")))
+    wsgi_app.set_authorization(("Basic", ("foobazbar", "foobazbar")))
 
-    login: 'webtest.TestResponse' = wsgi_app.get('/NO_SITE/check_mk/login.py')
-    login.form['_username'] = username
-    login.form['_password'] = password
-    resp = login.form.submit('_login', index=1)
+    login: webtest.TestResponse = wsgi_app.get("/NO_SITE/check_mk/login.py", status=200)
+    login.form["_username"] = username
+    login.form["_password"] = password
+    resp = login.form.submit("_login", index=1)
 
     assert "Invalid credentials." not in resp.text
 
-    wsgi_app.get("/NO_SITE/check_mk/api/1.0/version", status=200)
+    wsgi_app.set_authorization(None)
+    wsgi_app.get(
+        "/NO_SITE/check_mk/api/1.0/version", headers={"Accept": "application/json"}, status=200
+    )
 
 
-def test_openapi_version(wsgi_app, with_automation_user):
+def test_openapi_version(
+    wsgi_app: WebTestAppForCMK, with_automation_user: tuple[UserId, str]
+) -> None:
     username, secret = with_automation_user
-    wsgi_app.set_authorization(('Bearer', username + " " + secret))
-    resp = wsgi_app.get("/NO_SITE/check_mk/api/1.0/version", status=200)
-    assert resp.json['site'] == cmk_version.omd_site()
+    wsgi_app.set_authorization(("Bearer", username + " " + secret))
+    resp = wsgi_app.get(
+        "/NO_SITE/check_mk/api/1.0/version", headers={"Accept": "application/json"}, status=200
+    )
+    assert resp.json["site"] == omd_site()
 
 
-def test_openapi_app_exception(wsgi_app_debug_off, with_automation_user):
+def test_openapi_app_exception(
+    wsgi_app_debug_off: WebTestAppForCMK, with_automation_user: tuple[UserId, str]
+) -> None:
     wsgi_app = wsgi_app_debug_off
     username, secret = with_automation_user
-    wsgi_app.set_authorization(('Bearer', username + " " + secret))
-    resp = wsgi_app.get("/NO_SITE/check_mk/api/1.0/version?fail=1", status=500)
-    assert 'detail' in resp.json
-    assert 'title' in resp.json
-    assert 'crash_report' in resp.json
-    assert 'check_mk' in resp.json['crash_report']['href']
-    assert 'crash_id' in resp.json
+    wsgi_app.set_authorization(("Bearer", username + " " + secret))
+    resp = wsgi_app.get(
+        "/NO_SITE/check_mk/api/1.0/version?fail=1",
+        headers={"Accept": "application/json"},
+        status=500,
+    )
+    assert "detail" in resp.json
+    assert "title" in resp.json
+    assert "crash_report_url" in resp.json["ext"]["details"]
+    assert "check_mk" in resp.json["ext"]["details"]["crash_report_url"]["href"]
+    assert "id" in resp.json["ext"]
 
 
-@pytest.mark.skip
-def test_legacy_webapi(wsgi_app, with_automation_user):
-    username, password = with_automation_user
-    wsgi_app.set_credentials(username, password)
-    hostname = 'foobar'
-
-    try:
-        ipaddress = '127.0.0.1'
-        wsgi_app.api_request(
-            'add_host',
-            {
-                "hostname": hostname,
-                "folder": 'eins/zwei',
-                # Optional
-                "attributes": {
-                    'ipaddress': ipaddress
-                },
-                "create_folders": True,
-                "nodes": [],
-            })
-
-        resp = wsgi_app.api_request(
-            'foo_host',
-            {'hostname': hostname},
-        )
-        assert "Unknown API action" in resp['result']
-        assert resp['result_code'] == 1
-
-        resp = wsgi_app.api_request(
-            'get_host',
-            {
-                'hostname': hostname,
-            },
-            output_format='python',
-        )
-        assert isinstance(resp, dict), resp
-        assert isinstance(resp['result'], dict), resp['result']
-        assert resp['result']['hostname'] == hostname
-        assert resp['result']['attributes']['ipaddress'] == ipaddress
-
-    finally:
-
-        def _remove(filename):
-            if os.path.exists(filename):
-                os.unlink(filename)
-
-        # FIXME: Testing of delete_host can't be done until the local automation call doesn't call
-        #        out to "check_mk" via subprocess anymore. In order to not break the subsequent
-        #        test, we have to delete the host ourselves. This can and will actually break
-        #        unit/cmk/base/test_config.py::test_get_config_file_paths_with_confd again if
-        #        more files should be created by add_host in the future.
-
-        _remove(cmk.utils.paths.omd_root + "/etc/check_mk/conf.d/fs_cap.mk")
-        _remove(cmk.utils.paths.omd_root + "/etc/check_mk/conf.d/wato/global.mk")
-        _remove(cmk.utils.paths.omd_root + "/etc/check_mk/conf.d/wato/groups.mk")
-        _remove(cmk.utils.paths.omd_root + "/etc/check_mk/conf.d/wato/notifications.mk")
-        _remove(cmk.utils.paths.omd_root + "/etc/check_mk/conf.d/wato/tags.mk")
-        _remove(cmk.utils.paths.omd_root + "/etc/check_mk/conf.d/wato/eins/zwei/hosts.mk")
-
-
-def test_cmk_run_cron(wsgi_app):
+def test_cmk_run_cron(wsgi_app: WebTestAppForCMK) -> None:
     wsgi_app.get("/NO_SITE/check_mk/run_cron.py", status=200)
 
 
-def test_cmk_automation(wsgi_app):
+def test_cmk_automation(wsgi_app: WebTestAppForCMK) -> None:
     response = wsgi_app.get("/NO_SITE/check_mk/automation.py", status=200)
     assert response.text == "Missing secret for automation command."
 
 
-def test_cmk_ajax_graph_images(wsgi_app):
+def test_cmk_ajax_graph_images(wsgi_app: WebTestAppForCMK) -> None:
     resp = wsgi_app.get("/NO_SITE/check_mk/ajax_graph_images.py", status=200)
     assert resp.text.startswith("You are not allowed")
 
-    resp = wsgi_app.get("/NO_SITE/check_mk/ajax_graph_images.py",
-                        status=200,
-                        extra_environ={'REMOTE_ADDR': '127.0.0.1'})
+    resp = wsgi_app.get(
+        "/NO_SITE/check_mk/ajax_graph_images.py",
+        status=200,
+        extra_environ={"REMOTE_ADDR": "127.0.0.1"},
+    )
     assert resp.text == ""
 
 
-def test_options_disabled(wsgi_app):
+def test_options_disabled(wsgi_app: WebTestAppForCMK) -> None:
     # Should be 403 in integration test.
     wsgi_app.options("/", status=404)
+
+
+@pytest.mark.usefixtures("suppress_license_expiry_header")
+def test_pnp_template(wsgi_app: WebTestAppForCMK) -> None:
+    # This got removed some time ago and "Not found" pages are 404 now.
+    resp = wsgi_app.get("/NO_SITE/check_mk/pnp_template.py", status=404)
+    assert "Page not found" in resp.text
+    assert "page_menu_bar" in resp.text

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
-#import pytest
+# import pytest
 
 from cmk.base.api.agent_based.checking_classes import (
     IgnoreResults,
@@ -20,43 +19,42 @@ _WARN_RESULT = Result(state=State.WARN, summary="Watch out")
 
 
 def _check_function_node(test_results):
-    for res in test_results:
-        yield res
+    yield from test_results
 
 
-def test_node_returns_nothing():
-    assert list(make_node_notice_results("test_node", _check_function_node(()))) == []
-    assert list(make_node_notice_results("test_node", ())) == []
+def test_node_returns_nothing() -> None:
+    assert not list(make_node_notice_results("test_node", _check_function_node(())))
+    assert not list(make_node_notice_results("test_node", ()))
 
 
-def test_node_raises():
+def test_node_raises() -> None:
     def _check_node_raises():
         raise IgnoreResultsError()
         yield  # pylint: disable=unreachable
 
-    assert list(make_node_notice_results("test_node", _check_node_raises())) == []
+    assert not list(make_node_notice_results("test_node", _check_node_raises()))
 
 
-def test_node_ignore_results():
+def test_node_ignore_results() -> None:
     node_results = _check_function_node((_OK_RESULT, IgnoreResults()))
-    assert list(make_node_notice_results("test_node", node_results)) == []
+    assert not list(make_node_notice_results("test_node", node_results))
 
 
-def test_node_returns_metric():
+def test_node_returns_metric() -> None:
     node_results = _check_function_node((_OK_RESULT, Metric("panic", 42)))
     assert list(make_node_notice_results("test_node", node_results)) == [
         Result(state=State.OK, notice="[test_node]: I am fine"),
     ]
 
 
-def test_node_returns_details_only():
+def test_node_returns_details_only() -> None:
     node_results = _check_function_node((Result(state=State.OK, notice="This is detailed"),))
     assert list(make_node_notice_results("test_node", node_results)) == [
         Result(state=State.OK, notice="[test_node]: This is detailed"),
     ]
 
 
-def test_node_returns_ok_and_warn():
+def test_node_returns_ok_and_warn() -> None:
     node_results = _check_function_node((_OK_RESULT, _WARN_RESULT))
     assert list(make_node_notice_results("test_node", node_results)) == [
         Result(state=State.OK, notice="[test_node]: I am fine"),
@@ -64,15 +62,17 @@ def test_node_returns_ok_and_warn():
     ]
 
 
-def test_node_mutliline():
+def test_node_mutliline() -> None:
     node_results = (Result(state=State.WARN, notice="These\nare\nfour\nlines"),)
     assert list(make_node_notice_results("test_node", _check_function_node(node_results))) == [
         Result(
             state=State.WARN,
             summary="[test_node]: These, are, four, lines",
-            details=("[test_node]: These\n"
-                     "[test_node]: are\n"
-                     "[test_node]: four\n"
-                     "[test_node]: lines"),
+            details=(
+                "[test_node]: These\n"
+                "[test_node]: are\n"
+                "[test_node]: four\n"
+                "[test_node]: lines"
+            ),
         ),
     ]

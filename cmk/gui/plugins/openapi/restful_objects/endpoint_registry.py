@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2020 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2020 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """This module contains the "Endpoint Registry".
@@ -11,18 +10,16 @@ This registry has multiple jobs:
  2. interlinking between endpoints without having to know the specific URL.
 
 """
-from typing import Dict, List, Iterator, Any, Sequence
+from collections.abc import Iterator, Sequence
+from typing import Any
 
-from cmk.gui.plugins.openapi.restful_objects.params import (
-    fill_out_path_template,
-    path_parameters,
-)
+from cmk.gui.plugins.openapi.restful_objects.params import fill_out_path_template, path_parameters
 from cmk.gui.plugins.openapi.restful_objects.type_defs import (
-    EndpointKey,
-    ParameterKey,
     EndpointEntry,
+    EndpointKey,
     LinkRelation,
     OpenAPIParameter,
+    ParameterKey,
 )
 
 
@@ -67,9 +64,10 @@ class EndpointRegistry:
         ...     [{'name': 'hostname', 'in': 'query', 'required': True}])
 
     """
-    def __init__(self):
-        self._endpoints: Dict[EndpointKey, Dict[ParameterKey, EndpointEntry]] = {}
-        self._endpoint_list: List[EndpointEntry] = []
+
+    def __init__(self) -> None:
+        self._endpoints: dict[EndpointKey, dict[ParameterKey, EndpointEntry]] = {}
+        self._endpoint_list: list[EndpointEntry] = []
 
     def __iter__(self) -> Iterator[Any]:
         return iter(self._endpoint_list)
@@ -78,7 +76,7 @@ class EndpointRegistry:
         self,
         module_name: str,
         rel: LinkRelation,
-        parameter_values: Dict[str, str],
+        parameter_values: dict[str, str],
     ) -> EndpointEntry:
         """Look up an endpoint definition
 
@@ -105,22 +103,22 @@ class EndpointRegistry:
         except KeyError:
             raise KeyError(f"Key {endpoint_key!r} not in {self._endpoints!r}")
         if parameter_key not in endpoint_entry:
-            raise ValueError(f"Endpoint {endpoint_key} with parameters {parameter_key} not found. "
-                             f"The following parameter combinations are possible: "
-                             f"{list(endpoint_entry.keys())}")
+            raise ValueError(
+                f"Endpoint {endpoint_key} with parameters {parameter_key} not found. "
+                f"The following parameter combinations are possible: "
+                f"{list(endpoint_entry.keys())}"
+            )
 
-        examples: Dict[str, OpenAPIParameter] = {
-            key: {
-                'example': value
-            } for key, value in parameter_values.items()
+        examples: dict[str, OpenAPIParameter] = {
+            key: {"example": value} for key, value in parameter_values.items()
         }
 
         # Needs to fill out path templates!
         entry = endpoint_entry[parameter_key]
-        entry['href'] = fill_out_path_template(entry['href'], examples)
+        entry["href"] = fill_out_path_template(entry["href"], examples)
         return entry
 
-    def add_endpoint(
+    def add_endpoint(  # type: ignore[no-untyped-def]
         self,
         endpoint,  # not typed due to cyclical imports. need to refactor modules first.
         parameters: Sequence[OpenAPIParameter],
@@ -142,9 +140,12 @@ class EndpointRegistry:
             # We key on _all_ required parameters, regardless their type.
             _param_names = set()
             for _param in _parameters:
-                if 'schema' not in _param and isinstance(_param, dict) and _param.get(
-                        'required', True):
-                    _param_names.add(_param['name'])
+                if (
+                    "schema" not in _param
+                    and isinstance(_param, dict)
+                    and _param.get("required", True)
+                ):
+                    _param_names.add(_param["name"])
             for _param_name in path_parameters(_path):
                 _param_names.add(_param_name)
             return tuple(sorted(_param_names))
@@ -153,22 +154,43 @@ class EndpointRegistry:
         parameter_key = _param_key(endpoint.path, parameters)
         endpoint_entry = self._endpoints.setdefault(endpoint_key, {})
         if parameter_key in endpoint_entry:
-            raise RuntimeError("The endpoint %r has already been set to %r" %
-                               (endpoint_key, endpoint_entry[parameter_key]))
+            raise RuntimeError(
+                f"The endpoint {endpoint_key!r} has already been set to {endpoint_entry[parameter_key]!r}"
+            )
 
         endpoint_entry[parameter_key] = {
-            'endpoint': endpoint,
-            'href': endpoint.path,  # legacy
-            'method': endpoint.method,  # legacy
-            'rel': endpoint.link_relation,  # legacy
-            'parameters': parameters,
+            "endpoint": endpoint,
+            "href": endpoint.path,  # legacy
+            "method": endpoint.method,  # legacy
+            "rel": endpoint.link_relation,  # legacy
+            "parameters": parameters,
         }
+
+    def remove_endpoint(  # type: ignore[no-untyped-def]
+        self,
+        endpoint,  # not typed due to cyclical imports. need to refactor modules first.
+    ) -> None:
+        """
+        Removes an endpoint. This is currently only used in tests.
+        The implementation is not optimized for performance.
+        """
+        self._endpoint_list.remove(endpoint)
+        parameter_key = None
+        endpoint_key = None
+        for e_key, e_value in self._endpoints.items():
+            for p_key, p_value in e_value.items():
+                if p_value["endpoint"] == endpoint:
+                    parameter_key = p_key
+                    endpoint_key = e_key
+        if parameter_key is None or endpoint_key is None:
+            raise ValueError(f"Could not find endpoint {endpoint}")
+        self._endpoints[endpoint_key].pop(parameter_key)
 
 
 def _make_url(
     path: str,
     param_spec: Sequence[OpenAPIParameter],
-    param_val: Dict[str, str],
+    param_val: dict[str, str],
 ) -> str:
     """Make a concrete URL according to parameter specs and value-mappings.
 
@@ -203,10 +225,11 @@ def _make_url(
         ...
         ValueError: Parameter 'host' (required path-parameter), not found in path '/foo'
 
-        >>> import pytest
         >>> # This exceptions gets thrown by another function, so we don't care about the wording.
-        >>> with pytest.raises(ValueError):
-        ...     _make_url('/foo/{host}', [], {'host': 'example.com'})
+        >>> _make_url('/foo/{host}', [], {'host': 'example.com'})  # doctest: +ELLIPSIS
+        Traceback (most recent call last):
+        ...
+        ValueError: ...
 
     Args:
         path:
@@ -222,26 +245,28 @@ def _make_url(
         The formatted path, query-string appended if applicable.
 
     """
-    path_params: Dict[str, OpenAPIParameter] = {}
+    path_params: dict[str, OpenAPIParameter] = {}
     qs = []
     for p in param_spec:
-        param_name = p['name']
+        param_name = p["name"]
         if param_name not in param_val:
-            if p.get('required', True):
+            if p.get("required", True):
                 raise ValueError(f"No parameter mapping for required parameter {param_name!r}.")
             # We skip optional parameters, when we don't have values for them.
             continue
 
         param_value = param_val[param_name]
-        if p['in'] == 'query':
+        if p["in"] == "query":
             qs.append(f"{param_name}={param_value}")
-        elif p['in'] == 'path':
+        elif p["in"] == "path":
             if param_name not in path_parameters(path):
-                raise ValueError(f"Parameter {param_name!r} (required path-parameter), "
-                                 f"not found in path {path!r}")
-            path_params[param_name] = {'example': param_value}
+                raise ValueError(
+                    f"Parameter {param_name!r} (required path-parameter), "
+                    f"not found in path {path!r}"
+                )
+            path_params[param_name] = {"example": param_value}
 
-    query_string = '&'.join(qs)
+    query_string = "&".join(qs)
     rv = fill_out_path_template(path, path_params)
     if query_string:
         rv += f"?{query_string}"

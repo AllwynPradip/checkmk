@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
-from .agent_based_api.v1.type_defs import StringTable
-
 from .agent_based_api.v1 import register
+from .agent_based_api.v1.type_defs import StringTable
 from .utils import docker, memory
 
 
@@ -16,15 +14,15 @@ def _parse_docker_container_mem_plugin(string_table: StringTable) -> docker.Memo
     parsed = docker.parse(string_table).data
 
     # we could get data from a host with cgroup v2, or cgroup v1.
-    stats = parsed.get('stats', {})
+    stats = parsed.get("stats", {})
 
     try:
-        memory_limit = parsed['limit']
-        container_memory_usage = parsed['usage']
-        if 'hierarchical_memory_limit' in stats and 'total_inactive_file' in stats:
+        memory_limit = parsed["limit"]
+        container_memory_usage = parsed["usage"]
+        if "hierarchical_memory_limit" in stats and "total_inactive_file" in stats:
             # cgroup v1
-            container_memory_limit = stats['hierarchical_memory_limit']
-            container_memory_total_inactive_file = stats['total_inactive_file']
+            container_memory_limit = stats["hierarchical_memory_limit"]
+            container_memory_total_inactive_file = stats["total_inactive_file"]
             memory_limit = min(memory_limit, container_memory_limit)
         else:
             # we assume cgroup v2
@@ -84,8 +82,12 @@ def parse_docker_container_mem(string_table: StringTable) -> memory.SectionMemUs
     version = docker.get_version(string_table)
 
     if version is None:
+        # this is the output of a checkmk agent run inside a docker container
+        # it has to handle only cgroupv1 as cgroupv2 is sent with another section name
         parsed = docker.parse_container_memory(string_table)
     else:
+        # this is the output of mk_docker.py
+        # it has to handle both cgroupv1 and cgroupv2
         parsed = _parse_docker_container_mem_plugin(string_table)
     return parsed.to_mem_used()
 

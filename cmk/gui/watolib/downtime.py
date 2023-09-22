@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2020 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2020 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
-import cmk.gui.config as config
+
+from typing import Literal
+
 import livestatus
+
+from cmk.gui.logged_in import user
 
 
 def determine_downtime_mode(recurring_number, delayed_duration):
@@ -24,7 +27,9 @@ def determine_downtime_mode(recurring_number, delayed_duration):
 
 
 class DowntimeSchedule:
-    def __init__(self, start_time, end_time, mode, delayed_duration=None, comment=None):
+    def __init__(  # type: ignore[no-untyped-def]
+        self, start_time, end_time, mode, delayed_duration=None, comment=None
+    ) -> None:
         self.start_time = start_time
         self.end_time = end_time
         self.mode = mode
@@ -33,11 +38,18 @@ class DowntimeSchedule:
         self.delayed_duration = delayed_duration
         self.comment = comment
 
-    def livestatus_command(self, specification: str, cmdtag: str) -> str:
-        return ("SCHEDULE_" + cmdtag + "_DOWNTIME;%s;" % specification) + ("%d;%d;%d;0;%d;%s;" % (
-            self.start_time,
-            self.end_time,
-            self.mode,
-            self.delayed_duration,
-            config.user.id,
-        )) + livestatus.lqencode(self.comment)
+    def livestatus_command(self, specification: str, cmdtag: Literal["HOST", "SVC"]) -> str:
+        return (
+            ("SCHEDULE_" + cmdtag + "_DOWNTIME;%s;" % specification)
+            + (
+                "%d;%d;%d;0;%d;%s;"
+                % (
+                    self.start_time,
+                    self.end_time,
+                    self.mode,
+                    self.delayed_duration,
+                    user.id,
+                )
+            )
+            + livestatus.lqencode(self.comment)
+        )

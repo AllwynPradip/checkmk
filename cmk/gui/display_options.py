@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 from __future__ import annotations
 
-from typing import Optional, TYPE_CHECKING
+from cmk.gui.ctx_stack import request_local_attr
+from cmk.gui.htmllib.html import HTMLGenerator
+from cmk.gui.http import Request
 
-if TYPE_CHECKING:
-    from cmk.gui.http import Request
-    import cmk.gui.htmllib as htmllib
-
-#.
+# .
 #   .--Display Opts.-------------------------------------------------------.
 #   |       ____  _           _                ___        _                |
 #   |      |  _ \(_)___ _ __ | | __ _ _   _   / _ \ _ __ | |_ ___          |
@@ -42,7 +39,7 @@ class DisplayOptions:
     S = "S"  # The playing of alarm sounds (on critical and warning services)
     U = "U"  # Load persisted user row selections
     I = "I"  # All hyperlinks pointing to other views
-    X = "X"  # All other hyperlinks (pointing to external applications like PNP, WATO or others)
+    X = "X"  # All other hyperlinks (pointing to external applications like PNP, Setup or others)
     M = "M"  # If this option is not set, then all hyperlinks are targeted to the HTML frame
     # with the name main. This is useful when using views as elements in the dashboard.
     L = "L"  # The column title links in multisite views
@@ -64,9 +61,9 @@ class DisplayOptions:
 
     def __init__(self) -> None:
         self.options: str = self.all_off()
-        self.title_options: Optional[str] = None
+        self.title_options: str | None = None
 
-    def load_from_html(self, request: Request, html: htmllib.html) -> None:
+    def load_from_html(self, request: Request, html: HTMLGenerator) -> None:
         # Parse display options and
         if html.output_format == "html":
             options = request.get_ascii_input_mandatory("display_options", "")
@@ -82,9 +79,10 @@ class DisplayOptions:
         # a special var _display_options for defining the display_options for rendering
         # the data table to be reloaded. The contents of "display_options" are used for
         # linking to other views.
-        if request.has_var('_display_options'):
+        if request.has_var("_display_options"):
             self.options = self._merge_with_defaults(
-                request.get_ascii_input_mandatory("_display_options", ""))
+                request.get_ascii_input_mandatory("_display_options", "")
+            )
 
         # But there is one special case: Links to other views (sorter header links, painter column
         # links). These links need to know about the provided display_option parameter. The links
@@ -96,7 +94,7 @@ class DisplayOptions:
         # frame. Also the display options are removed since the view in the main
         # frame should be displayed in standard mode.
         if self.disabled(self.M):
-            html.set_link_target("main")
+            html.link_target = "main"
             request.del_var("display_options")
 
     # If all display_options are upper case assume all not given values default
@@ -114,3 +112,6 @@ class DisplayOptions:
 
     def disabled(self, opt: str) -> bool:
         return opt not in self.options
+
+
+display_options = request_local_attr("display_options", DisplayOptions)

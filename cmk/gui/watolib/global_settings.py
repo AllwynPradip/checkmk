@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Any, Dict
+from collections.abc import Callable
+from typing import Any
 
-from cmk.gui.watolib.config_domains import ConfigDomainGUI
-from cmk.gui.plugins.watolib.utils import (
+from cmk.utils.version import edition, Edition
+
+import cmk.gui.watolib.config_domain_name as config_domain_name
+from cmk.gui.global_config import get_global_config, GlobalConfig
+from cmk.gui.type_defs import GlobalSettings
+from cmk.gui.watolib.config_domain_name import (
     ABCConfigDomain,
     config_variable_registry,
+    UNREGISTERED_SETTINGS,
 )
 
 
-def load_configuration_settings(site_specific=False, custom_site_path=None, full_config=False):
+def load_configuration_settings(
+    site_specific: bool = False, custom_site_path: str | None = None, full_config: bool = False
+) -> GlobalSettings:
     settings = {}
     for domain in ABCConfigDomain.enabled_domains():
         if full_config:
@@ -25,12 +32,21 @@ def load_configuration_settings(site_specific=False, custom_site_path=None, full
     return settings
 
 
-def rulebased_notifications_enabled() -> bool:
-    return load_configuration_settings().get("enable_rulebased_notifications", False)
+def save_global_settings(
+    vars_: GlobalSettings,
+    site_specific: bool = False,
+    custom_site_path: str | None = None,
+    get_global_settings_config: Callable[[], GlobalConfig] = get_global_config,
+) -> None:
+    if edition() is Edition.CSE:
+        global_settings_config = get_global_settings_config().global_settings
+        vars_ = {
+            varname: value
+            for varname, value in vars_.items()
+            if global_settings_config.is_activated(varname)
+        }
 
-
-def save_global_settings(vars_, site_specific=False, custom_site_path=None):
-    per_domain: Dict[str, Dict[Any, Any]] = {}
+    per_domain: dict[str, dict[Any, Any]] = {}
     # TODO: Uee _get_global_config_var_names() from domain class?
     for config_variable_class in config_variable_registry.values():
         config_variable = config_variable_class()
@@ -42,13 +58,9 @@ def save_global_settings(vars_, site_specific=False, custom_site_path=None):
 
     # Some settings are handed over from the central site but are not registered in the
     # configuration domains since the user must not change it directly.
-    for varname in [
-            "wato_enabled",
-            "userdb_automatic_sync",
-            "user_login",
-    ]:
+    for varname in UNREGISTERED_SETTINGS:
         if varname in vars_:
-            per_domain.setdefault(ConfigDomainGUI.ident(), {})[varname] = vars_[varname]
+            per_domain.setdefault(config_domain_name.GUI, {})[varname] = vars_[varname]
 
     for domain in ABCConfigDomain.enabled_domains():
         domain_config = per_domain.get(domain().ident(), {})
@@ -58,9 +70,11 @@ def save_global_settings(vars_, site_specific=False, custom_site_path=None):
             domain().save(domain_config, custom_site_path=custom_site_path)
 
 
-def load_site_global_settings(custom_site_path=None):
+def load_site_global_settings(custom_site_path: str | None = None) -> GlobalSettings:
     return load_configuration_settings(site_specific=True, custom_site_path=custom_site_path)
 
 
-def save_site_global_settings(settings, custom_site_path=None):
+def save_site_global_settings(
+    settings: GlobalSettings, custom_site_path: str | None = None
+) -> None:
     save_global_settings(settings, site_specific=True, custom_site_path=custom_site_path)

@@ -1,23 +1,19 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """Prometheus Build Check"""
 
 import json
-from typing import Dict, Any, Optional
-from .agent_based_api.v1 import Result, register, type_defs, State as state, Service
+from typing import Any
 
-from .agent_based_api.v1.type_defs import (
-    CheckResult,
-    DiscoveryResult,
-)
+from .agent_based_api.v1 import register, Result, Service, State, type_defs
+from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult
 
-Section = Dict[str, Any]
+Section = dict[str, Any]
 
 
-def parse_prometheus_build(string_table: type_defs.StringTable) -> Optional[Section]:
+def parse_prometheus_build(string_table: type_defs.StringTable) -> Section | None:
     section = {}
     try:
         prometheus_section = json.loads(string_table[0][0])
@@ -34,23 +30,36 @@ register.agent_section(
 
 
 def discovery_prometheus_build(section: Section) -> DiscoveryResult:
+    if not section:
+        return
     yield Service()
 
 
 def check_prometheus_build(section: Section) -> CheckResult:
-    yield Result(
-        state=state.OK,
-        summary=f"Version: {section['version']}",
-    )
+    if "version" in section:
+        # Only from Prometheus 2.14 the buildinfo endpoint is available which will show the version
+        # number of the main Prometheus instance. For < 2.14 the version information can only be
+        # retrieved via PromQl. However, the query returns the version of all connected instances
+        # with no label to identify the main instance
+        if len(section["version"]) == 1:
+            version_summary = version_details = f"Version: {section['version'][0]}"
+        else:
+            version_summary = "Version: multiple instances"
+            version_details = f"Versions: {', '.join(section['version'])}"
+        yield Result(
+            state=State.OK,
+            summary=version_summary,
+            details=version_details,
+        )
 
     if "reload_config_status" in section:
         successful_reload = section["reload_config_status"]
         if successful_reload:
             reload_message = "Success"
-            status = state.OK
+            status = State.OK
         else:
             reload_message = "Failure"
-            status = state.CRIT
+            status = State.CRIT
 
         yield Result(
             state=status,
@@ -59,7 +68,7 @@ def check_prometheus_build(section: Section) -> CheckResult:
 
     if "storage_retention" in section:
         yield Result(
-            state=state.OK,
+            state=State.OK,
             summary=f"Storage retention: {section['storage_retention']}",
         )
 
@@ -71,9 +80,9 @@ def check_prometheus_build(section: Section) -> CheckResult:
 
         if len(down_targets):
             down_target_names = f" (Targets in down state: {', '.join(down_targets)})"
-            status = state.WARN
+            status = State.WARN
         else:
-            status = state.OK
+            status = State.OK
             down_target_names = ""
 
         summary = f"Scrape Targets in up state: {up_number} out of {total_number}"

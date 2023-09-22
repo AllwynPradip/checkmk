@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+from cmk.gui.graphing._utils import graph_info, metric_info
 from cmk.gui.i18n import _
 
-from cmk.gui.plugins.metrics import (
-    metric_info,
-    graph_info,
-)
-
-#.
+# .
 #   .--Metrics-------------------------------------------------------------.
 #   |                   __  __      _        _                             |
 #   |                  |  \/  | ___| |_ _ __(_) ___ ___                    |
@@ -44,6 +39,18 @@ metric_info["process_resident_size"] = {
     "color": "14/a",
 }
 
+metric_info["process_virtual_size_avg"] = {
+    "title": _("Virtual size") + " (" + _("average") + ")",
+    "unit": "bytes",
+    "color": "26/a",
+}
+
+metric_info["process_resident_size_avg"] = {
+    "title": _("Resident size") + " (" + _("average") + ")",
+    "unit": "bytes",
+    "color": "24/a",
+}
+
 metric_info["process_mapped_size"] = {
     "title": _("Mapped size"),
     "unit": "bytes",
@@ -56,7 +63,7 @@ metric_info["process_handles"] = {
     "color": "32/a",
 }
 
-#.
+# .
 #   .--Graphs--------------------------------------------------------------.
 #   |                    ____                 _                            |
 #   |                   / ___|_ __ __ _ _ __ | |__  ___                    |
@@ -76,23 +83,31 @@ metric_info["process_handles"] = {
 # Further details see here: metrics/utils.py -> _get_implicit_graph_templates()
 graph_info["number_of_processes"] = {
     "title": _("Number of processes"),
-    "metrics": [("processes", "area"),]
+    "metrics": [
+        ("processes", "area"),
+    ],
 }
 
 graph_info["size_of_processes"] = {
     "title": _("Size of processes"),
     "metrics": [
-        ("process_virtual_size", "stack"),
-        ("process_mapped_size", "stack"),
+        ("process_virtual_size_avg", "line"),
+        ("process_virtual_size", "area"),
+        ("process_mapped_size", "area"),
+        ("process_resident_size_avg", "line"),
         ("process_resident_size", "area"),
     ],
-    "optional_metrics": ["process_mapped_size"]
+    "optional_metrics": [
+        "process_mapped_size",
+        "process_virtual_size_avg",
+        "process_resident_size_avg",
+    ],
 }
 
 graph_info["size_per_process"] = {
     "title": _("Size per process"),
     "metrics": [
+        ("process_virtual_size,processes,/", "area", _("Average virtual size per process")),
         ("process_resident_size,processes,/", "area", _("Average resident size per process")),
-        ("process_virtual_size,processes,/", "stack", _("Average virtual size per process")),
-    ]
+    ],
 }

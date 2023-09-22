@@ -1,49 +1,54 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
+from __future__ import annotations
 
-from typing import Callable, Dict
 import functools
 import http.client as http_client
 import traceback
-import json
+from collections.abc import Callable
+from typing import TYPE_CHECKING
+
+import flask
 
 import livestatus
 
 import cmk.utils.paths
 import cmk.utils.profile
 import cmk.utils.store
+from cmk.utils.exceptions import MKException
 
-from cmk.gui import config, pages, http, htmllib, sites
-from cmk.gui.display_options import DisplayOptions
+from cmk.gui import pages, sites
+from cmk.gui.breadcrumb import Breadcrumb, BreadcrumbItem
+from cmk.gui.config import active_config
 from cmk.gui.exceptions import (
-    MKUserError,
-    MKConfigError,
-    MKGeneralException,
-    MKAuthException,
-    MKUnauthenticatedException,
     FinalizeRequest,
     HTTPRedirect,
+    MKAuthException,
+    MKConfigError,
+    MKNotFound,
+    MKUnauthenticatedException,
+    MKUserError,
 )
-from cmk.gui.globals import html, RequestContext, AppContext, request, response
+from cmk.gui.htmllib.header import make_header
+from cmk.gui.htmllib.html import html
+from cmk.gui.http import request, response, Response
 from cmk.gui.i18n import _
 from cmk.gui.log import logger
-from cmk.gui.breadcrumb import Breadcrumb, BreadcrumbItem
-from cmk.gui.http import Response
-from cmk.gui.utils.timeout_manager import TimeoutManager
 from cmk.gui.utils.urls import requested_file_name
-from cmk.gui.utils.theme import Theme
-from cmk.gui.utils.output_funnel import OutputFunnel
-from cmk.gui.utils.json import patch_json
 from cmk.gui.wsgi.applications.utils import (
+    AbstractWSGIApp,
     ensure_authentication,
     fail_silently,
     handle_unhandled_exception,
-    load_all_plugins,
     plain_error,
 )
+from cmk.gui.wsgi.type_defs import WSGIResponse
+
+if TYPE_CHECKING:
+    # TODO: Directly import from wsgiref.types in Python 3.11, without any import guard
+    from _typeshed.wsgi import StartResponse, WSGIEnvironment
 
 # TODO
 #  * derive all exceptions from werkzeug's http exceptions.
@@ -64,36 +69,16 @@ def _noauth(func: pages.PageHandlerFunc) -> Callable[[], Response]:
     def _call_noauth():
         try:
             func()
+        except HTTPRedirect:
+            raise
         except Exception as e:
             html.write_text(str(e))
-            if config.debug:
+            if active_config.debug:
                 html.write_text(traceback.format_exc())
 
         return response
 
     return _call_noauth
-
-
-def get_and_wrap_page(script_name: str) -> Callable[[], Response]:
-    """Get the page handler and wrap authentication logic when needed.
-
-    For all "noauth" page handlers the wrapping part is skipped. In the `ensure_authentication`
-    wrapper everything needed to make a logged-in request is listed.
-    """
-    _handler = pages.get_page_handler(script_name)
-    if _handler is None:
-        # Some pages do skip authentication. This is done by adding
-        # noauth: to the page handler, e.g. "noauth:run_cron" : ...
-        # TODO: Eliminate those "noauth:" pages. Eventually replace it by call using
-        #       the now existing default automation user.
-        _handler = pages.get_page_handler("noauth:" + script_name)
-        if _handler is not None:
-            return _noauth(_handler)
-
-    if _handler is None:
-        return _page_not_found
-
-    return ensure_authentication(_handler)
 
 
 def _page_not_found() -> Response:
@@ -103,21 +88,26 @@ def _page_not_found() -> Response:
         html.write_text(_("Page not found"))
     else:
         title = _("Page not found")
-        html.header(
+        make_header(
+            html,
             title,
-            Breadcrumb([
-                BreadcrumbItem(
-                    title="Nowhere",
-                    url=None,
-                ),
-                BreadcrumbItem(
-                    title=title,
-                    url="javascript:document.location.reload(false)",
-                ),
-            ]))
+            Breadcrumb(
+                [
+                    BreadcrumbItem(
+                        title="Nowhere",
+                        url=None,
+                    ),
+                    BreadcrumbItem(
+                        title=title,
+                        url="javascript:document.location.reload(false)",
+                    ),
+                ]
+            ),
+        )
         html.show_error(_("This page was not found. Sorry."))
     html.footer()
 
+    response.status_code = http_client.NOT_FOUND
     return response
 
 
@@ -125,32 +115,17 @@ def _render_exception(e: Exception, title: str) -> Response:
     if plain_error():
         return Response(
             response=[
-                "%s%s\n" % (("%s: " % title) if title else "", e),
+                "{}{}\n".format(("%s: " % title) if title else "", e),
             ],
             mimetype="text/plain",
         )
 
     if not fail_silently():
-        html.header(title, Breadcrumb())
+        make_header(html, title, Breadcrumb())
         html.show_error(str(e))
         html.footer()
 
     return response
-
-
-def default_response_headers(req: http.Request) -> Dict[str, str]:
-    headers = {
-        # Disable caching for all our pages as they are mostly dynamically generated,
-        # user related and are required to be up-to-date on every refresh
-        "Cache-Control": "no-cache",
-    }
-
-    # Would be better to put this to page individual code, but we currently have
-    # no mechanism for a page to set do this before the authentication is made.
-    if requested_file_name(req) == "webapi":
-        headers["Access-Control-Allow-Origin"] = "*"
-
-    return headers
 
 
 _OUTPUT_FORMAT_MIME_TYPES = {
@@ -178,76 +153,57 @@ def get_mime_type_from_output_format(output_format: str) -> str:
     return _OUTPUT_FORMAT_MIME_TYPES[output_format]
 
 
-class CheckmkApp:
-    """The Check_MK GUI WSGI entry point"""
-    def __init__(self, debug=False):
-        self.debug = debug
+class CheckmkApp(AbstractWSGIApp):
+    """The Checkmk GUI WSGI entry point"""
 
-    def __call__(self, environ, start_response):
-        req = http.Request(environ)
-
-        output_format = get_output_format(
-            req.get_ascii_input_mandatory("output_format", "html").lower())
-        mime_type = get_mime_type_from_output_format(output_format)
-
-        resp = Response(headers=default_response_headers(req), mimetype=mime_type)
-        funnel = OutputFunnel(resp)
-
-        timeout_manager = TimeoutManager()
-        timeout_manager.enable_timeout(req.request_timeout)
-
-        theme = Theme()
-
-        with AppContext(self), RequestContext(
-                req=req,
-                resp=resp,
-                funnel=funnel,
-                html_obj=htmllib.html(req, resp, funnel, output_format),
-                timeout_manager=timeout_manager,
-                display_options=DisplayOptions(),
-                theme=theme,
-        ), patch_json(json):
-            config.initialize()
-            theme.from_config(config.ui_theme, config.theme_choices())
-            return self.wsgi_app(environ, start_response)
-
-    def wsgi_app(self, environ, start_response):
+    def wsgi_app(self, environ: WSGIEnvironment, start_response: StartResponse) -> WSGIResponse:
         """Is called by the WSGI server to serve the current page"""
         with cmk.utils.store.cleanup_locks(), sites.cleanup_connections():
             return _process_request(environ, start_response, debug=self.debug)
 
 
-def _process_request(environ, start_response, debug=False) -> Response:  # pylint: disable=too-many-branches
+def _process_request(  # pylint: disable=too-many-branches
+    environ: WSGIEnvironment,
+    start_response: StartResponse,
+    debug: bool = False,
+) -> WSGIResponse:
+    resp: Response
     try:
-        # Make sure all plugins are available as early as possible. At least
-        # we need the plugins (i.e. the permissions declared in these) at the
-        # time before the first login for generating auth.php.
-        load_all_plugins()
+        file_name = requested_file_name(request, on_error="raise")
 
-        page_handler = get_and_wrap_page(requested_file_name(request))
+        if file_name is None:
+            page_handler = _page_not_found
+        elif _handler := pages.get_page_handler(file_name):
+            page_handler = ensure_authentication(_handler)
+        elif _handler := pages.get_page_handler(f"noauth:{file_name}"):
+            page_handler = _noauth(_handler)
+        else:
+            page_handler = _page_not_found
+
         resp = page_handler()
-    except HTTPRedirect as e:
-        # This can't be a new Response as it can have already cookies set/deleted by the pages.
-        # We can't return the response because the Exception has been raised instead.
-        # TODO: Remove all HTTPRedirect exceptions from all pages. Making the Exception a subclass
-        #       of Response may also work as it can then be directly returned from here.
-        resp = response
-        resp.status_code = e.status
-        resp.headers["Location"] = e.url
 
-    except FinalizeRequest as e:
+    except MKNotFound:
+        resp = _page_not_found()
+
+    except HTTPRedirect as exc:
+        return flask.redirect(exc.url)(environ, start_response)
+
+    except FinalizeRequest as exc:
         # TODO: Remove all FinalizeRequest exceptions from all pages and replace it with a `return`.
         #       It may be necessary to rewire the control-flow a bit as this exception could have
         #       been used to short-circuit some code and jump directly to the response. This
         #       needs to be changed as well.
         resp = response
-        resp.status_code = e.status
+        resp.status_code = exc.status
 
     except livestatus.MKLivestatusNotFoundError as e:
         resp = _render_exception(e, title=_("Data not found"))
 
     except MKUserError as e:
         resp = _render_exception(e, title=_("Invalid user input"))
+
+    except MKUnauthenticatedException as e:
+        resp = _render_exception(e, title=_("Not authenticated"))
 
     except MKAuthException as e:
         resp = _render_exception(e, title=_("Permission denied"))
@@ -256,15 +212,11 @@ def _process_request(environ, start_response, debug=False) -> Response:  # pylin
         resp = _render_exception(e, title=_("Livestatus problem"))
         resp.status_code = http_client.BAD_GATEWAY
 
-    except MKUnauthenticatedException as e:
-        resp = _render_exception(e, title=_("Not authenticated"))
-        resp.status_code = http_client.UNAUTHORIZED
-
     except MKConfigError as e:
         resp = _render_exception(e, title=_("Configuration error"))
         logger.error("MKConfigError: %s", e)
 
-    except (MKGeneralException, cmk.utils.store.MKConfigLockTimeout) as e:
+    except MKException as e:
         resp = _render_exception(e, title=_("General error"))
         logger.error("%s: %s", e.__class__.__name__, e)
 
@@ -273,4 +225,5 @@ def _process_request(environ, start_response, debug=False) -> Response:  # pylin
         if debug:
             raise
 
+    resp.set_caching_headers()
     return resp(environ, start_response)

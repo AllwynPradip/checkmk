@@ -1,37 +1,33 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
-from typing import Optional, Tuple
+from ast import literal_eval
+from collections.abc import Sequence
 
 import pytest
 
-from cmk.base.api.agent_based.type_defs import Parameters
+from cmk.checkengine.parameters import Parameters
+
 from cmk.base.api.agent_based.checking_classes import (
+    EvalableFloat,
     IgnoreResults,
-    ServiceLabel,
-    Service,
-    State as state,
     Metric,
     Result,
+    Service,
+    ServiceLabel,
+    State,
 )
 
 
-@pytest.mark.parametrize("data", [
-    None,
-    (),
-    [],
-    "",
-])
-def test_paramters_invalid(data):
-    with pytest.raises(TypeError, match="expected dict"):
-        _ = Parameters(data)
+def test_evalable_float() -> None:
+    inf = EvalableFloat("inf")
+    assert literal_eval("%r" % inf) == float("inf")
 
 
-def test_parameters_features():
+def test_parameters_features() -> None:
     par0 = Parameters({})
-    par1 = Parameters({'olaf': 'schneemann'})
+    par1 = Parameters({"olaf": "schneemann"})
 
     assert repr(par1) == "Parameters({'olaf': 'schneemann'})"
 
@@ -41,44 +37,51 @@ def test_parameters_features():
     assert not par0
     assert par1
 
-    assert 'olaf' not in par0
-    assert 'olaf' in par1
+    assert "olaf" not in par0
+    assert "olaf" in par1
 
-    assert par0.get('olaf') is None
-    assert par1.get('olaf') == 'schneemann'
+    assert par0.get("olaf") is None
+    assert par1.get("olaf") == "schneemann"
 
     with pytest.raises(KeyError):
-        _ = par0['olaf']
-    assert par1['olaf'] == 'schneemann'
+        _ = par0["olaf"]
+    assert par1["olaf"] == "schneemann"
 
-    assert list(par0) == list(par0.keys()) == list(par0.values()) == list(par0.items()) == []
-    assert list(par1) == list(par1.keys()) == ['olaf']
-    assert list(par1.values()) == ['schneemann']
-    assert list(par1.items()) == [('olaf', 'schneemann')]
+    assert not list(par0)
+    assert not list(par0.keys())
+    assert not list(par0.values())
+    assert not list(par0.items())
+
+    assert list(par1) == list(par1.keys()) == ["olaf"]
+    assert list(par1.values()) == ["schneemann"]
+    assert list(par1.items()) == [("olaf", "schneemann")]
 
 
-def test_service_label():
+def test_service_label() -> None:
     # as far as the API is concerned, the only important thing ist that they
     # exist, an can be created like this.
-    _ = ServiceLabel('from-home-office', 'true')
+    _ = ServiceLabel("from-home-office", "true")
 
 
-@pytest.mark.parametrize("item, parameters, labels", [
-    (4, None, None),
-    (None, (80, 90), None),
-    (None, None, ["foo:bar"]),
-])
-def test_service_invalid(item, parameters, labels):
+@pytest.mark.parametrize(
+    "item, parameters, labels",
+    [
+        (4, None, None),
+        (None, (80, 90), None),
+        (None, None, ["foo:bar"]),
+    ],
+)
+def test_service_invalid(item: object, parameters: object, labels: object) -> None:
     with pytest.raises(TypeError):
-        _ = Service(item=item, parameters=parameters, labels=labels)
+        _ = Service(item=item, parameters=parameters, labels=labels)  # type: ignore[arg-type]
 
 
-def test_service_kwargs_only():
+def test_service_kwargs_only() -> None:
     with pytest.raises(TypeError):
         _ = Service(None)  # type: ignore[misc] # pylint: disable=too-many-function-args
 
 
-def test_service_features():
+def test_service_features() -> None:
     service = Service(
         item="thingy",
         parameters={"size": 42},
@@ -89,8 +92,10 @@ def test_service_features():
     assert service.parameters == {"size": 42}
     assert service.labels == [ServiceLabel("test-thing", "true")]
 
-    assert repr(service) == ("Service(item='thingy', parameters={'size': 42},"
-                             " labels=[ServiceLabel('test-thing', 'true')])")
+    assert repr(service) == (
+        "Service(item='thingy', parameters={'size': 42},"
+        " labels=[ServiceLabel('test-thing', 'true')])"
+    )
 
     service = Service()
     assert service.item is None
@@ -104,74 +109,83 @@ def test_service_features():
     assert service != service_foo
 
 
-def test_state():
-    assert int(state.OK) == 0
-    assert int(state.WARN) == 1
-    assert int(state.CRIT) == 2
-    assert int(state.UNKNOWN) == 3
+def test_state() -> None:
+    assert int(State.OK) == 0
+    assert int(State.WARN) == 1
+    assert int(State.CRIT) == 2
+    assert int(State.UNKNOWN) == 3
 
-    assert state.worst(state.WARN, state.UNKNOWN, state.CRIT) is state.CRIT
-    assert state.worst(state.OK, state.WARN, state.UNKNOWN) is state.UNKNOWN
-    assert state.worst(state.OK, state.WARN) is state.WARN
-    assert state.worst(state.OK) is state.OK
-    assert state.worst(state.OK, 3) is state.UNKNOWN
+    assert State.worst(State.WARN, State.UNKNOWN, State.CRIT) is State.CRIT
+    assert State.worst(State.OK, State.WARN, State.UNKNOWN) is State.UNKNOWN
+    assert State.worst(State.OK, State.WARN) is State.WARN
+    assert State.worst(State.OK) is State.OK
+    assert State.worst(State.OK, 3) is State.UNKNOWN
 
-    assert state(0) is state.OK
-    assert state(1) is state.WARN
-    assert state(2) is state.CRIT
-    assert state(3) is state.UNKNOWN
+    assert State(0) is State.OK
+    assert State(1) is State.WARN
+    assert State(2) is State.CRIT
+    assert State(3) is State.UNKNOWN
 
-    assert state["OK"] is state.OK
-    assert state["WARN"] is state.WARN
-    assert state["CRIT"] is state.CRIT
-    assert state["UNKNOWN"] is state.UNKNOWN
+    assert State["OK"] is State.OK
+    assert State["WARN"] is State.WARN
+    assert State["CRIT"] is State.CRIT
+    assert State["UNKNOWN"] is State.UNKNOWN
 
     with pytest.raises(TypeError):
-        _ = state.OK < state.WARN  # type: ignore[operator]
+        _ = State.OK < State.WARN  # type: ignore[operator]
 
 
-@pytest.mark.parametrize("states, best_state", [
-    ((state.OK,), state.OK),
-    ((state.OK, state.WARN), state.OK),
-    ((state.OK, state.WARN, state.UNKNOWN), state.OK),
-    ((state.OK, state.WARN, state.UNKNOWN, state.CRIT), state.OK),
-    ((state.WARN,), state.WARN),
-    ((state.WARN, state.UNKNOWN), state.WARN),
-    ((state.WARN, state.UNKNOWN, state.CRIT), state.WARN),
-    ((state.UNKNOWN,), state.UNKNOWN),
-    ((state.UNKNOWN, state.CRIT), state.UNKNOWN),
-    ((state.CRIT,), state.CRIT),
-    ((0, 1, 2, 3, state.UNKNOWN), state.OK),
-])
-def test_best_state(states, best_state):
-    assert state.best(*states) is best_state
+@pytest.mark.parametrize(
+    "states, best_state",
+    [
+        ((State.OK,), State.OK),
+        ((State.OK, State.WARN), State.OK),
+        ((State.OK, State.WARN, State.UNKNOWN), State.OK),
+        ((State.OK, State.WARN, State.UNKNOWN, State.CRIT), State.OK),
+        ((State.WARN,), State.WARN),
+        ((State.WARN, State.UNKNOWN), State.WARN),
+        ((State.WARN, State.UNKNOWN, State.CRIT), State.WARN),
+        ((State.UNKNOWN,), State.UNKNOWN),
+        ((State.UNKNOWN, State.CRIT), State.UNKNOWN),
+        ((State.CRIT,), State.CRIT),
+        ((0, 1, 2, 3, State.UNKNOWN), State.OK),
+    ],
+)
+def test_best_state(
+    states: Sequence[State],
+    best_state: State,
+) -> None:
+    assert State.best(*states) is best_state
 
 
-def test_metric_kwarg():
+def test_metric_kwarg() -> None:
     with pytest.raises(TypeError):
         _ = Metric("universe", 42, (23, 23))  # type: ignore[misc] # pylint: disable=too-many-function-args
 
 
-@pytest.mark.parametrize("name, value, levels, boundaries", [
-    ("", 7, None, None),
-    ("name", "7", (None, None), (None, None)),
-    ("n me", "7", (None, None), (None, None)),
-    ("n=me", "7", (None, None), (None, None)),
-    ("name", 7, ("warn", "crit"), (None, None)),
-    ("name", 7, (23, 42), (None, "max")),
-])
-def test_metric_invalid(name, value, levels, boundaries):
+@pytest.mark.parametrize(
+    "name, value, levels, boundaries",
+    [
+        ("", 7, None, None),
+        ("name", "7", (None, None), (None, None)),
+        ("n me", "7", (None, None), (None, None)),
+        ("n=me", "7", (None, None), (None, None)),
+        ("name", 7, ("warn", "crit"), (None, None)),
+        ("name", 7, (23, 42), (None, "max")),
+    ],
+)
+def test_metric_invalid(name: object, value: object, levels: object, boundaries: object) -> None:
     with pytest.raises(TypeError):
-        _ = Metric(name, value, levels=levels, boundaries=boundaries)
+        _ = Metric(name, value, levels=levels, boundaries=boundaries)  # type: ignore[arg-type]
 
 
-def test_metric():
-    metric1 = Metric('reproduction_rate', 1.0, levels=(2.4, 3.0), boundaries=(0, None))
-    metric2 = Metric('reproduction_rate', 2.0, levels=(2.4, 3.0), boundaries=(0, None))
-    assert metric1.name == 'reproduction_rate'
+def test_metric() -> None:
+    metric1 = Metric("reproduction_rate", 1.0, levels=(2.4, 3.0), boundaries=(0, None))
+    metric2 = Metric("reproduction_rate", 2.0, levels=(2.4, 3.0), boundaries=(0, None))
+    assert metric1.name == "reproduction_rate"
     assert metric1.value == 1.0
     assert metric1.levels == (2.4, 3.0)
-    assert metric1.boundaries == (0., None)
+    assert metric1.boundaries == (0.0, None)
 
     assert metric1 == metric1  # pylint: disable=comparison-with-itself
     assert metric1 != metric2
@@ -181,17 +195,15 @@ def test_metric():
     "state_, summary, notice, details",
     [
         (8, "foo", None, None),
-        (state.OK, b"foo", None, None),
-        (state.OK, "newline is a \no-no", None, None),
-        (state.OK, "", "", "details"),  # either is required
-        (state.OK, None, None, "details"),  # either is required
-        (state.OK, "these are", "mutually exclusive", None),
-        (state.OK, "summary", None, {
-            "at the moment": "impossible",
-            "someday": "maybe"
-        }),
-    ])
-def test_result_invalid(state_, summary, notice, details):
+        (State.OK, b"foo", None, None),
+        (State.OK, "newline is a \no-no", None, None),
+        (State.OK, "", "", "details"),  # either is required
+        (State.OK, None, None, "details"),  # either is required
+        (State.OK, "these are", "mutually exclusive", None),
+        (State.OK, "summary", None, {"at the moment": "impossible", "someday": "maybe"}),
+    ],
+)
+def test_result_invalid(state_: object, summary: object, notice: object, details: object) -> None:
     with pytest.raises((TypeError, ValueError)):
         _ = Result(
             state=state_,
@@ -201,22 +213,25 @@ def test_result_invalid(state_, summary, notice, details):
         )  # type: ignore[call-overload]
 
 
-@pytest.mark.parametrize("state_, summary, notice, details, expected_triple", [
-    (state.OK, "summary", None, "details", (state.OK, "summary", "details")),
-    (state.OK, "summary", None, None, (state.OK, "summary", "summary")),
-    (state.OK, None, "notice", "details", (state.OK, "", "details")),
-    (state.OK, None, "notice", None, (state.OK, "", "notice")),
-    (state.WARN, "summary", None, "details", (state.WARN, "summary", "details")),
-    (state.WARN, "summary", None, None, (state.WARN, "summary", "summary")),
-    (state.WARN, None, "notice", "details", (state.WARN, "notice", "details")),
-    (state.WARN, None, "notice", None, (state.WARN, "notice", "notice")),
-])
+@pytest.mark.parametrize(
+    "state_, summary, notice, details, expected_triple",
+    [
+        (State.OK, "summary", None, "details", (State.OK, "summary", "details")),
+        (State.OK, "summary", None, None, (State.OK, "summary", "summary")),
+        (State.OK, None, "notice", "details", (State.OK, "", "details")),
+        (State.OK, None, "notice", None, (State.OK, "", "notice")),
+        (State.WARN, "summary", None, "details", (State.WARN, "summary", "details")),
+        (State.WARN, "summary", None, None, (State.WARN, "summary", "summary")),
+        (State.WARN, None, "notice", "details", (State.WARN, "notice", "details")),
+        (State.WARN, None, "notice", None, (State.WARN, "notice", "notice")),
+    ],
+)
 def test_result(
-    state_: state,
-    summary: Optional[str],
-    notice: Optional[str],
-    details: Optional[str],
-    expected_triple: Tuple[state, str, str],
+    state_: State,
+    summary: str | None,
+    notice: str | None,
+    details: str | None,
+    expected_triple: tuple[State, str, str],
 ) -> None:
     result = Result(
         state=state_,
@@ -228,7 +243,7 @@ def test_result(
     assert result != Result(state=state_, summary="a different summary")
 
 
-def test_ignore_results():
+def test_ignore_results() -> None:
     result1 = IgnoreResults()
     result2 = IgnoreResults("Login to DB failed")
     assert repr(result1) == "IgnoreResults('currently no results')"

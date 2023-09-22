@@ -1,26 +1,28 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import abc
+import functools
 import http.client as http_client
-import inspect
 import json
-from typing import Any, Callable, Dict, Mapping, Optional, Type
+from collections.abc import Callable
+from typing import Any
 
 import cmk.utils.plugin_registry
 from cmk.utils.exceptions import MKException
 
-import cmk.gui.config as config
+from cmk.gui.config import active_config
+from cmk.gui.crash_handler import handle_exception_as_gui_crash_report
+from cmk.gui.ctx_stack import g
 from cmk.gui.exceptions import MKMissingDataError
-from cmk.gui.globals import g, html, request, response
+from cmk.gui.htmllib.html import html
+from cmk.gui.http import request, response
 from cmk.gui.log import logger
 
 PageHandlerFunc = Callable[[], None]
-PageResult = Any
-AjaxPageResult = Dict[str, Any]
+PageResult = object
 
 
 # At the moment pages are simply callables that somehow render content for the HTTP response
@@ -34,12 +36,13 @@ AjaxPageResult = Dict[str, Any]
 #
 # TODO: Check out the WatoMode class and find out how to do this. Looks like handle_page() could
 # implement parts of the cmk.gui.wato.page_handler.page_handler() logic.
-class Page(metaclass=abc.ABCMeta):
+class Page(abc.ABC):
     # TODO: In theory a page class could be registered below multiple URLs. For this case it would
     # be better to move the ident out of the class, to the registry. At the moment the URL is stored
     # in self._ident by PageRegistry.register_page().
     # In practice this is no problem at the moment, because each page is accessible only through a
     # single endpoint.
+
     @classmethod
     def ident(cls) -> str:
         raise NotImplementedError()
@@ -54,27 +57,26 @@ class Page(metaclass=abc.ABCMeta):
 
 
 # TODO: Clean up implicit _from_vars() procotocol
-class AjaxPage(Page, metaclass=abc.ABCMeta):
+class AjaxPage(Page, abc.ABC):
     """Generic page handler that wraps page() calls into AJAX respones"""
-    def __init__(self):
-        super(AjaxPage, self).__init__()
+
+    def __init__(self) -> None:
+        super().__init__()
         self._from_vars()
 
     def _from_vars(self) -> None:
         """Override this method to set mode specific attributes based on the
         given HTTP variables."""
 
-    def webapi_request(self) -> Dict[str, Any]:
+    def webapi_request(self) -> dict[str, Any]:
         return request.get_request()
 
     @abc.abstractmethod
-    def page(self) -> AjaxPageResult:
+    def page(self) -> PageResult:
         """Override this to implement the page functionality"""
         raise NotImplementedError()
 
-    def _handle_exc(self, method) -> None:
-        # FIXME: cyclical link between crash_reporting.py and pages.py
-        from cmk.gui.crash_reporting import handle_exception_as_gui_crash_report
+    def _handle_exc(self, method) -> None:  # type: ignore[no-untyped-def]
         try:
             # FIXME: These methods write to the response themselves. This needs to be refactored.
             method()
@@ -83,7 +85,7 @@ class AjaxPage(Page, metaclass=abc.ABCMeta):
             html.write_text(str(e))
         except Exception as e:
             response.status_code = http_client.INTERNAL_SERVER_ERROR
-            if config.debug:
+            if active_config.debug:
                 raise
             logger.exception("error calling AJAX page handler")
             handle_exception_as_gui_crash_report(
@@ -94,8 +96,6 @@ class AjaxPage(Page, metaclass=abc.ABCMeta):
 
     def handle_page(self) -> None:
         """The page handler, called by the page registry"""
-        # FIXME: cyclical link between crash_reporting.py and pages.py
-        from cmk.gui.crash_reporting import handle_exception_as_gui_crash_report
         response.set_content_type("application/json")
         try:
             action_response = self.page()
@@ -106,7 +106,7 @@ class AjaxPage(Page, metaclass=abc.ABCMeta):
             resp = {"result_code": 1, "result": str(e), "severity": "error"}
 
         except Exception as e:
-            if config.debug:
+            if active_config.debug:
                 raise
             logger.exception("error calling AJAX page handler")
             handle_exception_as_gui_crash_report(
@@ -118,13 +118,13 @@ class AjaxPage(Page, metaclass=abc.ABCMeta):
         response.set_data(json.dumps(resp))
 
 
-class PageRegistry(cmk.utils.plugin_registry.Registry[Type[Page]]):
-    def plugin_name(self, instance: Type[Page]) -> str:
+class PageRegistry(cmk.utils.plugin_registry.Registry[type[Page]]):
+    def plugin_name(self, instance: type[Page]) -> str:
         return instance.ident()
 
-    def register_page(self, path: str) -> Callable[[Type[Page]], Type[Page]]:
-        def wrap(plugin_class: Type[Page]) -> Type[Page]:
-            if not inspect.isclass(plugin_class):
+    def register_page(self, path: str) -> Callable[[type[Page]], type[Page]]:
+        def wrap(plugin_class: type[Page]) -> type[Page]:
+            if not isinstance(plugin_class, type):
                 raise NotImplementedError()
 
             # mypy is not happy with this. Find a cleaner way
@@ -135,6 +135,19 @@ class PageRegistry(cmk.utils.plugin_registry.Registry[Type[Page]]):
             return plugin_class
 
         return wrap
+
+    def register_page_handler(self, path: str, page_handler: PageHandlerFunc) -> type[Page]:
+        cls_name = "PageClass%s" % path.title().replace(":", "")
+        cls = type(
+            cls_name,
+            (Page,),
+            {
+                "_wrapped_callable": (page_handler,),
+                "page": lambda self: self._wrapped_callable[0](),
+            },
+        )
+        self.register_page(path)(cls)
+        return cls
 
 
 page_registry = PageRegistry()
@@ -151,36 +164,31 @@ def register(path: str) -> Callable[[PageHandlerFunc], PageHandlerFunc]:
 
     It is essentially a decorator that calls register_page_handler().
     """
-    def wrap(wrapped_callable: PageHandlerFunc) -> PageHandlerFunc:
-        cls_name = "PageClass%s" % path.title().replace(":", "")
-        LegacyPageClass = type(cls_name, (Page,), {
-            "_wrapped_callable": (wrapped_callable,),
-            "page": lambda self: self._wrapped_callable[0]()
-        })
 
-        page_registry.register_page(path)(LegacyPageClass)
-        return lambda: LegacyPageClass().handle_page()
+    def wrap(wrapped_callable: PageHandlerFunc) -> PageHandlerFunc:
+        cls = page_registry.register_page_handler(path, wrapped_callable)
+        return lambda: cls().handle_page()
 
     return wrap
 
 
-# TODO: replace all call sites by directly calling page_registry.register_page("path")
-def register_page_handler(path: str, page_func: PageHandlerFunc) -> PageHandlerFunc:
-    """Register a function to be called when the given URL is called."""
-    wrap = register(path)
-    return wrap(page_func)
-
-
-def get_page_handler(name: str,
-                     dflt: Optional[PageHandlerFunc] = None) -> Optional[PageHandlerFunc]:
+def get_page_handler(name: str, dflt: PageHandlerFunc | None = None) -> PageHandlerFunc | None:
     """Returns either the page handler registered for the given name or None
 
     In case dflt is given it returns dflt instead of None when there is no
     page handler for the requested name."""
-    # NOTE: Workaround for our non-generic registries... :-/
-    pr: Mapping[str, Type[Page]] = page_registry
-    handle_class = pr.get(name)
-    if handle_class is None:
-        return dflt
-    # NOTE: We can'use functools.partial because of https://bugs.python.org/issue3445
-    return (lambda hc: lambda: hc().handle_page())(handle_class)
+
+    def page_handler(hc: type[Page]) -> PageHandlerFunc:
+        # We pretend to wrap `hc.page` instead of `hc.handle_page`, because `hc.handle_page` is
+        # usually only defined on the superclass, which doesn't really help in debugging. The
+        # instance is not shown, and it is not 100% correct, but it's better than nothing at all.
+        @functools.wraps(hc.page)
+        def wrapper():
+            return hc().handle_page()
+
+        return wrapper
+
+    if handle_class := page_registry.get(name):
+        return page_handler(handle_class)
+
+    return dflt

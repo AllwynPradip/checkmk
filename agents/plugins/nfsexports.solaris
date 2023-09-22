@@ -1,5 +1,5 @@
 #!/usr/bin/bash
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,42 +9,54 @@
 
 # Disable unused variable error (needed to keep track of version)
 # shellcheck disable=SC2034
-CMK_VERSION="2.1.0i1"
+CMK_VERSION="2.3.0b1"
 
 # Checkmk agent plugin for monitoring nfsexports on Solaris. This plugin
 # has been tested with solaris 10 in a standalone and cluster setting.
 
 clusterconfigdir="/etc/cluster/ccr/global/directory"
-if [ -r "$clusterconfigdir" ]; then
+if [ -r "${clusterconfigdir}" ]; then
     # is a clustered nfs server
-    nfsconfig=/etc/cluster/ccr/global/$(grep rgm $clusterconfigdir | grep nfs | grep rg_)
-    if [ -r "$nfsconfig" ]; then
-        Pathprefix=$(grep Pathprefix "$nfsconfig" | awk {'print $2'})/SUNW.nfs
-        dfstabfile=$Pathprefix/dfstab.$(grep -v FilesystemMountPoints "$nfsconfig" | grep SUNW.nfs | \
-            awk {'print $1'} | sed -e 's/RS_//')
-        if [ -r "$dfstabfile" ]; then
-            EXPORTS=$(grep -v  ^\# "$dfstabfile" | grep -v ^$)
-            ps -aef | grep nfsd | grep "$Pathprefix" >/dev/null && DAEMONS="ok"
+    nfsconfig="/etc/cluster/ccr/global/$(grep "rgm" "${clusterconfigdir}" | grep "nfs" | grep "rg_")"
+    if [ -r "${nfsconfig}" ]; then
+        Pathprefix="$(grep Pathprefix "${nfsconfig}" | awk '{ print $2 }')/SUNW.nfs"
+        dfstabfile="${Pathprefix}/dfstab.$(
+            grep -v FilesystemMountPoints "${nfsconfig}" |
+                grep SUNW.nfs |
+                awk '{ print $1 }' |
+                sed -e 's/RS_//'
+        )"
+        if [ -r "${dfstabfile}" ]; then
+            EXPORTS="$(grep -v "^\#" "${dfstabfile}" | grep -v "^$")"
+            ps -aef | grep "nfsd" | grep "${Pathprefix}" >/dev/null && DAEMONS="ok"
         fi
     fi
 else
     # is a standalone nfs server
     dfstabfile="/etc/dfs/dfstab"
-    if [ -r $dfstabfile ]; then
-        EXPORTS=$(grep -v  ^\# $dfstabfile | grep -v ^$)
-    elif [ -x /usr/sbin/zfs ]; then
-        EXPORTS=$(zfs get sharenfs)
+    if [ -x "/usr/sbin/zfs" ]; then
+        # NFS under Solaris version >= 11
+        # Note that 'dfstabfile' is still present in this version, but does
+        # nothing. See SUP-10936.
+        # This order of operation is based on the assumption that the zfs
+        # binary is either absent for earlier Solaris versions or lists the NFS
+        # correctly. If it turns out that this is not the case, the approach needs to be
+        # changed.
+        EXPORTS="$(zfs get sharenfs)"
+    elif [ -r "${dfstabfile}" ]; then
+        # NFS under Solaris version <= 10
+        EXPORTS="$(grep -v "^\#" "${dfstabfile}" | grep -v "^$")"
     fi
 
-    if [ -n "$EXPORTS" ]; then
-        svcs -a | grep nfs/server | grep ^online >/dev/null && DAEMONS="ok"
+    if [ -n "${EXPORTS}" ]; then
+        svcs -a | grep "nfs/server" | grep "^online" >/dev/null && DAEMONS="ok"
     fi
 fi
 
 # any exports or have running daemons? then look for registered exports
-if [ -n "$EXPORTS" ]; then
+if [ -n "${EXPORTS}" ]; then
     echo "<<<nfsexports>>>"
-    if [ -n "$DAEMONS" ]; then
-        showmount -e | grep ^/
+    if [ -n "${DAEMONS}" ]; then
+        showmount -e | grep "^/"
     fi
 fi

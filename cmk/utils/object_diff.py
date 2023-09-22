@@ -1,37 +1,42 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Any
-
-from cmk.utils.i18n import _
 from deepdiff import DeepDiff  # type: ignore[import]
 from deepdiff.helper import get_type  # type: ignore[import]
 
+from cmk.utils.i18n import _
+
 __all__ = [
-    "make_object_diff",
+    "make_diff",
+    "make_diff_text",
 ]
 
 
-def make_object_diff(old: Any, new: Any) -> str:
-    """Creates a text representing the object differences for humans"""
+def make_diff(old: object, new: object) -> str:
     diff = DeepDiff(old, new, view="tree")
-    text = pretty(diff)
-    return text or _("Nothing was changed.")
+    return pretty(diff)
+
+
+def make_diff_text(old: object, new: object) -> str:
+    """Creates a text representing the object differences for humans"""
+    if old is None or new is None:
+        raise ValueError("cannot diff to None")
+    return make_diff(old, new) or _("Nothing was changed.")
 
 
 def pretty(diff: DeepDiff) -> str:
     """Copy of DeepDiff.pretty() to execute our own pretty_print_diff()"""
     result = []
     keys = sorted(
-        diff.tree.keys())  # sorting keys to guarantee constant order across python versions.
+        diff.tree.keys()
+    )  # sorting keys to guarantee constant order across python versions.
     for key in keys:
         for item_key in diff.tree[key]:
             result += [pretty_print_diff(item_key)]
 
-    return '\n'.join(sorted(result))
+    return "\n".join(sorted(result))
 
 
 PRETTY_FORM_TEXTS = {
@@ -54,14 +59,12 @@ def pretty_print_diff(diff: DeepDiff) -> str:
     type_t1 = get_type(diff.t1).__name__
     type_t2 = get_type(diff.t2).__name__
 
-    val_t1 = '"{}"'.format(str(diff.t1)) if type_t1 == "str" else str(diff.t1)
-    val_t2 = '"{}"'.format(str(diff.t2)) if type_t2 == "str" else str(diff.t2)
+    val_t1 = f'"{str(diff.t1)}"' if type_t1 == "str" else str(diff.t1)
+    val_t2 = f'"{str(diff.t2)}"' if type_t2 == "str" else str(diff.t2)
 
-    return PRETTY_FORM_TEXTS.get(diff.report_type, "").format(diff_path=diff_path(diff),
-                                                              type_t1=type_t1,
-                                                              type_t2=type_t2,
-                                                              val_t1=val_t1,
-                                                              val_t2=val_t2)
+    return PRETTY_FORM_TEXTS.get(diff.report_type, "").format(
+        diff_path=diff_path(diff), type_t1=type_t1, type_t2=type_t2, val_t1=val_t1, val_t2=val_t2
+    )
 
 
 def diff_path(diff: DeepDiff) -> str:
@@ -70,8 +73,8 @@ def diff_path(diff: DeepDiff) -> str:
     We could also build our own path renderer (See DiffLevel.path of deepdiff), but this seems to be
     good enough for the moment.
     """
-    path = diff.path(root='')
+    path = diff.path(root="")
     if path == "":
         return "object"  # The whole object changed it's value (e.g. "a" -> "b")
 
-    return path.strip("[]").replace("['", "").replace("']", "/").replace("'", "\"")
+    return path.strip("[]").replace("['", "").replace("']", "/").replace("'", '"')

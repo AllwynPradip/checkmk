@@ -63,18 +63,86 @@ the master branch.
 
 Clone from the Checkmk Git, then execute the following commands:
 
-```
-cd omd
-make setup
-../scripts/fake-windows-artifacts
+```bash
+# Run everything in our pre-built docker images. 
+# This may take a while as it's pulling the image from the registry
+scripts/run-in-docker.sh bash  
+
+# Fake the windows artifacts - they need to be built on a windows node
+scripts/fake-windows-artifacts
+
+# Enable using the omd build cache
 NEXUS_BUILD_CACHE_URL=https://artifacts.lan.tribe29.com/repository/omd-build-cache \
 NEXUS_USERNAME=nexus-user \
 NEXUS_PASSWORD=nexus-pw \
+
+# And now build a debian package
 make deb
 ```
 
 It will use the OMD package build cache to create a `.deb` file in the `omd`
 directory.
+
+## How to build one OMD package?
+
+The OMD packages are built in the following phases in general:
+
+### `{PKG}_UNPACK` - Unpack the source archive
+
+The source archive is unpacked into the `{PKG}_BUILD_DIR`. A default target is
+implemented for most of the packages. Only source archives which need special
+handling (e.g. because the archive name is not equal to the OMD package name)
+have a custom `{PKG}_UNPACK` target.
+
+### `{PKG}_BUILD` - Build the package
+
+For most packages this contains the normal `./configure && make` logic. The
+build is executed in `{PKG}_BUILD_DIR` (which is
+`omd/build/package_build/{PKG}-{VERS}`).
+
+### `{PKG}_INTERMEDIATE_INSTALL` - Intermediate install
+
+Installs the files previously built to a `{PKG}` individual target directory
+`{PKG}_INSTALL_DIR` (which is `omd/build/intermediate_install/{PKG}-{VERS}`).
+
+### `{PKG}_CACHE_PKG_PROCESS` - Optional processing of the build cache
+
+Some packages support a cached build. The files from `{PKG}_INSTALL_DIR` will be
+archived and uploaded to our nexus and then used again by other build processes.
+In case the nexus is available, and it has a build cache archive, this is
+downloaded and unpacked to `{PKG}_INTERMEDIATE_INSTALL` instead of performing
+the previous steps.
+
+See also *Using package cache* on how to use it.
+
+### `{PKG}_INSTALL` - Install package files to final target directory
+
+Install all the files of `{PKG}` from the intermediate install directory to the
+final target directory which is then used as base for the Checkmk RPM or DEB
+packages.
+
+All the phases mentioned above are represented by stamp files which are stored
+in `omd/build/stamps`.
+
+### Incrementally work on a specific package
+
+To execute a build step of your choice, you can do it like follows. 
+
+```
+# If you're starting from a clean repo, make sure that all needed dependencies are built.
+# e.g. when you want to build the package "net-snmp":
+cd omd
+make PACKAGES="net-snmp" install
+
+# Now the stamps should be in-place - verify it with:
+ls build/stamps/net-snmp*
+
+# If you want to change now something,
+# - do your changes
+# - remove the stamp file and trigger the rebuild:
+rm $PWD/build/stamps/net-snmp*build
+make $PWD/build/stamps/net-snmp*build
+```
 
 ## Incremental package building
 
@@ -84,7 +152,22 @@ environment variables in the future.
 ## Measuring build times
 
 To improve build times it is first important to understand which parts of the
-build take how much time. To do this, you can use `remake` like this:
+build take how much time.
+
+During packaging there are entries written to stdout of the build job. They look
+like this:
+
+```
++++ [1638200385] Build step '/home/lm/git/checkmk/omd/build/stamps/openssl-1.1.1l-install': done
+```
+
+You could grep them from the log to get an idea which package takes how long to
+be built. These lines are also written to `omd/omd_build_times.log`.
+
+The log contains absolute time stamps. You may use the helper script
+`omd/show_build_times` to get the duration of each step calculated.
+
+An other option would be to use `remake` like this:
 
 ```
 cd omd
@@ -103,3 +186,24 @@ possible to define dependencies between the targets of the different packages.
 
 All targets and variables in the packages need to be prefixed with the package
 name variables to avoid name clashes.
+
+## Add/remove new package to distribution
+
+Summary: you must modify omd/Makefile, omd/packages/packages.make and create 
+[name].make which build/deploy your binary or library.
+
+Step by step:
+
+1. Modify PACKAGES variable in omd/Makefile adding a line with [name] of a 
+package to be added.
+2. Create a corresponding directory with name of the package in the omd/packages 
+subdir, i.e. omd/packages/[name].
+3. Create in the directory from p.2 the file having name of the package and 
+extension make, i.e. omd/packages/[name]/[name].make
+4. Add omd/packages/[name]/[name].make to the rule include in the file 
+omd/packages/package.make
+
+In the simple cases you should use livestatus.make or unixcat.make as a template.
+
+To remove package just remove the line in omd/Makefile, the line in 
+omd/packages/package.make and directory in the omd/packages.

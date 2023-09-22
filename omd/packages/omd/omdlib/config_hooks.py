@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- encoding: utf-8; py-indent-offset: 4 -*-
 #
 #       U  ___ u  __  __   ____
 #        \/"_ \/U|' \/ '|u|  _"\
@@ -30,63 +29,96 @@ of the following arguments:
 default - return the default value of the hook. Mandatory
 set     - implements a new setting for the hook
 choices - available choices for enumeration hooks
-depends - exists with 1, if this hook misses its dependent hook settings
+depends - exits with 1, if this hook misses its dependent hook settings
 """
 
+import dataclasses
+import logging
 import os
 import re
-import sys
-import logging
 import subprocess
-from typing import Tuple, Pattern, Union, Dict, TYPE_CHECKING, List, Iterable
+import sys
+from collections.abc import Iterable
+from ipaddress import ip_network
+from pathlib import Path
+from re import Pattern
+from typing import TYPE_CHECKING
 
-from cmk.utils.log import VERBOSE
+from omdlib.type_defs import ConfigChoiceHasError
+
+import cmk.utils.resulttype as result
 from cmk.utils.exceptions import MKTerminate
+from cmk.utils.log import VERBOSE
+from cmk.utils.version import edition
 
 if TYPE_CHECKING:
     from omdlib.contexts import SiteContext
 
 logger = logging.getLogger("cmk.omd")
 
-ConfigHookChoiceItem = Tuple[str, str]
-ConfigHookChoices = Union[None, Pattern, List[ConfigHookChoiceItem]]
-ConfigHook = Dict[str, Union[str, bool, ConfigHookChoices]]
-ConfigHooks = Dict[str, ConfigHook]
-ConfigHookResult = Tuple[int, str]
+ConfigHookChoiceItem = tuple[str, str]
+ConfigHookChoices = Pattern | list[ConfigHookChoiceItem] | ConfigChoiceHasError
+ConfigHookResult = tuple[int, str]
+
+
+@dataclasses.dataclass(frozen=True)
+class ConfigHook:
+    choices: ConfigHookChoices
+    name: str
+    description: str
+    alias: str
+    menu: str
+    unstructured: dict[str, bool]
+
+
+ConfigHooks = dict[str, ConfigHook]
+
+
+class IpAddressListHasError(ConfigChoiceHasError):
+    def __call__(self, value: str) -> result.Result[None, str]:
+        ip_addresses = value.split()
+        if not ip_addresses:
+            return result.Error("Specify at least one IP address.")
+        for ip_address in ip_addresses:
+            try:
+                ip_network(ip_address)
+            except ValueError:
+                return result.Error(f"The IP address {ip_address} does match the expected format.")
+        return result.OK(None)
 
 
 # Put all site configuration (explicit and defaults) into environment
 # variables beginning with CONFIG_
-def create_config_environment(site: 'SiteContext') -> None:
+def create_config_environment(site: "SiteContext") -> None:
     for varname, value in site.conf.items():
         os.environ["CONFIG_" + varname] = value
 
 
 # TODO: RENAME
-def save_site_conf(site: 'SiteContext') -> None:
-    confdir = site.dir + "/etc/omd"
-
-    if not os.path.exists(confdir):
-        os.mkdir(confdir)
-
-    f = open(site.dir + "/etc/omd/site.conf", "w")
-
-    for hook_name, value in sorted(site.conf.items(), key=lambda x: x[0]):
-        f.write("CONFIG_%s='%s'\n" % (hook_name, value))
+def save_site_conf(site: "SiteContext") -> None:
+    confdir = Path(site.dir, "etc/omd")
+    confdir.mkdir(exist_ok=True)
+    with (confdir / "site.conf").open(mode="w") as f:
+        for hook_name, value in sorted(site.conf.items(), key=lambda x: x[0]):
+            f.write(f"CONFIG_{hook_name}='{value}'\n")
+    (confdir / "site.conf").chmod(0o644)
 
 
 # Get information about all hooks. Just needed for
 # the "omd config" command.
-def load_config_hooks(site: 'SiteContext') -> ConfigHooks:
+def load_config_hooks(site: "SiteContext") -> ConfigHooks:
     config_hooks: ConfigHooks = {}
 
-    hook_dir = site.dir + "/lib/omd/hooks"
-    for hook_name in os.listdir(hook_dir):
+    hook_files = []
+    if site.hook_dir:
+        hook_files = os.listdir(site.hook_dir)
+
+    for hook_name in hook_files:
         try:
-            if hook_name[0] != '.':
+            if hook_name[0] != ".":
                 hook = _config_load_hook(site, hook_name)
                 # only load configuration hooks
-                if hook.get("choices", None) is not None:
+                if hook.choices is not None:
                     config_hooks[hook_name] = hook
         except MKTerminate:
             raise
@@ -96,106 +128,134 @@ def load_config_hooks(site: 'SiteContext') -> ConfigHooks:
     return config_hooks
 
 
-def _config_load_hook(site: 'SiteContext', hook_name: str) -> ConfigHook:
-    hook: ConfigHook = {
-        "name": hook_name,
-        "deprecated": False,
-    }
+def _config_load_hook(  # pylint: disable=too-many-branches
+    site: "SiteContext",
+    hook_name: str,
+) -> ConfigHook:
+    unstructured = {"deprecated": False}
+
+    if not site.hook_dir:
+        # IMHO this should be unreachable...
+        raise MKTerminate("Site has no version and therefore no hooks")
 
     description = ""
+    menu = "Other"
     description_active = False
-    for line in open(site.dir + "/lib/omd/hooks/" + hook_name):
-        if line.startswith("# Alias:"):
-            hook["alias"] = line[8:].strip()
-        elif line.startswith("# Menu:"):
-            hook["menu"] = line[7:].strip()
-        elif line.startswith("# Deprecated: yes"):
-            hook["deprecated"] = True
-        elif line.startswith("# Description:"):
-            description_active = True
-        elif line.startswith("#  ") and description_active:
-            description += line[3:].strip() + "\n"
-        else:
-            description_active = False
-    hook["description"] = description
+    with Path(site.hook_dir, hook_name).open() as hook_file:
+        for line in hook_file:
+            if line.startswith("# Alias:"):
+                alias = line[8:].strip()
+            elif line.startswith("# Menu:"):
+                menu = line[7:].strip()
+            elif line.startswith("# Deprecated: yes"):
+                unstructured["deprecated"] = True
+            elif line.startswith("# Description:"):
+                description_active = True
+            elif line.startswith("#  ") and description_active:
+                description += line[3:].strip() + "\n"
+            else:
+                description_active = False
 
-    def get_hook_info(info: str) -> str:
-        return call_hook(site, hook_name, [info])[1]
+    hook_info = call_hook(site, hook_name, ["choices"])[1]
+    return ConfigHook(
+        choices=_parse_hook_choices(hook_info),
+        name=hook_name,
+        alias=alias,
+        menu=menu,
+        description=description,
+        unstructured=unstructured,
+    )
 
+
+def _parse_hook_choices(hook_info: str) -> ConfigHookChoices:
     # The choices can either be a list of possible keys. Then
     # the hook outputs one live for each choice where the key and a
     # description are separated by a colon. Or it outputs one line
     # where that line is an extended regular expression matching the
     # possible values.
-    choicestxt = get_hook_info("choices").split("\n")
-    choices: ConfigHookChoices = None
-    if len(choicestxt) == 1:
-        regextext = choicestxt[0].strip()
-        if regextext != "":
-            choices = re.compile(regextext + "$")
-        else:
-            choices = None
-    else:
-        choices = []
-        try:
-            for line in choicestxt:
-                val, descr = line.split(":", 1)
-                val = val.strip()
-                descr = descr.strip()
-                choices.append((val, descr))
-        except Exception as e:
-            raise MKTerminate("Invalid output of hook: %s: %s" % (choicestxt, e))
 
-    hook["choices"] = choices
-    return hook
+    match [choice.strip() for choice in hook_info.split("\n")]:
+        case [""]:
+            raise MKTerminate("Invalid output of hook: empty output")
+        case ["@{IP_ADDRESS_LIST}"]:
+            return IpAddressListHasError()
+        case [regextext]:
+            return re.compile(regextext + "$")
+        case choices_list:
+            try:
+                choices: list[ConfigHookChoiceItem] = []
+                for line in choices_list:
+                    val, descr = line.split(":", 1)
+                    choices.append((val.strip(), descr.strip()))
+            except ValueError as excep:
+                raise MKTerminate(f"Invalid output of hook: {choices_list}: {excep}") from excep
+            return choices
 
 
-def load_hook_dependencies(site: 'SiteContext', config_hooks: ConfigHooks) -> ConfigHooks:
+def load_hook_dependencies(site: "SiteContext", config_hooks: ConfigHooks) -> ConfigHooks:
     for hook_name in sort_hooks(list(config_hooks.keys())):
         hook = config_hooks[hook_name]
         exitcode, _content = call_hook(site, hook_name, ["depends"])
         if exitcode:
-            hook["active"] = False
+            hook.unstructured["active"] = False
         else:
-            hook["active"] = True
+            hook.unstructured["active"] = True
     return config_hooks
+
+
+def load_defaults(site: "SiteContext") -> dict[str, str]:
+    """Get the default values of all config hooks for the site configuration"""
+    if not site.hook_dir or not os.path.exists(site.hook_dir):
+        return {}
+
+    return {
+        hook_name: call_hook(site, hook_name, ["default", edition().short])[1]
+        for hook_name in sort_hooks(os.listdir(site.hook_dir))
+        if hook_name[0] != "."
+    }
 
 
 # Always sort CORE hook to the end because it runs "cmk -U" which
 # relies on files created by other hooks.
-def sort_hooks(hook_names: List[str]) -> Iterable[str]:
+def sort_hooks(hook_names: list[str]) -> Iterable[str]:
     return sorted(hook_names, key=lambda n: (n == "CORE", n))
 
 
-def hook_exists(site: 'SiteContext', hook_name: str) -> bool:
-    hook_file = site.dir + "/lib/omd/hooks/" + hook_name
+def hook_exists(site: "SiteContext", hook_name: str) -> bool:
+    if not site.hook_dir:
+        return False
+    hook_file = site.hook_dir + hook_name
     return os.path.exists(hook_file)
 
 
-def call_hook(site: 'SiteContext', hook_name: str, args: List[str]) -> ConfigHookResult:
+def call_hook(site: "SiteContext", hook_name: str, args: list[str]) -> ConfigHookResult:
+    if not site.hook_dir:
+        # IMHO this should be unreachable...
+        raise MKTerminate("Site has no version and therefore no hooks")
 
-    cmd = [site.dir + "/lib/omd/hooks/" + hook_name] + args
+    cmd = [site.hook_dir + hook_name] + args
     hook_env = os.environ.copy()
-    hook_env.update({
-        "OMD_ROOT": site.dir,
-        "OMD_SITE": site.name,
-    })
+    hook_env.update(
+        {
+            "OMD_ROOT": site.dir,
+            "OMD_SITE": site.name,
+        }
+    )
 
     logger.log(VERBOSE, "Calling hook: %s", subprocess.list2cmdline(cmd))
 
-    p = subprocess.Popen(
+    completed_process = subprocess.run(
         cmd,
         env=hook_env,
         close_fds=True,
         shell=False,
         stdout=subprocess.PIPE,
         encoding="utf-8",
+        check=False,
     )
-    content = p.communicate()[0].strip()
-    exitcode = p.poll()
-    assert exitcode is not None  # we have terminated, so there *is* an exit code
+    content = completed_process.stdout.strip()
 
-    if exitcode and args[0] != "depends":
-        sys.stderr.write("Error running %s: %s\n" % (subprocess.list2cmdline(cmd), content))
+    if completed_process.returncode and args[0] != "depends":
+        sys.stderr.write(f"Error running {subprocess.list2cmdline(cmd)}: {content}\n")
 
-    return exitcode, content
+    return completed_process.returncode, content

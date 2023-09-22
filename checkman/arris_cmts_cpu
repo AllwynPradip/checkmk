@@ -1,8 +1,8 @@
 title: Arris CMTS: CPU Utilization
 agents: snmp
 catalog: hw/network/arris
-license: GPL
-distribution:
+license: GPLv2
+distribution: check_mk
 description:
  This check monitors the CPU utilization for ech CPU Slot on a arrais cmts devices.
 
@@ -17,5 +17,5 @@ description:
 item:
  If available the identifier of the CPU, otherwise the index of the module.
 
-inventory:
+discovery:
  One service is created for each slot

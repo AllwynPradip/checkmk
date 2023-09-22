@@ -1,37 +1,41 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package
 
 # Some (or all?) Eaton USVs yield MIBs that are labeled "Merlin Gerin".
 # This module provides sections that read out the corresponding OIDs.
 
-from typing import List, Optional
 
 from .agent_based_api.v1 import register, SNMPTree, startswith
 from .agent_based_api.v1.type_defs import StringTable
-from .utils.ups import (
-    Battery,
-    optional_int,
-    optional_yes_or_no,
-)
+from .utils.ups import Battery, optional_int, optional_yes_or_no
 
 DETECT_UPS_EATON_MG = startswith(".1.3.6.1.2.1.1.2.0", ".1.3.6.1.4.1.705")
 
 
-def parse_battery_capacity_eaton_mg(string_table: StringTable) -> Optional[Battery]:
-    return Battery(
-        seconds_left=optional_int(string_table[0][0]),
-        percent_charged=optional_int(string_table[0][1]),
-    ) if string_table else None
+def parse_battery_capacity_eaton_mg(string_table: StringTable) -> Battery | None:
+    return (
+        Battery(
+            seconds_left=optional_int(string_table[0][0]),
+            percent_charged=optional_int(string_table[0][1]),
+        )
+        if string_table
+        else None
+    )
 
 
-def parse_on_battery_eaton_mg(string_table: StringTable) -> Optional[Battery]:
-    return Battery(on_battery=optional_yes_or_no(string_table[0][0]),) if string_table else None
+def parse_on_battery_eaton_mg(string_table: StringTable) -> Battery | None:
+    return (
+        Battery(
+            on_battery=optional_yes_or_no(string_table[0][0]),
+        )
+        if string_table
+        else None
+    )
 
 
-def parse_battery_warnings_eaton_mg(string_table: List[StringTable]) -> Optional[Battery]:
+def parse_battery_warnings_eaton_mg(string_table: list[StringTable]) -> Battery | None:
     if not any(string_table):
         return None
 

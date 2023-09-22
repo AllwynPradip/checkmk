@@ -1,7 +1,7 @@
 title: NGINX: Performance Indicators
 agents: linux
 catalog: app/nginx
-license: GPL
+license: GPLv2
 distribution: check_mk
 description:
  This check parses the information provided by the NGINX stub status module.
@@ -25,12 +25,14 @@ description:
  On a debian system, this is located in the file {/etc/nginx/sites-enabled/default}. Now add the
  following block:
 
+ <pre>
  location /nginx_status {
    stub_status on;
    access_log off;
    allow 127.0.0.1;
    deny all;
  }
+ </pre>
 
  Afterwards execute {/etc/init.d/nginx reload} to apply this change. This makes
  the URL {http://127.0.0.1/nginx_status} available, when your server listens on
@@ -45,9 +47,8 @@ description:
  {/etc/check_mk/nginx_status.cfg} and configure your servers in that file.
  You find an example of that file in your agent directory ({share/check_mk/agents}).
 
-inventory:
+discovery:
  One service is created for each web server.
 
 item:
  The servername and the port seperated by a colon, e.g. {127.0.0.1:80}.
-

@@ -1,4 +1,4 @@
-// Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+// Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 // This file is part of Checkmk (https://checkmk.com). It is subject to the
 // terms and conditions defined in the file COPYING, which is part of this
 // source code package.
@@ -13,7 +13,7 @@ namespace cma::provider {
 
 std::string Mem::makeBody() {
     MEMORYSTATUSEX stat;
-    stat.dwLength = sizeof(stat);
+    stat.dwLength = sizeof stat;
     ::GlobalMemoryStatusEx(&stat);
     constexpr uint32_t kilobyte = 1024;
 
@@ -36,4 +36,4 @@ std::string Mem::makeBody() {
         stat.ullAvailVirtual / kilobyte);  // virtual avail
 }
 
-};  // namespace cma::provider
+}  // namespace cma::provider

@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
+
+
+from collections.abc import Callable
+from typing import ContextManager
 
 import pytest
 
 import cmk.utils.paths
+
+import cmk.ec.export  # pylint: disable=cmk-module-layer-violation
+from cmk.ec.export import ECRulePack
+
 import cmk.gui.groups as gui_groups
 import cmk.gui.watolib.groups as groups
 from cmk.gui.utils.script_helpers import application_and_request_context
@@ -23,32 +30,29 @@ def patch_config_paths(monkeypatch, tmp_path):
     (gui_confd / "wato").mkdir(parents=True)
 
 
-def test_load_group_information_empty(tmp_path):
-    with application_and_request_context():
-        assert groups.load_contact_group_information() == {}
+@pytest.mark.usefixtures("tmp_path")
+def test_load_group_information_empty(run_as_superuser: Callable[[], ContextManager[None]]) -> None:
+    with application_and_request_context(), run_as_superuser():
+        assert gui_groups.load_contact_group_information() == {}
         assert gui_groups.load_host_group_information() == {}
         assert gui_groups.load_service_group_information() == {}
 
 
-def test_load_group_information(tmp_path):
+@pytest.mark.usefixtures("tmp_path")
+def test_load_group_information(run_as_superuser: Callable[[], ContextManager[None]]) -> None:
     with open(cmk.utils.paths.check_mk_config_dir + "/wato/groups.mk", "w") as f:
-        f.write("""# encoding: utf-8
+        f.write(
+            """# encoding: utf-8
 
-if type(define_contactgroups) != dict:
-    define_contactgroups = {}
 define_contactgroups.update({'all': u'Everything'})
-
-if type(define_hostgroups) != dict:
-    define_hostgroups = {}
 define_hostgroups.update({'all_hosts': u'All hosts :-)'})
-
-if type(define_servicegroups) != dict:
-    define_servicegroups = {}
 define_servicegroups.update({'all_services': u'All särvices'})
-""")
+"""
+        )
 
     with open(cmk.utils.paths.default_config_dir + "/multisite.d/wato/groups.mk", "w") as f:
-        f.write("""# encoding: utf-8
+        f.write(
+            """# encoding: utf-8
 
 multisite_hostgroups = {
     "all_hosts": {
@@ -67,47 +71,132 @@ multisite_contactgroups = {
         "d!ng": "dong",
     },
 }
-""")
+"""
+        )
 
-    with application_and_request_context():
-        assert groups.load_group_information() == {
-            'contact': {
-                'all': {
-                    'alias': u'Everything',
+    with application_and_request_context(), run_as_superuser():
+        assert gui_groups.load_group_information() == {
+            "contact": {
+                "all": {
+                    "alias": "Everything",
                     "d!ng": "dong",
                 }
             },
-            'host': {
-                'all_hosts': {
-                    'alias': u'All hosts :-)',
+            "host": {
+                "all_hosts": {
+                    "alias": "All hosts :-)",
                     "ding": "dong",
                 }
             },
-            'service': {
-                'all_services': {
-                    'alias': u'All s\xe4rvices',
+            "service": {
+                "all_services": {
+                    "alias": "All s\xe4rvices",
                     "d1ng": "dong",
                 }
             },
         }
 
-        assert groups.load_contact_group_information() == {
-            'all': {
-                'alias': u'Everything',
+        assert gui_groups.load_contact_group_information() == {
+            "all": {
+                "alias": "Everything",
                 "d!ng": "dong",
             }
         }
 
         assert gui_groups.load_host_group_information() == {
-            'all_hosts': {
-                'alias': u'All hosts :-)',
+            "all_hosts": {
+                "alias": "All hosts :-)",
                 "ding": "dong",
             }
         }
 
         assert gui_groups.load_service_group_information() == {
-            'all_services': {
-                'alias': u'All s\xe4rvices',
+            "all_services": {
+                "alias": "All s\xe4rvices",
                 "d1ng": "dong",
             }
         }
+
+
+def _rule_packs() -> list[ECRulePack]:
+    return [
+        {
+            "id": "default",
+            "title": "Default rule pack",
+            "disabled": False,
+            "rules": [
+                {
+                    "id": "test2",
+                    "contact_groups": {
+                        "groups": ["my_contact_group"],
+                        "notify": True,
+                        "precedence": "host",
+                    },
+                },
+                {
+                    "id": "test4",
+                    "contact_groups": {"groups": ["all"], "notify": True, "precedence": "host"},
+                },
+                {
+                    "id": "test1",
+                    "contact_groups": {
+                        "groups": ["my_contact_group"],
+                        "notify": True,
+                        "precedence": "host",
+                    },
+                },
+                {
+                    "id": "test",
+                    "contact_groups": {
+                        "groups": ["my_contact_group"],
+                        "notify": True,
+                        "precedence": "host",
+                    },
+                },
+            ],
+        }
+    ]
+
+
+@pytest.mark.usefixtures("request_context")
+@pytest.mark.parametrize(
+    "contact_group, rule_packs, expected_result",
+    [
+        pytest.param(
+            "my_contact_group",
+            _rule_packs,
+            [
+                (
+                    "Event console rule: test2",
+                    "wato.py?edit=0&folder=&mode=mkeventd_edit_rule&rule_pack=default",
+                ),
+                (
+                    "Event console rule: test1",
+                    "wato.py?edit=2&folder=&mode=mkeventd_edit_rule&rule_pack=default",
+                ),
+                (
+                    "Event console rule: test",
+                    "wato.py?edit=3&folder=&mode=mkeventd_edit_rule&rule_pack=default",
+                ),
+            ],
+            id="existing contact group, should match",
+        ),
+        pytest.param(
+            "bielefeld",
+            _rule_packs,
+            [],
+            id="none existing contact group",
+        ),
+    ],
+)
+def test_find_usages_of_contact_group_in_ec_rules(
+    monkeypatch: pytest.MonkeyPatch,
+    contact_group: str,
+    rule_packs: list[ECRulePack],
+    expected_result: list[tuple[str, str]],
+) -> None:
+    monkeypatch.setattr(cmk.ec.export, "load_rule_packs", rule_packs)
+    assert (
+        groups._find_usages_of_contact_group_in_ec_rules(contact_group)
+        == expected_result  # pylint: disable=protected-access
+    )

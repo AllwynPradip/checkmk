@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -32,89 +31,134 @@
 # VLANs; the VLAN is not included if its bit has a
 # value of '0'."
 
-from .agent_based_api.v1 import (
-    contains,
-    OIDEnd,
-    register,
-    SNMPTree,
-    TableRow,
-)
+from collections.abc import Sequence
+from typing import NamedTuple
 
-register.snmp_section(
-    name="inv_cisco_vlans",
-    fetch=[
-        SNMPTree(
-            base=".1.3.6.1.4.1.9.9.68.1.2.2.1",
-            oids=[
-                OIDEnd(),
-                "1",  # vmVlanType
-                "2",  # vmVlan
-                "4",  # vmVlans
-            ],
-        ),
-    ],
-    detect=contains(".1.3.6.1.2.1.1.1.0", "cisco"),
-)
+from .agent_based_api.v1 import OIDEnd, register, SNMPTree, TableRow
+from .agent_based_api.v1.type_defs import InventoryResult, StringTable
+from .utils.cisco import DETECT_CISCO
 
 
-def parse_multi_vlan(vlan_multi):
-    """compress a list of vlans into a readable format"""
-    def concatenate_vlans(vlan, subinfo):
-        if vlan not in subinfo:
-            subinfo.append(vlan)
-        return "-".join(map(str, subinfo))
+class _IfInfo(NamedTuple):
+    id_: int
+    vlans: str
+    vlan_type: str
 
-    vlans = []
-    for k, hex_ in enumerate(vlan_multi):
-        for l, bit in enumerate(bin(ord(hex_))[2:]):
-            if bit == '1':
-                vlans.append(k * 8 + l + 1)
+
+Section = Sequence[_IfInfo]
+MAP_VLANS = {
+    "1": "static",
+    "2": "dynamic",
+    "3": "multi-VLAN",
+}
+
+
+def _bitmask(raw: str) -> Sequence[int]:
+    """
+    >>> _bitmask("F")
+    [1, 5, 6]
+
+    >>> _bitmask("FF FF")
+    [1, 5, 6, 9, 13, 14, 17, 25, 29, 30, 33, 37, 38]
+
+    >>> _bitmask("80 40 00 00 01 00 F0 00")
+    [1, 2, 3, 9, 10, 17, 25, 26, 28, 33, 34, 41, 49, 50, 57, 58, 65, 73, 74, 81, 82, 89, 97, 98, 105, 106, 110, 113, 121, 122, 129, 130, 137, 145, 149, 150, 153, 154, 161, 169, 170, 177, 178]
+
+    """
+    # This is the state as I refactor this.
+    # I am not convinced this is right.
+    #
+    #  for k, hex_ in enumerate(raw.split())
+    #  for index, flag in enumerate(bin(int(hex_, 16))[2:])
+    #
+    # Looks better to me -- but there are no tests.
+    # The above would result in
+    #
+    #  >>> _bitmask("FF FF")
+    #  [1, 2, 3, 4, ..., 15, 16]
+    #
+    return [
+        k * 8 + index + 1
+        for k, hex_ in enumerate(raw)
+        for index, flag in enumerate(bin(ord(hex_))[2:])
+        if flag == "1"
+    ]
+
+
+def _parse_multi_vlan(vlan_multi: str) -> str:
+    """compress a list of vlans into a readable format
+
+    I am not sure if this is correct:
+
+    >>> _parse_multi_vlan("80 40 00 00 01 00 F0 00")
+    '1-3, 9-10, 17, 25-26, 28, 33-34, 41, 49-50, 57-58, 65, 73-74, 81-82, 89, 97-98, 105-106, 110, 113, 121-122, 129-130, 137, 145, 149-150, 153-154, 161, 169-170, 177-178'
+    >>> _parse_multi_vlan("FF FF")
+    '1, 5-6, 9, 13-14, 17, 25, 29-30, 33, 37-38'
+    """
+
+    vlans = _bitmask(vlan_multi)
 
     if not vlans:
         return ""
 
-    infotexts = []
-    subinfo = vlans[:1]
-    last_vlan = vlans[0]
-
-    for vlan in vlans[1:]:
-        if vlan - last_vlan > 1:
-            infotexts.append(concatenate_vlans(last_vlan, subinfo))
-            subinfo = [vlan]
-
-        if vlan == vlans[-1]:
-            infotexts.append(concatenate_vlans(vlan, subinfo))
-
-        last_vlan = vlan
-
-    return ", ".join(infotexts)
+    return _render_vlan_lists(vlans)
 
 
-def inv_cisco_vlans(section):
-    path = ["networking", "interfaces"]
-    map_vlans = {
-        '1': 'static',
-        '2': 'dynamic',
-        '3': 'multi-VLAN',
-    }
+def _render_vlan_lists(vlans: Sequence[int]) -> str:
+    """
+    >>> _render_vlan_lists([1, 2, 3, 4, 6, 8, 9, 12])
+    '1-4, 6, 8-9, 12'
+    """
+    succ_vals: list[set[int]] = []
+    for i in sorted(set(vlans)):
+        if succ_vals and i - 1 in succ_vals[-1]:
+            succ_vals[-1].add(i)
+        else:
+            succ_vals.append({i})
 
-    for if_id, vlan_type, vlan_single, vlan_multi in section[0]:
-        vlan_readable = map_vlans.get(vlan_type, "")
-        vlans = None
-        if vlan_single != '0' and vlan_type in ['1', '2']:
-            vlans = vlan_single
-        elif vlan_type == '3':
-            vlans = parse_multi_vlan(vlan_multi)
+    return ", ".join(str(s.pop()) if len(s) == 1 else f"{min(s)}-{max(s)}" for s in succ_vals)
 
-        if vlans:
-            yield TableRow(
-                path=path,
-                key_columns={"index": int(if_id)},
-                inventory_columns={
-                    "vlans": vlans,
-                    "vlantype": vlan_readable,
-                },
-            )
+
+def parse_inv_cisco_vlans(string_table: StringTable) -> Section:
+    section = []
+    for if_id, vlan_type, vlan_single, vlan_multi in string_table:
+        vlan_readable = MAP_VLANS.get(vlan_type, "")
+        if vlan_single != "0" and vlan_type in ["1", "2"]:
+            section.append(_IfInfo(int(if_id), vlan_single, vlan_readable))
+        elif vlan_type == "3":
+            section.append(_IfInfo(int(if_id), _parse_multi_vlan(vlan_multi), vlan_readable))
+
+    return section
+
+
+register.snmp_section(
+    name="inv_cisco_vlans",
+    fetch=SNMPTree(
+        base=".1.3.6.1.4.1.9.9.68.1.2.2.1",
+        oids=[
+            OIDEnd(),
+            "1",  # vmVlanType
+            "2",  # vmVlan
+            "4",  # vmVlans
+        ],
+    ),
+    detect=DETECT_CISCO,
+    parse_function=parse_inv_cisco_vlans,
+)
+
+
+def inv_cisco_vlans(section: Section) -> InventoryResult:
+    yield from (
+        TableRow(
+            path=["networking", "interfaces"],
+            key_columns={"index": if_info.id_},
+            inventory_columns={
+                "vlans": if_info.vlans,
+                "vlantype": if_info.vlan_type,
+            },
+        )
+        for if_info in section
+    )
 
 
 register.inventory_plugin(

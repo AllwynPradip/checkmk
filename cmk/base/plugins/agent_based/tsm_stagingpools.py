@@ -1,19 +1,12 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Any, Dict, List, Mapping
-from .agent_based_api.v1 import (
-    check_levels,
-    type_defs,
-    register,
-    State as state,
-    Result,
-    Service,
-    Metric,
-)
+from collections.abc import Mapping
+from typing import Any
+
+from .agent_based_api.v1 import check_levels, Metric, register, Result, Service, State, type_defs
 
 # <<<tsm_stagingpools>>>
 # tsmfarm2       SL8500_STGPOOL_05       99.9
@@ -33,7 +26,7 @@ TSM_STAGINGPOOLS_DEFAULT_LEVELS = {
     "free_below": 70,
 }
 
-SECTION = Dict[str, List[str]]
+SECTION = dict[str, list[str]]
 
 
 def parse_tsm_stagingpools(string_table: type_defs.StringTable) -> SECTION:
@@ -104,7 +97,7 @@ def check_tsm_stagingpools(
             num_free_tapes += 1
 
     if num_tapes == 0:
-        yield Result(state=state.UNKNOWN, summary="No tapes in this pool or pool not existant.")
+        yield Result(state=State.UNKNOWN, summary="No tapes in this pool or pool not existant.")
         return
 
     yield from check_levels(
@@ -112,8 +105,10 @@ def check_tsm_stagingpools(
         levels_lower=params.get("levels", (None, None)),
         metric_name="free",
         render_func=lambda v: "%d" % v,
-        label=(f"Total tapes: {num_tapes}, Utilization: {utilization:.1f} tapes, "
-               f"Tapes less then {params['free_below']}% full"),
+        label=(
+            f"Total tapes: {num_tapes}, Utilization: {utilization:.1f} tapes, "
+            f"Tapes less then {params['free_below']}% full"
+        ),
         boundaries=(0, num_tapes),
     )
 
@@ -124,19 +119,18 @@ def check_tsm_stagingpools(
 def cluster_check_tsm_stagingspools(
     item: str,
     params: Mapping[str, Any],
-    section: Mapping[str, SECTION],
+    section: Mapping[str, SECTION | None],
 ) -> type_defs.CheckResult:
-
     datasets, nodeinfos = [], []
     for node, data in section.items():
-        if item in data:
+        if data is not None and item in data:
             datasets.append(tuple(data[item]))
             nodeinfos.append(node)
 
     if len(datasets) == 0:
         return
 
-    yield Result(state=state.OK, summary="%s: " % "/".join(nodeinfos))
+    yield Result(state=State.OK, summary="%s: " % "/".join(nodeinfos))
 
     # In the 1.6 version of this check, a different node may have been checked as in Python 2.7
     # dicts were unordered.
@@ -145,7 +139,7 @@ def cluster_check_tsm_stagingspools(
     # In cluster mode we check if data sets are equal from all nodes
     # else we have only one data set
     if len(set(datasets)) > 1:
-        yield Result(state=state.UNKNOWN, summary="Cluster: data from nodes are not equal")
+        yield Result(state=State.UNKNOWN, summary="Cluster: data from nodes are not equal")
 
 
 register.check_plugin(

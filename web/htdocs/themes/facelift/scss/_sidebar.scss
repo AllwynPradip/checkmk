@@ -1,5 +1,5 @@
 @charset "UTF-8";
-// Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+// Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 // This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 // conditions defined in the file COPYING, which is part of this source code package.
 
@@ -24,16 +24,12 @@ body.side {
   font-weight: $font-weight-default;
   background: $navigation-bg-color;
 
-  p {
-    color: $darkgrey;
-  }
-
   &.screenshotmode {
     background-image: url("");
   }
 
   b.treeangle.title {
-    color: $font-color-sidebar;
+    color: $font-color;
   }
 }
 
@@ -75,7 +71,7 @@ body.side {
       flex: 1 0 auto;
       font-size: $font-size-small;
       line-height: 1.7;
-      color: $font-color-sidebar;
+      color: $font-color;
       text-align: center;
       text-decoration: none;
 
@@ -84,7 +80,7 @@ body.side {
       }
 
       &:visited {
-        color: $font-color-sidebar;
+        color: $font-color;
       }
 
       &.min {
@@ -105,7 +101,7 @@ body.side {
   #side_content {
     height: 100%;
     overflow: auto;
-    color: rgb(0, 0, 0);
+    color: $font-color-black;
 
     & > .snapin {
       margin-top: 0;
@@ -127,7 +123,9 @@ body.side {
   background: $bg-color;
 }
 
-#content_area iframe {
+#content_area iframe,
+iframe#robotmk,
+iframe#robotmk_error {
   width: 100%;
   height: 100%;
   border: none;
@@ -150,10 +148,12 @@ body.side {
   img {
     width: 48px;
     height: auto;
+    padding: 0;
   }
 
   .min & img {
     width: 45px;
+    padding: 0 12px;
 
     &.custom {
       width: 35px;
@@ -171,15 +171,17 @@ body.main .popup_menu #side_header > span {
   background-size: auto 30px;
 }
 
-#side_fold {
-  margin: $spacing 0;
+#side_fold,
+#saas {
+  padding: $spacing 4px $spacing 0;
   font-size: $font-size-small;
-  color: $font-color-sidebar;
+  color: $font-color;
   text-align: center;
   cursor: pointer;
+  border-left: 4px solid $navigation-bg-color;
 
-  &:not(.folded) {
-    color: $success;
+  &:hover {
+    border-left-color: $success;
   }
 
   img {
@@ -189,11 +191,14 @@ body.main .popup_menu #side_header > span {
       opacity: 1;
     }
   }
+}
 
-  &:not(.folded) img.folded {
-    display: none;
+#side_fold {
+  &:not(.folded) {
+    color: $font-color-green;
   }
 
+  &:not(.folded) img.folded,
   &.folded img:not(.folded) {
     display: none;
   }
@@ -204,7 +209,7 @@ body.main .popup_menu #side_header > span {
   font-size: $font-size-small;
   font-weight: $font-weight-bold;
   letter-spacing: $letter-spacing-table;
-  color: $font-color-sidebar;
+  color: $font-color;
   text-align: center;
 
   a {
@@ -216,7 +221,7 @@ body.main .popup_menu #side_header > span {
     }
 
     &:visited {
-      color: $font-color-sidebar;
+      color: $font-color;
     }
   }
 
@@ -225,7 +230,7 @@ body.main .popup_menu #side_header > span {
     margin-left: 2px;
     color: $font-color;
     cursor: pointer;
-    background-color: rgb(255, 0, 0);
+    background-color: $danger;
     border-radius: 6px;
   }
 }
@@ -253,7 +258,7 @@ div.snapin {
     position: relative;
     height: auto;
     line-height: 10px; /* affects height of snapin title bar */
-    color: $font-color-sidebar;
+    color: $font-color;
     text-align: left;
     background: transparent;
 
@@ -326,7 +331,7 @@ div.snapin {
     top: 64px;
     width: 100%;
     padding: $spacing 0;
-    color: $font-color-sidebar;
+    color: $font-color;
     border-bottom: 1px solid $snapin-heading-border-color;
     box-sizing: border-box;
   }
@@ -344,7 +349,7 @@ div.snapin {
    */
 
   td {
-    color: $font-color-sidebar;
+    color: $font-color;
   }
 
   h3 {
@@ -354,8 +359,8 @@ div.snapin {
 
   /* Normal link in snapins */
   a {
-    font-weight: normal;
-    color: $font-color-sidebar;
+    font-weight: $font-weight-default;
+    color: $font-color;
     text-decoration: none;
 
     &:hover {
@@ -381,39 +386,27 @@ div.snapin {
 
   li {
     padding-left: 0;
-    color: $snapin-list-color;
+    color: $font-color;
 
     &.sidebar {
       margin-left: 0;
     }
   }
 
-  /* TODO: Reproduce this html element */
-  textarea {
-    width: 100%;
-  }
-
-  /* TODO: Reproduce this html element */
-  div.footnote {
-    width: 100%;
-    text-align: right;
-  }
-
   /* Style for exceptions displayed in snapins */
   div.snapinexception {
     width: 220px;
-    padding: 3px;
-    background-color: rgb(255, 136, 136);
-    border: 1px solid rgb(255, 0, 0);
+    padding: $spacing-half;
+    background-color: $color-state-2-background;
     border-radius: 4px;
 
     h2 {
       margin-top: 0;
-      color: rgb(255, 0, 0);
+      color: $font-color-light-grey;
     }
 
     p {
-      color: rgb(136, 0, 0);
+      color: $font-color-light-grey;
     }
   }
 
@@ -424,12 +417,12 @@ div.snapin {
 
     a {
       border-radius: $spacing;
-    }
 
-    a:hover {
-      /* TODO: create a better hover effect */
-      text-decoration: none;
-      opacity: 0.5;
+      &:hover {
+        /* TODO: create a better hover effect */
+        text-decoration: none;
+        opacity: 0.5;
+      }
     }
   }
 
@@ -452,12 +445,8 @@ div.snapin {
     }
   }
 
-  /* state bullets at problem host or all hosts snapin */
-  div.statebullet {
-    float: left;
-    width: 5px;
-    height: 5px;
-    border-radius: 5px;
+  a.toggle_switch img.iconbutton {
+    margin-bottom: 2px;
   }
 }
 
@@ -474,11 +463,6 @@ div.snapin {
       width: 28px;
       height: 28px;
     }
-
-    div.description {
-      margin-top: 6px;
-      color: #5a6782;
-    }
   }
 }
 
@@ -486,24 +470,13 @@ div.snapin div.content div.foldable ul.treeangle a.iconlink {
   padding: 0;
 }
 
-div.snapin table.allhosts td a.link,
-/* TODO: Reproduce these two html elements */
-div.snapin table.allhosts td body.main .popup_menu span.link,
-body.main .popup_menu div.snapin table.allhosts td span.link {
-  padding: 2px;
-  padding-left: 4px;
-}
-
-div.snapin div.footnotelink a.link,
-/* TODO: Reproduce these two html elements */
-div.snapin div.footnotelink body.main .popup_menu span.link,
-body.main .popup_menu div.snapin div.footnotelink span.link {
+div.snapin div.footnotelink a.link {
   height: 11px;
   padding: 2px 7px;
   font-size: $font-size-small;
   font-weight: $font-weight-bold;
-  color: $footnote-link-color;
-  background: $inpage-highlight-color;
+  color: $font-color;
+  background: $input-background-color;
   border: none;
   box-shadow: none;
 
@@ -512,15 +485,6 @@ body.main .popup_menu div.snapin div.footnotelink span.link {
   }
 }
 
-//div.snapin div.footnotelink a.link::before,
-/* TODO: Reproduce these two html elements */
-/*div.snapin div.footnotelink body.main .popup_menu span.link::before,
-body.main .popup_menu div.snapin div.footnotelink span.link::before {
-  margin-right: 8px;
-  content: "···";
-}*/
-
-/* TODO: Reproduce this html element */
 div#snapinDragIndicator {
   position: relative;
   top: 2px;
@@ -529,9 +493,9 @@ div#snapinDragIndicator {
   margin: 0 0 0 11px;
   font-size: 1px;
   line-height: 1px;
-  background-color: rgb(255, 255, 255);
+  background-color: $white;
   border-radius: 3px;
-  box-shadow: 0 0 3px rgb(255, 255, 255);
+  box-shadow: 0 0 3px $white;
 }
 
 /*-------------------------------------------------------------------------.
@@ -552,7 +516,7 @@ div.add_snapin {
       float: left;
       width: 270px;
       height: 220px;
-      padding: 8px;
+      padding: $spacing;
       margin: 0 16px 16px 0;
       background-color: $snapin-bg-color;
       border: 1px solid $snapin-bg-color;
@@ -561,7 +525,7 @@ div.add_snapin {
 
     *,
     &:hover * {
-      color: $font-color-sidebar;
+      color: $font-color;
     }
 
     &:hover {
@@ -569,7 +533,7 @@ div.add_snapin {
     }
 
     div.description {
-      padding: $spacing;
+      padding: $spacing 0;
       border-top: 1px solid $snapin-heading-border-color;
     }
 
@@ -581,10 +545,11 @@ div.add_snapin {
     }
 
     .head {
-      padding: 8px;
+      padding: 0 0 $spacing;
     }
 
     .content {
+      padding: $spacing 0;
       border-bottom: none;
     }
   }
@@ -625,7 +590,7 @@ div.popup_msg {
   left: 20px;
   width: 200px;
   padding: 3px;
-  background-color: rgb(36, 68, 82);
+  background-color: $headline-color;
 
   .close {
     display: block;

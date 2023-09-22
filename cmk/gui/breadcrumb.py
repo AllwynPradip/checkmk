@@ -1,33 +1,33 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """Breadcrumb processing
 
 Cares about rendering the breadcrumb which is shown at the top of all pages
 """
+from __future__ import annotations
 
-from typing import NamedTuple, MutableSequence, List, Iterable, Optional, TYPE_CHECKING
+from collections.abc import Iterable, MutableSequence
+from typing import NamedTuple
 
-from cmk.gui.globals import html
+import cmk.gui.htmllib.html
 from cmk.gui.type_defs import MegaMenu
+from cmk.gui.utils.escaping import escape_to_html
+from cmk.gui.utils.speaklater import LazyString
 
-if TYPE_CHECKING:
-    from cmk.gui.pagetypes import PagetypeTopics
 
-BreadcrumbItem = NamedTuple("BreadcrumbItem", [
-    ("title", str),
-    ("url", Optional[str]),
-])
+class BreadcrumbItem(NamedTuple):
+    title: str | LazyString
+    url: str | None
 
 
 class Breadcrumb(MutableSequence[BreadcrumbItem]):  # pylint: disable=too-many-ancestors
-    def __init__(self, items: Optional[Iterable[BreadcrumbItem]] = None):
+    def __init__(self, items: Iterable[BreadcrumbItem] | None = None) -> None:
         super().__init__()
-        self._items: List[BreadcrumbItem] = list(items) if items else []
+        self._items: list[BreadcrumbItem] = list(items) if items else []
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self._items)
 
     def __getitem__(self, index):
@@ -42,21 +42,21 @@ class Breadcrumb(MutableSequence[BreadcrumbItem]):  # pylint: disable=too-many-a
     def insert(self, index, value):
         self._items.insert(index, value)
 
-    def __add__(self, other):
+    def __add__(self, other: Breadcrumb) -> Breadcrumb:
         return Breadcrumb(list(self) + list(other))
 
 
 class BreadcrumbRenderer:
     def show(self, breadcrumb: Breadcrumb) -> None:
-        html.open_div(class_="breadcrumb")
+        cmk.gui.htmllib.html.html.open_div(class_="breadcrumb")
 
         for item in breadcrumb:
             if item.url:
-                html.a(item.title, href=item.url)
+                cmk.gui.htmllib.html.html.a(escape_to_html(str(item.title)), href=item.url)
             else:
-                html.span(item.title)
+                cmk.gui.htmllib.html.html.span(escape_to_html(str(item.title)))
 
-        html.close_div()
+        cmk.gui.htmllib.html.html.close_div()
 
 
 def make_simple_page_breadcrumb(menu: MegaMenu, title: str) -> Breadcrumb:
@@ -79,23 +79,32 @@ def make_current_page_breadcrumb_item(title: str) -> BreadcrumbItem:
     )
 
 
-def make_topic_breadcrumb(menu: MegaMenu, topic: "PagetypeTopics") -> Breadcrumb:
+def make_topic_breadcrumb(
+    menu: MegaMenu,
+    topic_title: str | LazyString,
+) -> Breadcrumb:
     """Helper to create a breadcrumb down to topic level"""
     # 1. Main menu level
     breadcrumb = make_main_menu_breadcrumb(menu)
 
     # 2. Topic level
-    breadcrumb.append(BreadcrumbItem(
-        title=topic.title(),
-        url=None,
-    ))
+    breadcrumb.append(
+        BreadcrumbItem(
+            title=topic_title,
+            url=None,
+        )
+    )
 
     return breadcrumb
 
 
 def make_main_menu_breadcrumb(menu: MegaMenu) -> Breadcrumb:
     """Create a breadcrumb for the main menu level"""
-    return Breadcrumb([BreadcrumbItem(
-        title=menu.title,
-        url=None,
-    )])
+    return Breadcrumb(
+        [
+            BreadcrumbItem(
+                title=menu.title,
+                url=None,
+            )
+        ]
+    )

@@ -1,0 +1,22 @@
+@startuml
+
+artifact "System Apache" {
+    file "/etc/apache2/conf-*/zzz_omd.conf" as system_hook
+    file "/omd/apache/$SITE.conf" as site_hook
+}
+artifact "Site Apache" {
+    file "$OMD_ROOT/etc/apache/apache.conf" as site_conf
+    folder "$OMD_ROOT/etc/apache/conf.d/" as conf_d
+    file "security.conf" as security_conf
+    file "nagvis.conf" as nagvis_conf
+    file "etc." as etc_conf
+}
+
+system_hook --> site_hook : includes
+site_hook --> site_conf : links (reverse proxy)
+site_conf --> conf_d : includes
+conf_d --> security_conf : contains
+conf_d --> nagvis_conf : contains
+conf_d --> etc_conf : contains
+
+@enduml

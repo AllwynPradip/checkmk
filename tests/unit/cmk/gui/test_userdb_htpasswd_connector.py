@@ -1,75 +1,91 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 from pathlib import Path
 
 import pytest
-from passlib.hash import sha256_crypt  # type: ignore[import]
+from pytest import MonkeyPatch
 
-import cmk.gui.plugins.userdb.htpasswd as htpasswd
+from cmk.utils.crypto import password_hashing
+from cmk.utils.crypto.password import Password
+from cmk.utils.user import UserId
+
+from cmk.gui.exceptions import MKUserError
+from cmk.gui.userdb import CheckCredentialsResult, htpasswd
 
 
-@pytest.fixture(name="htpasswd_file")
-def htpasswd_file_fixture(tmp_path):
+@pytest.fixture(name="htpasswd_file", autouse=True)
+def htpasswd_file_fixture(tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
     htpasswd_file_path = tmp_path / "htpasswd"
-    htpasswd_file_path.write_text(
-        (
-            # Pre 1.6 hashing formats (see cmk.gui.plugins.userdb.htpasswd for more details)
-            u"bärnd:$apr1$/FU.SwEZ$Ye0XG1Huf2j7Jws7KD.h2/\n"
-            u"cmkadmin:NEr3kqi287FQc\n"
-            u"harry:$1$478020$ldQUQ3RIwRYk5wjKfsWPD.\n"
-            # A disabled user
-            u"locked:!NEr3kqi287FQc\n"
-            # A >= 1.6 sha256 hashed password
-            u"sha256user:$5$rounds=535000$5IFtH0zYpQ6STBre$Nkem2taHfBFswWj3xERRpmEI.20G5is0VBcPpUuf3J2\n"
-        ),
-        encoding="utf-8")
-    return Path(htpasswd_file_path)
+    # HtpasswdUserConnector will use this path:
+    monkeypatch.setattr("cmk.utils.paths.htpasswd_file", htpasswd_file_path)
+
+    hashes = [
+        # all hashes below belong to the password "cmk"
+        "$cmk@dmin$:$2y$04$XZECL0BqDf8Er3iygLfRBO7wwg8igYcI4K49Jtn8AnJMJaP2Lx/ki",
+        "bärnd:$2y$04$71x8EVHr7c8FP8HJ/PWN7uM27SC0Z89waQCaiYovaiSAslb1sh2sO",
+        "locked_bärnd:!$2y$04$71x8EVHr7c8FP8HJ/PWN7uM27SC0Z89waQCaiYovaiSAslb1sh2sO",
+        # sha256_crypt hashes (of "cmk"), which are no longer supported
+        "legacy_hash:$5$kNFothH2RmxLOgvZ$zYYzORO.TxsYwbWvdXdQURuNlO2yFBmEZaRk2QxT1dC",
+        "locked_legacy_hash:!$5$kNFothH2RmxLOgvZ$zYYzORO.TxsYwbWvdXdQURuNlO2yFBmEZaRk2QxT1dC",
+    ]
+
+    htpasswd_file_path.write_text("\n".join(sorted(hashes)) + "\n", encoding="utf-8")
+
+    return htpasswd_file_path
 
 
-def test_htpasswd_exists(htpasswd_file):
-    assert htpasswd.Htpasswd(htpasswd_file).exists(u"cmkadmin")
-    assert htpasswd.Htpasswd(htpasswd_file).exists(u"locked")
-    assert not htpasswd.Htpasswd(htpasswd_file).exists(u"not-existing")
-    assert not htpasswd.Htpasswd(htpasswd_file).exists(u"")
-    assert htpasswd.Htpasswd(htpasswd_file).exists(u"bärnd")
+@pytest.mark.parametrize("password", ["blä", "😀", "😀" * 18, "a" * 71])
+def test_hash_password(password: str) -> None:
+    hashed_pw = htpasswd.hash_password(Password(password))
+    password_hashing.verify(Password(password), hashed_pw)
 
 
-def test_htpasswd_load(htpasswd_file):
-    credentials = htpasswd.Htpasswd(htpasswd_file).load()
-    assert credentials[u"cmkadmin"] == "NEr3kqi287FQc"
-    assert isinstance(credentials[u"cmkadmin"], str)
-    assert credentials[u"bärnd"] == "$apr1$/FU.SwEZ$Ye0XG1Huf2j7Jws7KD.h2/"
+def test_truncation_error() -> None:
+    """Bcrypt doesn't allow passwords longer than 72 bytes"""
+
+    with pytest.raises(MKUserError):
+        htpasswd.hash_password(Password("A" * 72 + "foo"))
+
+    with pytest.raises(MKUserError):
+        htpasswd.hash_password(Password("😀" * 19))
 
 
-def test_htpasswd_save(htpasswd_file):
-    credentials = htpasswd.Htpasswd(htpasswd_file).load()
+@pytest.mark.parametrize(
+    # uids/passwords correspond to users from the htpasswd_file_fixture
+    "uid,password,expect",
+    [
+        # valid
+        (UserId("$cmk@dmin$"), Password("cmk"), UserId("$cmk@dmin$")),
+        (UserId("bärnd"), Password("cmk"), UserId("bärnd")),
+        # wrong password
+        (UserId("bärnd"), Password("foo"), False),
+        # unsupported hash
+        (UserId("legacy_hash"), Password("cmk"), False),
+        # user not in htpasswd (potentially other connector)
+        (UserId("unknown"), Password("cmk"), None),
+        # check that PWs too long for bcrypt are handled gracefully and don't raise
+        (UserId("bärnd"), Password("A" * 100), False),
+    ],
+)
+def test_user_connector_verify_password(
+    uid: UserId, password: Password, expect: CheckCredentialsResult
+) -> None:
+    assert htpasswd.HtpasswdUserConnector({}).check_credentials(uid, password) == expect
 
-    saved_file = htpasswd_file.with_suffix(".saved")
-    htpasswd.Htpasswd(saved_file).save(credentials)
 
-    assert htpasswd_file.open(encoding="utf-8").read() \
-        == saved_file.open(encoding="utf-8").read()
-
-
-def test_hash_password():
-    hashed_pw = htpasswd.hash_password("blä")
-    assert sha256_crypt.verify(u"blä", hashed_pw)
-
-    hashed_pw = htpasswd.hash_password(u"blä")
-    assert sha256_crypt.verify("blä", hashed_pw)
-
-
-def test_user_connector_verify_password(htpasswd_file, monkeypatch):
-    c = htpasswd.HtpasswdUserConnector({})
-    monkeypatch.setattr(c, "_get_htpasswd", lambda: htpasswd.Htpasswd(htpasswd_file))
-
-    assert c.check_credentials(u"cmkadmin", u"cmk") == u"cmkadmin"
-    assert c.check_credentials(u"bärnd", u"cmk") == u"bärnd"
-    assert c.check_credentials(u"sha256user", u"cmk") == u"sha256user"
-    assert c.check_credentials(u"harry", u"cmk") == u"harry"
-    assert c.check_credentials(u"dingeling", u"aaa") is None
-    assert c.check_credentials(u"locked", u"locked") is False
+@pytest.mark.parametrize(
+    "uid,password",
+    [
+        (UserId("locked_bärnd"), Password("cmk")),
+        (UserId("locked_legacy_hash"), Password("cmk")),
+    ],
+)
+def test_user_connector_verify_password_locked_users(
+    uid: UserId,
+    password: Password,
+) -> None:
+    with pytest.raises(MKUserError, match="User is locked"):
+        htpasswd.HtpasswdUserConnector({}).check_credentials(uid, password)

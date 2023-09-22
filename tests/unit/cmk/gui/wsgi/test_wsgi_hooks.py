@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 from unittest.mock import MagicMock
 
+import pytest
+
+from tests.unit.cmk.gui.conftest import WebTestAppForCMK
+
 from cmk.gui import hooks
 
 
-def test_hooks(logged_in_wsgi_app, mock_livestatus):
+@pytest.mark.usefixtures("mock_livestatus")
+def test_hooks(logged_in_wsgi_app: WebTestAppForCMK) -> None:
     start_func = MagicMock()
     end_func = MagicMock()
     hooks.register("request-start", start_func)

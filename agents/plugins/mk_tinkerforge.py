@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-__version__ = "2.1.0i1"
+__version__ = "2.3.0b1"
 
 ###################################################
 # plugin to retrieve data from tinkerforge devices.
@@ -42,16 +42,18 @@ __version__ = "2.1.0i1"
 # Don't have tinkerforge module during tests. So disable those checks
 # pylint: disable=import-error
 
-import sys
+import hashlib
 import os
-
-from optparse import OptionParser  # pylint: disable=deprecated-module
+import sys
 import time
+from optparse import OptionParser  # pylint: disable=deprecated-module
+from urllib.request import urlopen
 
-try:
-    from typing import List
-except ImportError:
-    pass
+
+def check_digest(data, expected):
+    digest = hashlib.sha256(data.read()).hexdigest()
+    if digest != expected:
+        raise ValueError("Failed to validate digest: expected: %s, got: %s." % (expected, digest))
 
 
 def install():
@@ -62,20 +64,24 @@ def install():
         return 1
 
     if sys.version_info[0] >= 3:
-        from urllib.request import urlopen  # pylint: disable=no-name-in-module
         from io import BytesIO
     else:
-        from urllib2 import urlopen
         from cStringIO import StringIO as BytesIO
     import shutil
     from zipfile import ZipFile
-    url = "http://download.tinkerforge.com/bindings/python/tinkerforge_python_bindings_latest.zip"
-    response = urlopen(url)
-    buf = BytesIO(response.read())
-    z = ZipFile(buf)
 
-    extract_files = [f for f in z.namelist() if f.startswith("source/tinkerforge")]
-    z.extractall(dest, extract_files)
+    url = "https://download.tinkerforge.com/bindings/python/tinkerforge_python_bindings_2_1_30.zip"
+    # sha256sum of the downloaded file. To update:
+    #   `curl -s "https://download.tinkerforge.com/[new-version].zip | sha256sum`
+    download_digest = "e735e0e53ad56e2c2919cf412f3ec28ec0997919eb556b20c27519a57fb7bad0"
+
+    response = urlopen(url)  # nosec B310 # BNS:28af27 # pylint: disable=consider-using-with
+    buf = BytesIO(response.read())
+    check_digest(buf, download_digest)
+
+    with ZipFile(buf) as z:
+        extract_files = [f for f in z.namelist() if f.startswith("source/tinkerforge")]
+        z.extractall(dest, extract_files)
 
     shutil.move(os.path.join(dest, "source", "tinkerforge"), os.path.join(dest, "tinkerforge"))
     shutil.rmtree(os.path.join(dest, "source"))
@@ -84,10 +90,10 @@ def install():
 
 
 DEFAULT_SETTINGS = {
-    'host': "localhost",
-    'port': 4223,
-    'segment_display_uid': None,
-    'segment_display_brightness': 2
+    "host": "localhost",
+    "port": 4223,
+    "segment_display_uid": None,
+    "segment_display_brightness": 2,
 }
 
 # globals
@@ -101,48 +107,62 @@ def id_to_string(identifier):
 
 
 def print_generic(settings, sensor_type, ident, factor, unit, *values):
-    if ident.uid == settings['segment_display_uid']:
+    if ident.uid == settings["segment_display_uid"]:
         global segment_display_value, segment_display_unit
         segment_display_value = int(values[0] * factor)
         segment_display_unit = unit
-    sys.stdout.write("%s,%s,%s\n" %
-                     (sensor_type, id_to_string(ident), ",".join([str(val) for val in values])))
+    sys.stdout.write(
+        "%s,%s,%s\n" % (sensor_type, id_to_string(ident), ",".join([str(val) for val in values]))
+    )
 
 
 def print_ambient_light(conn, settings, uid):
     from tinkerforge.bricklet_ambient_light import BrickletAmbientLight  # type: ignore[import]
+
     br = BrickletAmbientLight(uid, conn)
     print_generic(settings, "ambient", br.get_identity(), 0.01, "L", br.get_illuminance())
 
 
 def print_ambient_light_v2(conn, settings, uid):
     from tinkerforge.bricklet_ambient_light_v2 import BrickletAmbientLightV2  # type: ignore[import]
+
     br = BrickletAmbientLightV2(uid, conn)
     print_generic(settings, "ambient", br.get_identity(), 0.01, "L", br.get_illuminance())
 
 
 def print_temperature(conn, settings, uid):
     from tinkerforge.bricklet_temperature import BrickletTemperature  # type: ignore[import]
+
     br = BrickletTemperature(uid, conn)
-    print_generic(settings, "temperature", br.get_identity(), 0.01, u"\N{DEGREE SIGN}C",
-                  br.get_temperature())
+    print_generic(
+        settings, "temperature", br.get_identity(), 0.01, "\N{DEGREE SIGN}C", br.get_temperature()
+    )
 
 
 def print_temperature_ext(conn, settings, uid):
     from tinkerforge.bricklet_ptc import BrickletPTC  # type: ignore[import]
+
     br = BrickletPTC(uid, conn)
-    print_generic(settings, "temperature.ext", br.get_identity(), 0.01, u"\N{DEGREE SIGN}C",
-                  br.get_temperature())
+    print_generic(
+        settings,
+        "temperature.ext",
+        br.get_identity(),
+        0.01,
+        "\N{DEGREE SIGN}C",
+        br.get_temperature(),
+    )
 
 
 def print_humidity(conn, settings, uid):
     from tinkerforge.bricklet_humidity import BrickletHumidity  # type: ignore[import]
+
     br = BrickletHumidity(uid, conn)
     print_generic(settings, "humidity", br.get_identity(), 0.1, "RH", br.get_humidity())
 
 
 def print_master(conn, settings, uid):
     from tinkerforge.brick_master import BrickMaster  # type: ignore[import]
+
     br = BrickMaster(uid, conn)
     print_generic(
         settings,
@@ -158,6 +178,7 @@ def print_master(conn, settings, uid):
 
 def print_motion_detector(conn, settings, uid):
     from tinkerforge.bricklet_motion_detector import BrickletMotionDetector  # type: ignore[import]
+
     br = BrickletMotionDetector(uid, conn)
     print_generic(settings, "motion", br.get_identity(), 1.0, "", br.get_motion_detected())
 
@@ -174,26 +195,29 @@ def display_on_segment(conn, settings, text):
     #        0x08
 
     CHARACTERS = {
-        "0": 0x3f,
+        "0": 0x3F,
         "1": 0x06,
-        "2": 0x5b,
-        "3": 0x4f,
+        "2": 0x5B,
+        "3": 0x4F,
         "4": 0x66,
-        "5": 0x6d,
-        "6": 0x7d,
+        "5": 0x6D,
+        "6": 0x7D,
         "7": 0x07,
-        "8": 0x7f,
-        "9": 0x6f,
+        "8": 0x7F,
+        "9": 0x6F,
         "C": 0x39,
         "H": 0x74,
         "L": 0x38,
         "R": 0x50,
-        u"\N{DEGREE SIGN}": 0x63,
+        "\N{DEGREE SIGN}": 0x63,
     }
 
-    from tinkerforge.bricklet_segment_display_4x7 import BrickletSegmentDisplay4x7  # type: ignore[import]
+    from tinkerforge.bricklet_segment_display_4x7 import (  # type: ignore[import]
+        BrickletSegmentDisplay4x7,
+    )
+
     br = BrickletSegmentDisplay4x7(segment_display, conn)
-    segments = []  # type: List
+    segments = []  # type: list
     for letter in text:
         if len(segments) >= 4:
             break
@@ -203,7 +227,7 @@ def display_on_segment(conn, settings, text):
     # align to the right
     segments = [0] * (4 - len(segments)) + segments
 
-    br.set_segments(segments, settings['segment_display_brightness'], False)
+    br.set_segments(segments, settings["segment_display_brightness"], False)
 
 
 def init_device_handlers():
@@ -219,7 +243,7 @@ def init_device_handlers():
         (216, "bricklet_temperature", "BrickletTemperature", print_temperature),
         (226, "bricklet_ptc", "BrickletPTC", print_temperature_ext),
         (27, "bricklet_humidity", "BrickletHumidity", print_humidity),
-        (233, "bricklet_motion_detector", "BrickletMotionDetector", print_motion_detector)
+        (233, "bricklet_motion_detector", "BrickletMotionDetector", print_motion_detector),
     ]:
         if dev_id is not None:
             device_handlers[dev_id] = handler
@@ -231,8 +255,18 @@ def init_device_handlers():
     return device_handlers
 
 
-def enumerate_callback(conn, device_handlers, settings, uid, connected_uid, position,
-                       hardware_version, firmware_version, device_identifier, enumeration_type):
+def enumerate_callback(
+    conn,
+    device_handlers,
+    settings,
+    uid,
+    connected_uid,
+    position,
+    hardware_version,
+    firmware_version,
+    device_identifier,
+    enumeration_type,
+):
     if device_identifier == 237:
         global segment_display
         segment_display = uid
@@ -245,12 +279,12 @@ def read_config(env):
     cfg_path = os.path.join(os.getenv("MK_CONFDIR", "/etc/check_mk"), "tinkerforge.cfg")
 
     if os.path.isfile(cfg_path):
-        exec(open(cfg_path).read(), settings, settings)
+        with open(cfg_path) as opened_file:
+            exec(opened_file.read(), settings, settings)  # nosec B102 # BNS:a29406
     return settings
 
 
 def main():
-
     # host = "localhost"
     # port = 4223
     # segment_display_uid = "abc"         # uid of the sensor to display on the 7-segment display
@@ -258,38 +292,48 @@ def main():
 
     settings = read_config(os.environ)
     parser = OptionParser()
-    parser.add_option("--host",
-                      dest="host",
-                      default=settings['host'],
-                      help="host/ipaddress of the tinkerforge device",
-                      metavar="ADDRESS")
-    parser.add_option("--port",
-                      dest="port",
-                      default=settings['port'],
-                      type=int,
-                      help="port of the tinkerforge device",
-                      metavar="PORT")
-    parser.add_option("--segment_display_uid",
-                      dest="uid",
-                      default=settings['segment_display_uid'],
-                      help="uid of the bricklet which will be displayed in the 7-segment display",
-                      metavar="UID")
-    parser.add_option("--segment_display_brightness",
-                      type=int,
-                      dest="brightness",
-                      default=settings['segment_display_brightness'],
-                      help="brightness of the 7-segment display (0-7)")
-    parser.add_option("--install",
-                      action="store_true",
-                      help="install tinkerforge python api to same directory as the plugin")
+    parser.add_option(
+        "--host",
+        dest="host",
+        default=settings["host"],
+        help="host/ipaddress of the tinkerforge device",
+        metavar="ADDRESS",
+    )
+    parser.add_option(
+        "--port",
+        dest="port",
+        default=settings["port"],
+        type=int,
+        help="port of the tinkerforge device",
+        metavar="PORT",
+    )
+    parser.add_option(
+        "--segment_display_uid",
+        dest="uid",
+        default=settings["segment_display_uid"],
+        help="uid of the bricklet which will be displayed in the 7-segment display",
+        metavar="UID",
+    )
+    parser.add_option(
+        "--segment_display_brightness",
+        type=int,
+        dest="brightness",
+        default=settings["segment_display_brightness"],
+        help="brightness of the 7-segment display (0-7)",
+    )
+    parser.add_option(
+        "--install",
+        action="store_true",
+        help="install tinkerforge python api to same directory as the plugin",
+    )
 
     options = parser.parse_args()[0]
 
     settings = {
-        'host': options.host,
-        'port': options.port,
-        'segment_display_uid': options.uid,
-        'segment_display_brightness': options.brightness
+        "host": options.host,
+        "port": options.port,
+        "segment_display_uid": options.uid,
+        "segment_display_brightness": options.brightness,
     }
 
     if options.install:
@@ -303,21 +347,28 @@ def main():
         return 1
 
     conn = IPConnection()
-    conn.connect(settings['host'], settings['port'])
+    conn.connect(settings["host"], settings["port"])
 
     device_handlers = init_device_handlers()
 
     try:
         sys.stdout.write("<<<tinkerforge:sep(44)>>>\n")
 
-        cb = lambda uid, connected_uid, position, hardware_version, firmware_version, \
-                    device_identifier, enumeration_type: \
-            enumerate_callback(conn, device_handlers, settings, \
-                               uid, connected_uid, position, \
-                               hardware_version, firmware_version, \
-                               device_identifier, enumeration_type)
-
-        conn.register_callback(IPConnection.CALLBACK_ENUMERATE, cb)
+        conn.register_callback(
+            IPConnection.CALLBACK_ENUMERATE,
+            lambda uid, connected_uid, position, hardware_version, firmware_version, device_identifier, enumeration_type: enumerate_callback(
+                conn,
+                device_handlers,
+                settings,
+                uid,
+                connected_uid,
+                position,
+                hardware_version,
+                firmware_version,
+                device_identifier,
+                enumeration_type,
+            ),
+        )
         conn.enumerate()
 
         # bricklets respond asynchronously in callbacks and we have no way of knowing
@@ -326,12 +377,14 @@ def main():
 
         if segment_display is not None:
             if segment_display_value is not None:
-                display_on_segment(conn, settings,
-                                   "%d%s" % (segment_display_value, segment_display_unit))
+                display_on_segment(
+                    conn, settings, "%d%s" % (segment_display_value, segment_display_unit)
+                )
             else:
                 display_on_segment(conn, settings, "")
     finally:
         conn.disconnect()
+    return None
 
 
 if __name__ == "__main__":

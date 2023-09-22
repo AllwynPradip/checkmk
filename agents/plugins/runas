@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,7 +9,7 @@
 
 # Disable unused variable error (needed to keep track of version)
 # shellcheck disable=SC2034
-CMK_VERSION="2.1.0i1"
+CMK_VERSION="2.3.0b1"
 
 # This plugin allows to execute mrpe, local and plugin skripts with a different user context
 # It is configured with in the file $MK_CONFDIR/runas.cfg
@@ -29,44 +29,47 @@ CMK_VERSION="2.1.0i1"
 # local ab /var/ab/local
 #
 
-grep -Ev '^[[:space:]]*($|#)' "$MK_CONFDIR/runas.cfg" | \
-while read type user include
-do
-    if [ -d $include -o \( "$type" == "mrpe" -a -f $include \) ] ; then
-        PREFIX=""
-        if [ "$user" != "-" ] ; then
-            PREFIX="su $user -c "
-        fi
-
-        # mrpe includes
-        if [ "$type" == "mrpe" ] ; then
-            echo "<<<mrpe>>>"
-            grep -Ev '^[[:space:]]*($|#)' "$include" | \
-            while read descr cmdline
-            do
-                PLUGIN=${cmdline%% *}
-                if [ -n "$PREFIX" ] ; then
-                    cmdline="$PREFIX\"$cmdline\""
-                fi
-                OUTPUT=$(eval "$cmdline")
-                echo -n "(${PLUGIN##*/}) $descr $? $OUTPUT" | tr \\n \\1
-                echo
-            done
-        # local and plugin includes
-        elif [ "$type" == "local" -o "$type" == "plugin" ] ; then
-            if [ "$type" == "local" ] ; then
-                echo "<<<local:sep(0)>>>"
+# SC2162: read without -r will mangle backslashes.
+# The following suppression was added when we enabled the corresponding shellcheck.
+# It may well be that "read -r" would be more appropriate (for all of the three read commands).
+# shellcheck disable=SC2162
+grep -Ev '^[[:space:]]*($|#)' "$MK_CONFDIR/runas.cfg" |
+    while read type user include; do
+        if [ -d "${include}" ] || { [ "${type}" = "mrpe" ] && [ -f "${include}" ]; }; then
+            PREFIX=""
+            if [ "$user" != "-" ]; then
+                PREFIX="su $user -c "
             fi
-            find $include -executable -type f | \
-            while read filename
-            do
-                if [ -n "$PREFIX" ] ; then
-                    cmdline="$PREFIX\"$filename\""
-                else
-                    cmdline=$filename
+
+            # mrpe includes
+            if [ "$type" == "mrpe" ]; then
+                echo "<<<mrpe>>>"
+                grep -Ev '^[[:space:]]*($|#)' "$include" |
+                    while read descr cmdline; do
+                        PLUGIN=${cmdline%% *}
+                        #  shellcheck disable=SC2030 # false positive? "Modification of PREFIX is local..."
+                        if [ -n "$PREFIX" ]; then
+                            cmdline="$PREFIX\"$cmdline\""
+                        fi
+                        OUTPUT=$(eval "$cmdline")
+                        echo -n "(${PLUGIN##*/}) $descr $? $OUTPUT" | tr \\n \\1
+                        echo
+                    done
+            # local and plugin includes
+            elif [ "$type" = "local" ] || [ "$type" = "plugin" ]; then
+                if [ "$type" == "local" ]; then
+                    echo "<<<local:sep(0)>>>"
                 fi
-                $cmdline
-            done
+                find "$include" -executable -type f |
+                    while read filename; do
+                        # shellcheck disable=SC2031 # false positive? "PREFIX was modified in a subshell..."
+                        if [ -n "$PREFIX" ]; then
+                            cmdline="$PREFIX\"$filename\""
+                        else
+                            cmdline=$filename
+                        fi
+                        $cmdline
+                    done
+            fi
         fi
-    fi
-done
+    done

@@ -1,25 +1,21 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
+from cmk.gui import log
+from cmk.gui.wsgi.applications.utils import load_gui_log_levels
 
-from werkzeug.debug import DebuggedApplication
+# Initialize logging as early as possible, before even importing most of the code.
+log.init_logging()
+log.set_log_levels(load_gui_log_levels())
 
-import cmk.gui.log as log
-
-log.init_logging()  # Initialize logging as early as possible
-
-import cmk.gui.modules as modules
-from cmk.gui.wsgi import make_app
-
-modules.init_modules()
+from cmk.gui.wsgi.app import make_wsgi_app
 
 DEBUG = False
 
-GUI_APP = make_app()
-
 if DEBUG:
-    Application = DebuggedApplication(GUI_APP, evalex=True, pin_security=False)
+    Application = make_wsgi_app(debug=True)
 else:
-    Application = GUI_APP
+    Application = make_wsgi_app()
+    assert not Application.debug
+    assert not Application.testing

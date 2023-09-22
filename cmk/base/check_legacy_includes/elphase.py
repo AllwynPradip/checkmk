@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# type: ignore[list-item,import,assignment,misc,operator]  # TODO: see which are needed in this file
+from collections.abc import Callable
 
-from cmk.base.check_api import check_levels, get_percent_human_readable
+from cmk.base.check_api import check_levels
+from cmk.base.plugins.agent_based.agent_based_api.v1 import render
 
-_RENDER_FUNCTION_AND_UNIT = {
+_RENDER_FUNCTION_AND_UNIT: dict[str, tuple[Callable | None, str]] = {
     "%": (
-        get_percent_human_readable,
+        render.percent,
         "",
     ),
     "mA": (
         lambda current: f"{(current * 1000):.1f}",
         "mA",
-    )
+    ),
 }
 
 
@@ -34,7 +34,7 @@ _RENDER_FUNCTION_AND_UNIT = {
 # IT. INSTEAD, MODIFY THE MIGRATED VERSION.
 # ==================================================================================================
 # ==================================================================================================
-def check_elphase(item, params, parsed):
+def check_elphase(item, params, parsed):  # pylint: disable=too-many-branches
     if item not in parsed:
         return  # Item not found in SNMP data
 
@@ -56,7 +56,7 @@ def check_elphase(item, params, parsed):
                 state = 0
         else:
             state = device_state
-        yield state, "Device status: %s(%s)" % (device_state_readable, device_state)
+        yield state, f"Device status: {device_state_readable}({device_state})"
 
     for what, title, unit, bound, factor in [
         ("voltage", "Voltage", "V", Bounds.Lower, 1),
@@ -69,7 +69,6 @@ def check_elphase(item, params, parsed):
         ("differential_current_ac", "Differential current AC", "mA", Bounds.Upper, 0.001),
         ("differential_current_dc", "Differential current DC", "mA", Bounds.Upper, 0.001),
     ]:
-
         if what in parsed[item]:
             entry = parsed[item][what]
             if isinstance(entry, tuple):
@@ -78,7 +77,7 @@ def check_elphase(item, params, parsed):
                 value = entry  # 12.0
                 state_info = None
 
-            levels = [None] * 4
+            levels: list[float | None] = [None] * 4
             if what in params:
                 if bound == Bounds.Both:
                     levels = params[what]

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """Rendering the page state (top right of the page header)
@@ -9,20 +8,19 @@ Cares about the page state rendering. Each page can produce a page state that is
 top right of the page.
 """
 
-from dataclasses import dataclass
-from typing import Optional, Union
+from dataclasses import dataclass, field
 
-from cmk.gui.globals import html
-from cmk.gui.utils.html import HTML
+from cmk.gui.htmllib.html import html
 from cmk.gui.type_defs import CSSSpec
+from cmk.gui.utils.html import HTML
 
 
 @dataclass
 class PageState:
-    text: Union[str, HTML]
-    icon_name: Optional[str] = None
-    css_classes: CSSSpec = None
-    url: Optional[str] = None
+    text: str | HTML
+    icon_name: str | None = None
+    css_classes: CSSSpec = field(default_factory=list)
+    url: str | None = None
     tooltip_text: str = ""
 
 
@@ -40,8 +38,10 @@ class PageStateRenderer:
     def _show_content(self, page_state: PageState) -> None:
         html.div(page_state.text, class_="text_container")
         if page_state.icon_name:
-            html.div(html.render_icon(page_state.icon_name, id_="page_state_icon"),
-                     class_="icon_container")
+            html.div(
+                html.render_icon(page_state.icon_name, id_="page_state_icon"),
+                class_="icon_container",
+            )
 
     def _get_css_classes(self, page_state: PageState) -> CSSSpec:
         classes = ["page_state"]

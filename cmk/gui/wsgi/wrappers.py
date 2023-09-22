@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 from typing import Any
@@ -39,6 +38,7 @@ class ParameterDict(dict):
             ...     pass
 
     """
+
     def __getitem__(self, key: str) -> Any:
         if key in self:
             rv = super().__getitem__(key)

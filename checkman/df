@@ -1,7 +1,7 @@
 title: Used Space and Inodes in Filesystems
 agents: linux, windows, aix, solaris, openvms, hpux, freebsd, netbsd, openbsd, macosx
 catalog: os/storage
-license: GPL
+license: GPLv2
 distribution: check_mk
 description:
  This check measures the usage of filesystems. The usage
@@ -49,8 +49,8 @@ description:
  the patterns are part of the pool. You can specify both patterns for including
  and excluding filesystems from a group.
 
- When using inventory you specify the groups with the ruleset
- {filesystem_groups}. When configuring manual checks, you specify
+ When using auto discovery you specify the groups with the ruleset
+ "Filesystem Discovery". When configuring manual checks, you specify
  the list of patterns in the check parameters {"patterns_include"} (for including
  filesystems in the group) and {"patterns_exclude"} (for excluding filesystems
  from the group).
@@ -60,16 +60,12 @@ item:
  letter in upper case followed by a colon (Windows). For groups
  the item is the name of the group.
 
-inventory:
- One service is created for each filesystem
- the agent reports except mount points listed in
- {inventory_df_exclude_mountpoints} and filesystem types
- listed in {inventory_df_exclude_fs}. The Windows agent
- only reports fixed disks. The Linux agent reports filesystems
- that have a size and are not of type smbfs, tmpfs, cifs or nfs.
+discovery:
+ One service is created for each filesystem the agent reports except filesystem types listed in {inventory_df_exclude_fs}.
+ The Windows agent only reports fixed disks.
+ The Linux agent reports filesystems that have a size and are not of type smbfs, tmpfs, cifs or nfs.
 
- When {filesystem_groups} is defined and a found filesystem
+ If filesystem groups are configured in the ruleset "Filesystem Discovery" and a found filesystem
  is matching one of the patterns of a group, then instead of a
  service of the single filesystem one service  for the group is
  created. The service is the name of that group in that case.
-

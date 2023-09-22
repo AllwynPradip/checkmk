@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Dict
+
 from ..agent_based_api.v1 import type_defs
 
-GenericSection = Dict[str, Dict[str, Dict[str, str]]]
+GenericSection = dict[str, dict[str, dict[str, str]]]
 
 
 def generic_parse(string_table: type_defs.StringTable) -> GenericSection:
@@ -30,7 +29,8 @@ def generic_parse(string_table: type_defs.StringTable) -> GenericSection:
         # for example to
         # elements = dict(tuple(x.split(" ", 1)) for x in line[1:])
         # will make Mypy unhappy (Tuple[str, ...] vs Tuple[<nothing>, <nothing>])
-        elements = {k: v for k, v in (x.split(" ", 1) for x in line[1:])}  # pylint: disable=unnecessary-comprehension
+        # pylint: disable=unnecessary-comprehension
+        elements = {k: v for k, v in (x.split(" ", 1) for x in line[1:])}
         if elements.get("Dn"):
             result.setdefault(module, {}).update({elements["Dn"]: elements})
 

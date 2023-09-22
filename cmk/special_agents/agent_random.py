@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -13,6 +12,7 @@ import os
 import random
 import sys
 import time
+from pathlib import Path
 
 
 def main(sys_argv=None):
@@ -24,13 +24,15 @@ def main(sys_argv=None):
     except IndexError:
         hostname = "unknown"
 
-    state_dir = os.getenv("OMD_ROOT", "") + "/tmp/check_mk/ds_random/"
-    if not os.path.exists(state_dir):
-        os.makedirs(state_dir)
-    state_file = state_dir + hostname
+    state_dir = Path(os.getenv("OMD_ROOT", "/"), "tmp/check_mk/ds_random/")
+    state_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    state_file = state_dir / hostname
     try:
-        history = ast.literal_eval(open(state_file).read())
-    except (OSError, SyntaxError, IOError):
+        history = ast.literal_eval(state_file.read_text())
+    except (OSError, SyntaxError):
         history = {}
 
     services = [
@@ -45,7 +47,7 @@ def main(sys_argv=None):
         "Gnogomatic Garglebox",
     ]
 
-    print('<<<local:sep(0)>>>')
+    print("<<<local:sep(0)>>>")
     state_names = ["OK", "WARN", "CRIT", "UNKNOWN"]
     state_texts = [
         "Everying is OK now",
@@ -70,7 +72,8 @@ def main(sys_argv=None):
         else:
             new_state = last_state
         print(
-            "%d %s - %s - %s" %
-            (new_state, service.replace(" ", "_"), state_names[new_state], state_texts[new_state]))
+            "%d %s - %s - %s"
+            % (new_state, service.replace(" ", "_"), state_names[new_state], state_texts[new_state])
+        )
 
-    open(state_file, "w").write("%r\n" % history)
+    state_file.write_text("%r\n" % history)

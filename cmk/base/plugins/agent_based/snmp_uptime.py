@@ -1,28 +1,22 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Optional
 
+from .agent_based_api.v1 import register, SNMPTree
 from .agent_based_api.v1.type_defs import StringTable
-from .agent_based_api.v1 import (
-    exists,
-    register,
-    SNMPTree,
-)
-from .utils import uptime
+from .utils import detection, uptime
 
 
-def parse_snmp_uptime(string_table: StringTable) -> Optional[uptime.Section]:
+def parse_snmp_uptime(string_table: StringTable) -> uptime.Section | None:
     """
-        >>> parse_snmp_uptime([['2297331594', '']])
-        Section(uptime_sec=22973315, message=None)
-        >>> parse_snmp_uptime([['124:21:26:42.03', '124:21:29:01.14']])
-        Section(uptime_sec=10790941, message=None)
-        >>> None is parse_snmp_uptime([[u'', u'Fortigate 80C']])  # nonsense
-        True
+    >>> parse_snmp_uptime([['2297331594', '']])
+    Section(uptime_sec=22973315, message=None)
+    >>> parse_snmp_uptime([['124:21:26:42.03', '124:21:29:01.14']])
+    Section(uptime_sec=10790941, message=None)
+    >>> None is parse_snmp_uptime([[u'', u'Fortigate 80C']])  # nonsense
+    True
 
     """
     if not string_table:
@@ -55,13 +49,13 @@ register.snmp_section(
     parsed_section_name="uptime",
     parse_function=parse_snmp_uptime,
     fetch=SNMPTree(
-        base='.1.3.6.1.2.1',
+        base=".1.3.6.1.2.1",
         oids=[
             # On Linux appliances: .1.3.6.1.2.1.1.3.0    means uptime of snmpd
             #                      .1.3.6.1.2.1.25.1.1.0 means system uptime
-            '1.3',  # DISMAN-EVENT-MIB::sysUpTime
-            '25.1.1',  # HOST-RESOURCES-MIB::hrSystemUptime
+            "1.3",  # DISMAN-EVENT-MIB::sysUpTime
+            "25.1.1",  # HOST-RESOURCES-MIB::hrSystemUptime
         ],
     ),
-    detect=exists(".1.3.6.1.2.1.1.1.0"),
+    detect=detection.HAS_SYSDESC,
 )

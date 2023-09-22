@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+from collections.abc import Generator, Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
-from typing import Dict, Generator, Iterable, Mapping, Optional, Sequence, Tuple, Union
 
 from .agent_based_api.v1 import Metric, register, Result, Service, State
 from .agent_based_api.v1.type_defs import DiscoveryResult, StringTable
@@ -30,13 +29,13 @@ class ServiceStatistics:
     critical: int
 
 
-CMKSiteStatisticsSection = Mapping[str, Tuple[HostStatistics, ServiceStatistics]]
+CMKSiteStatisticsSection = Mapping[str, tuple[HostStatistics, ServiceStatistics]]
 
 
-def _timeout_and_delta_position(*lines_stats: Sequence[str]) -> Tuple[bool, int]:
+def _timeout_and_delta_position(*lines_stats: Sequence[str]) -> tuple[bool, int]:
     for delta_position, line_stats in enumerate(
-            lines_stats,
-            start=1,
+        lines_stats,
+        start=1,
     ):
         if len(line_stats) == 1:
             return True, delta_position
@@ -51,9 +50,14 @@ def parse_cmk_site_statistics(string_table: StringTable) -> CMKSiteStatisticsSec
     ... ['1', '0', '0', '0'],
     ... ['32', '0', '0', '2', '0', '1']]))
     {'heute': (HostStatistics(up=1, down=0, unreachable=0, in_downtime=0),
-               ServiceStatistics(ok=32, in_downtime=0, on_down_hosts=0, warning=2, unknown=0, critical=1))}
+               ServiceStatistics(ok=32,
+                                 in_downtime=0,
+                                 on_down_hosts=0,
+                                 warning=2,
+                                 unknown=0,
+                                 critical=1))}
     """
-    section: Dict[str, Tuple[HostStatistics, ServiceStatistics]] = {}
+    section: dict[str, tuple[HostStatistics, ServiceStatistics]] = {}
 
     current_position = 0
     while True:
@@ -85,8 +89,8 @@ register.agent_section(
 
 
 def discover_cmk_site_statistics(
-    section_cmk_site_statistics: Optional[CMKSiteStatisticsSection],
-    section_livestatus_status: Optional[LivestatusSection],
+    section_cmk_site_statistics: CMKSiteStatisticsSection | None,
+    section_livestatus_status: LivestatusSection | None,
 ) -> DiscoveryResult:
     if section_cmk_site_statistics:
         yield from (Service(item=site_name) for site_name in section_cmk_site_statistics)
@@ -102,18 +106,25 @@ def _host_results(host_stats: HostStatistics) -> Iterable[Result]:
     yield Result(
         state=State.OK,
         summary=f"Problem hosts: {n_hosts_not_up}",
-        details="\n".join((
-            f"Hosts in state UP: {host_stats.up}",
-            f"Hosts in state DOWN: {host_stats.down}",
-            f"Unreachable hosts: {host_stats.unreachable}",
-            f"Hosts in downtime: {host_stats.in_downtime}",
-        )),
+        details="\n".join(
+            (
+                f"Hosts in state UP: {host_stats.up}",
+                f"Hosts in state DOWN: {host_stats.down}",
+                f"Unreachable hosts: {host_stats.unreachable}",
+                f"Hosts in downtime: {host_stats.in_downtime}",
+            )
+        ),
     )
 
 
 def _service_results(service_stats: ServiceStatistics) -> Iterable[Result]:
-    n_services_not_ok = (service_stats.in_downtime + service_stats.on_down_hosts +
-                         service_stats.warning + service_stats.unknown + service_stats.critical)
+    n_services_not_ok = (
+        service_stats.in_downtime
+        + service_stats.on_down_hosts
+        + service_stats.warning
+        + service_stats.unknown
+        + service_stats.critical
+    )
     n_services_total = n_services_not_ok + service_stats.ok
     yield Result(
         state=State.OK,
@@ -122,19 +133,21 @@ def _service_results(service_stats: ServiceStatistics) -> Iterable[Result]:
     yield Result(
         state=State.OK,
         summary=f"Problem services: {n_services_not_ok}",
-        details="\n".join((
-            f"Services in state OK: {service_stats.ok}",
-            f"Services in downtime: {service_stats.in_downtime}",
-            f"Services of down hosts: {service_stats.on_down_hosts}",
-            f"Services in state WARNING: {service_stats.warning}",
-            f"Services in state UNKNOWN: {service_stats.unknown}",
-            f"Services in state CRITICAL: {service_stats.critical}",
-        )),
+        details="\n".join(
+            (
+                f"Services in state OK: {service_stats.ok}",
+                f"Services in downtime: {service_stats.in_downtime}",
+                f"Services of down hosts: {service_stats.on_down_hosts}",
+                f"Services in state WARNING: {service_stats.warning}",
+                f"Services in state UNKNOWN: {service_stats.unknown}",
+                f"Services in state CRITICAL: {service_stats.critical}",
+            )
+        ),
     )
 
 
 def _metrics_from_stats(
-    stats: Union[HostStatistics, ServiceStatistics],
+    stats: HostStatistics | ServiceStatistics,
     metrics_prefix: str,
 ) -> Iterable[Metric]:
     for field in fields(stats):
@@ -146,9 +159,9 @@ def _metrics_from_stats(
 
 def check_cmk_site_statistics(
     item: str,
-    section_cmk_site_statistics: Optional[CMKSiteStatisticsSection],
-    section_livestatus_status: Optional[LivestatusSection],
-) -> Generator[Union[Metric, Result], None, None]:
+    section_cmk_site_statistics: CMKSiteStatisticsSection | None,
+    section_livestatus_status: LivestatusSection | None,
+) -> Generator[Metric | Result, None, None]:
     if not section_cmk_site_statistics or item not in section_cmk_site_statistics:
         return
     host_stats, service_stats = section_cmk_site_statistics[item]
@@ -160,23 +173,11 @@ def check_cmk_site_statistics(
     # This part is needed for the timeseries graphs which show host and service problems in the
     # main dashboard (to as far as possible uniquely cross-match sites in this agent output with
     # sites to which are remotely connected)
-    if section_livestatus_status and item in section_livestatus_status:
+    if section_livestatus_status and (livestatus_status := section_livestatus_status.get(item)):
         yield Result(
             state=State.OK,
-            notice=f"Core PID: {section_livestatus_status[item]['core_pid']}",
-        )
-
-
-def cluster_check_cmk_site_statistics(
-    item: str,
-    section_cmk_site_statistics: Mapping[str, CMKSiteStatisticsSection],
-    section_livestatus_status: Mapping[str, LivestatusSection],
-) -> Generator[Union[Metric, Result], None, None]:
-    for node_name, node_section in section_cmk_site_statistics.items():
-        yield from check_cmk_site_statistics(
-            item,
-            node_section,
-            section_livestatus_status.get(node_name),
+            # core_pid is missing for pre-1.6 CRE sites ...
+            notice=f"Core PID: {livestatus_status.get('core_pid', livestatus_status['nagios_pid'])}",
         )
 
 
@@ -186,5 +187,4 @@ register.check_plugin(
     service_name="Site %s statistics",
     discovery_function=discover_cmk_site_statistics,
     check_function=check_cmk_site_statistics,
-    cluster_check_function=cluster_check_cmk_site_statistics,
 )

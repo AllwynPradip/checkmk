@@ -1,10 +1,10 @@
 title: MySQL: Version
 agents: linux
 catalog: app/mysql
-license: GPL
+license: GPLv2
 distribution: check_mk
 description:
- This check only shows the Version of the runnin MySQL Deamon.
+ This check only shows the Version of the runnin MySQL Daemon.
 
  This check needs the agent plugin {mk_mysql} to be installed.
  Further details about this plugin and monitoring of MySQL can be
@@ -14,7 +14,6 @@ description:
 item:
  Version of the MySQL service
 
-inventory:
+discovery:
  One service is created on each instance on a host where the agent plugin
  {mk_mysql} is being installed  and the MySQL daemon is running.
-

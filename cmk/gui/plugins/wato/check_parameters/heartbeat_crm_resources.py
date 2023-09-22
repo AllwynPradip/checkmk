@@ -1,20 +1,33 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from cmk.gui.i18n import _
-from cmk.gui.valuespec import (
-    Optional,
-    TextInput,
-)
+from collections.abc import Mapping
 
-from cmk.gui.plugins.wato import (
+from cmk.gui.i18n import _
+from cmk.gui.plugins.wato.utils import (
     CheckParameterRulespecWithItem,
     rulespec_registry,
     RulespecGroupCheckParametersStorage,
 )
+from cmk.gui.valuespec import Alternative, Dictionary, FixedValue, Migrate, TextInput
+
+
+def _migrate_opt_string(
+    parameters: Mapping[str, str | None] | str | None
+) -> Mapping[str, str | None]:
+    """
+    >>> _migrate_opt_string(None)
+    {'expected_node': None}
+    >>> _migrate_opt_string("foobar")
+    {'expected_node': 'foobar'}
+    >>> _migrate_opt_string({'expected_node': 'mooo'})
+    {'expected_node': 'mooo'}
+    """
+    if parameters is None or isinstance(parameters, str):
+        return {"expected_node": parameters}
+    return parameters
 
 
 def _item_spec_heartbeat_crm_resources():
@@ -26,11 +39,23 @@ def _item_spec_heartbeat_crm_resources():
 
 
 def _parameter_valuespec_heartbeat_crm_resources():
-    return Optional(
-        TextInput(allow_empty=False),
-        title=_("Expected node"),
-        help=_("The hostname of the expected node to hold this resource."),
-        none_label=_("Do not enforce the resource to be hold by a specific node."),
+    return Migrate(
+        Dictionary(
+            elements=[
+                (
+                    "expected_node",
+                    Alternative(
+                        title=_("Expected node"),
+                        help=_("The hostname of the expected node to hold this resource."),
+                        elements=[
+                            FixedValue(value=None, totext="", title=_("Do not check the node")),
+                            TextInput(allow_empty=False, title=_("Expected node")),
+                        ],
+                    ),
+                ),
+            ],
+        ),
+        migrate=_migrate_opt_string,
     )
 
 
@@ -41,4 +66,5 @@ rulespec_registry.register(
         item_spec=_item_spec_heartbeat_crm_resources,
         parameter_valuespec=_parameter_valuespec_heartbeat_crm_resources,
         title=lambda: _("Heartbeat CRM resource status"),
-    ))
+    )
+)

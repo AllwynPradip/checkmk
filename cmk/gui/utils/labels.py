@@ -1,55 +1,89 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+from __future__ import annotations
+
+import enum
 import json
-from redis.client import Pipeline
-from typing import (
-    Dict,
-    Iterable,
-    List,
-    Mapping,
-    Set,
-    Tuple,
-    TYPE_CHECKING,
-)
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Literal, NamedTuple
+
+from livestatus import LivestatusResponse, lqencode, quote_dict, SiteId
+
 import cmk.gui.sites as sites
-from livestatus import (
-    lqencode,
-    quote_dict,
-    SiteId,
-)
-from cmk.gui.config import user
-from cmk.gui.globals import g
+from cmk.gui.exceptions import MKUserError
 from cmk.gui.i18n import _
-from cmk.utils.redis import (
-    get_redis_client,
-    query_redis,
-    IntegrityCheckResponse,
-)
-from cmk.utils.type_defs import Labels as _Labels
-
-if TYPE_CHECKING:
-    from cmk.utils.redis import RedisDecoded
-
-Labels = Iterable[Tuple[str, str]]
+from cmk.gui.logged_in import user
+from cmk.gui.type_defs import FilterHTTPVariables
 
 
-def encode_label_for_livestatus(
-    column: str,
-    label_id: str,
-    label_value: str,
-) -> str:
+class Label(NamedTuple):
+    id: str
+    value: str
+    negate: bool
+
+
+class LabelType(enum.StrEnum):
+    HOST = "host"
+    SERVICE = "service"
+    ALL = "all"
+
+
+Labels = Iterable[Label]
+
+# Label group specific types
+AndOrNotLiteral = Literal["and", "or", "not"]
+LabelGroup = Sequence[tuple[AndOrNotLiteral, str]]
+LabelGroups = Sequence[tuple[AndOrNotLiteral, LabelGroup]]
+
+# Labels need to be in the format "<key>:<value>", e.g. "os:windows"
+LABEL_REGEX = r"^[^:]+:[^:]+$"
+
+
+class _LivestatusLabelResponse(NamedTuple):
+    host_rows: LivestatusResponse
+    service_rows: LivestatusResponse
+
+
+class _MergedLabels(NamedTuple):
+    hosts: dict[SiteId, dict[str, str]]
+    services: dict[SiteId, dict[str, str]]
+
+
+def parse_labels_value(value: str) -> Labels:
+    try:
+        decoded_labels = json.loads(value or "[]")
+    except ValueError as e:
+        raise MKUserError(None, _("Failed to parse labels: %s") % e)
+
+    seen: set[str] = set()
+    for entry in decoded_labels:
+        label_id, label_value = (p.strip() for p in entry["value"].split(":", 1))
+        if label_id in seen:
+            raise MKUserError(
+                None,
+                _(
+                    "A label key can be used only once per object. "
+                    'The Label key "%s" is used twice.'
+                )
+                % label_id,
+            )
+        yield Label(label_id, label_value, False)
+        seen.add(label_id)
+
+
+def encode_label_for_livestatus(column: str, label: Label) -> str:
     """
-    >>> encode_label_for_livestatus("labels", "key", "value")
+    >>> encode_label_for_livestatus("labels", Label("key", "value", False))
     "Filter: labels = 'key' 'value'"
     """
-    return "Filter: %s = %s %s" % (
+    return "Filter: {} {} {} {}".format(
         lqencode(column),
-        lqencode(quote_dict(label_id)),
-        lqencode(quote_dict(label_value)),
+        "!=" if label.negate else "=",
+        lqencode(quote_dict(label.id)),
+        lqencode(quote_dict(label.value)),
     )
 
 
@@ -58,25 +92,92 @@ def encode_labels_for_livestatus(
     labels: Labels,
 ) -> str:
     """
-    >>> encode_labels_for_livestatus("labels", {"key": "value", "x": "y"}.items())
-    "Filter: labels = 'key' 'value'\\nFilter: labels = 'x' 'y'"
+    >>> encode_labels_for_livestatus("labels", [Label("key", "value", False), Label("x", "y", False)])
+    "Filter: labels = 'key' 'value'\\nFilter: labels = 'x' 'y'\\n"
     >>> encode_labels_for_livestatus("labels", [])
     ''
     """
-    return "\n".join(
-        encode_label_for_livestatus(column, label_id, label_value)
-        for label_id, label_value in labels)
+    if headers := "\n".join(encode_label_for_livestatus(column, label) for label in labels):
+        return headers + "\n"
+    return ""
 
 
-def encode_labels_for_tagify(labels: Labels) -> Iterable[Mapping[str, str]]:
+def encode_label_groups_for_livestatus(
+    column: str,
+    label_groups: LabelGroups,
+) -> str:
+    """Apply the boolean standard prioritization of operators, i.e. NOT, AND, OR. Filter strings
+    for OR operators are added at the end of a group for label lvl ORs, and at the end of the entire
+    query for group lvl ORs.
+    >>> encode_label_groups_for_livestatus("host_labels", [])
+    ''
+    >>> encode_label_groups_for_livestatus("host_labels", [("and", [("and", "label:a"), ("or", "label:b"), ("and", "even:true")])])
+    "Filter: host_labels = 'label' 'a'\\nFilter: host_labels = 'label' 'b'\\nFilter: host_labels = 'even' 'true'\\nAnd: 2\\nOr: 2\\n"
+    >>> encode_label_groups_for_livestatus("host_labels", [("and", [("not", "label:a")]), ("or", [("and", "label:b")]), ("not", [("and", "label:c")])])
+    "Filter: host_labels = 'label' 'a'\\nNegate:\\nFilter: host_labels = 'label' 'b'\\nFilter: host_labels = 'label' 'c'\\nNegate:\\nAnd: 2\\nOr: 2\\n"
     """
-    >>> encode_labels_for_tagify({"key": "value", "x": "y"}.items())
-    [{'value': 'key:value'}, {'value': 'x:y'}]
+    filter_str: str = ""
+    group_lvl_or_operators_str: str = ""
+    is_first_group: bool = True
+    group_operator: AndOrNotLiteral
+
+    for group_operator, label_group in label_groups:
+        label_lvl_or_operators_str: str = ""
+        is_first_label: bool = True
+        label_operator: AndOrNotLiteral
+
+        for label_operator, label in label_group:
+            if not label:
+                continue
+
+            label_id, label_val = label.split(":")
+            filter_str += (
+                encode_label_for_livestatus(column, Label(label_id, label_val, False)) + "\n"
+            )
+            if label_operator == "or":
+                label_lvl_or_operators_str += _operator_filter_str(label_operator, is_first_label)
+            else:
+                filter_str += _operator_filter_str(label_operator, is_first_label)
+            is_first_label = False
+
+        filter_str += label_lvl_or_operators_str
+
+        if not is_first_label:  # The current group holds at least one non empty label
+            if group_operator == "or":
+                group_lvl_or_operators_str += _operator_filter_str(group_operator, is_first_group)
+            else:
+                filter_str += _operator_filter_str(group_operator, is_first_group)
+            is_first_group = False
+
+    return filter_str + group_lvl_or_operators_str
+
+
+# Type of argument operator should be 'Operator'
+def _operator_filter_str(operator: AndOrNotLiteral, is_first: bool) -> str:
+    if is_first:
+        if operator == "not":
+            # Negate without And for the first element
+            return "Negate:\n"
+        # No filter str for and/or for the first element
+        return ""
+    if operator == "not":
+        # Negate with And for non-first elements
+        return "Negate:\nAnd: 2\n"
+    # "And: 2\n" or "Or: 2\n"
+    return f"{operator.title()}: 2\n"
+
+
+def encode_labels_for_tagify(
+    labels: Labels | Iterable[tuple[str, str]]
+) -> Iterable[Mapping[str, str]]:
     """
-    return [{"value": "%s:%s" % e} for e in labels]
+    >>> encode_labels_for_tagify({"key": "value", "x": "y"}.items()) ==  encode_labels_for_tagify([Label("key", "value", False), Label("x", "y", False)])
+    True
+    """
+    return [{"value": "%s:%s" % e[:2]} for e in labels]
 
 
-def encode_labels_for_http(labels: Labels) -> str:
+def encode_labels_for_http(labels: Labels | Iterable[tuple[str, str]]) -> str:
     """The result can be used in building URLs
     >>> encode_labels_for_http([])
     '[]'
@@ -88,147 +189,103 @@ def encode_labels_for_http(labels: Labels) -> str:
 
 def label_help_text() -> str:
     return _(
-        "Labels need to be in the format <tt>[KEY]:[VALUE]</tt>. For example <tt>os:windows</tt>.")
+        "Labels need to be in the format <tt>[KEY]:[VALUE]</tt>. For example <tt>cmk/os_family:linux</tt>."
+    )
 
 
-class LabelsCache:
-    def __init__(self):
-        self._namespace: str = "labels"
-        self._hst_label: str = "host_labels"
-        self._svc_label: str = "service_labels"
-        self._program_starts: str = self._namespace + ":last_program_starts"
-        self._redis_client: 'RedisDecoded' = get_redis_client()
-        self._sites_to_update: Set[SiteId] = set()
-
-    def _get_site_ids(self) -> List[SiteId]:
-        """ Create list of all site IDs the user is authorized for """
-        site_ids: List[SiteId] = []
-        for site_id, _site in user.authorized_sites().items():
-            site_ids.append(site_id)
-        return site_ids
-
-    def get_labels(self) -> _Labels:
-        """ Main function to query, check and update caches """
-        integrity_function = self._verify_cache_integrity
-        update_function = self._redis_update_labels
-        query_function = self._redis_query_labels
-
-        all_labels = query_redis(self._redis_client, self._namespace, integrity_function,
-                                 update_function, query_function)
-
-        return all_labels
-
-    def _redis_query_labels(self) -> _Labels:
-        """ Query all labels from redis """
-        cache_names: List = []
-        for site_id in self._get_site_ids():
-            for label_type in [self._hst_label, self._svc_label]:
-                cache_names.append("%s:%s:%s" % (self._namespace, site_id, label_type))
-
-        all_labels = {}
-        with self._redis_client.pipeline() as pipeline:
-            for cache in cache_names:
-                pipeline.hgetall(cache)
-            result = pipeline.execute()
-            for labels in result:
-                all_labels.update(labels)
-        return all_labels
-
-    def _livestatus_get_labels(self, only_sites: List[str]) -> List[Dict[SiteId, _Labels]]:
-        """ Get labels for all sites that need an update and the user is authorized for """
-        query: str = (
-            "GET services\n"  #
-            "Cache: reload\n"  #
-            "Columns: host_labels labels\n")
-
-        with sites.prepend_site(), sites.only_sites(only_sites):
-            rows = [(x[0], x[1], x[2]) for x in sites.live(user).query(query)]
-
-        host_labels: Dict[SiteId, _Labels] = {}
-        service_labels: Dict[SiteId, _Labels] = {}
-        for row in rows:
-            site_id = row[0]
-            host_label = row[1]
-            service_label = row[2]
-
-            for key, value in host_label.items():
-                host_labels.setdefault(site_id, {}).update({key: value})
-
-            for key, value in service_label.items():
-                service_labels.setdefault(site_id, {}).update({key: value})
-
-        return [host_labels, service_labels]
-
-    def _redis_update_labels(self, pipeline: Pipeline) -> None:
-        """ Set cache for all sites that need an update"""
-        host_labels, service_labels = self._livestatus_get_labels(list(self._sites_to_update))
-
-        for labels, label_type in [
-            (host_labels, self._hst_label),
-            (service_labels, self._svc_label),
-        ]:
-            self._redis_delete_old_and_set_new(labels, label_type, pipeline)
-
-    def _redis_delete_old_and_set_new(
-        self,
-        labels: Dict[SiteId, _Labels],
-        label_type: str,
-        pipeline: Pipeline,
-    ) -> None:
-
-        sites_list: List[SiteId] = []
-        for site_id, label in labels.items():
-            if site_id not in self._sites_to_update:
-                continue
-
-            label_key = "%s:%s:%s" % (self._namespace, site_id, label_type)
-            pipeline.delete(label_key)
-            # NOTE: Mapping is invariant in its key because of __getitem__, so for mypy's sake we
-            # make a copy below. This doesn't matter from a performance view, hset is iterating over
-            # the dict anyway, and after that there is some serious I/O going on.
-            # NOTE: pylint is too dumb to see the need for the comprehension.
-            pipeline.hset(label_key, mapping={k: v for k, v in label.items()})  # pylint: disable=unnecessary-comprehension
-
-            if site_id not in sites_list:
-                sites_list.append(site_id)
-
-        for site_id in sites_list:
-            self._redis_set_last_program_start(site_id, pipeline)
-
-    def _redis_get_last_program_starts(self) -> Dict[str, str]:
-        program_starts = self._redis_client.hgetall(self._program_starts)
-        return program_starts
-
-    def _redis_set_last_program_start(self, site_id: SiteId, pipeline: Pipeline) -> None:
-        program_start = self._livestatus_get_last_program_start(site_id)
-        pipeline.hset(self._program_starts, key=site_id, value=program_start)
-
-    def _livestatus_get_last_program_start(self, site_id: SiteId) -> int:
-        return sites.states().get(site_id, sites.SiteStatus({})).get("program_start", 0)
-
-    def _verify_cache_integrity(self) -> IntegrityCheckResponse:
-        """ Verify last program start value in redis with current value"""
-        last_program_starts = self._redis_get_last_program_starts()
-
-        if not last_program_starts:
-            all_sites = self._get_site_ids()
-            self._sites_to_update.update(all_sites)
-            return IntegrityCheckResponse.UPDATE
-
-        for site_id, last_program_start in last_program_starts.items():
-
-            if last_program_start is None or \
-                    (int(last_program_start) != self._livestatus_get_last_program_start(site_id)):
-
-                self._sites_to_update.update([site_id])
-
-        if self._sites_to_update:
-            return IntegrityCheckResponse.UPDATE
-
-        return IntegrityCheckResponse.USE
+def get_labels_from_config(label_type: LabelType, search_label: str) -> Sequence[tuple[str, str]]:
+    # TODO: Until we have a config specific implementation we now use the labels known to the
+    # core. This is not optimal, but better than doing nothing.
+    # To implement a setup specific search, we need to decide which occurrences of labels we
+    # want to search: hosts / folders, rules, ...?
+    return get_labels_from_core(label_type, search_label)
 
 
-def get_labels_cache() -> LabelsCache:
-    if "labels_cache" not in g:
-        g.labels_cache = LabelsCache()
-    return g.labels_cache
+def get_labels_from_core(
+    label_type: LabelType, search_label: str | None = None
+) -> Sequence[tuple[str, str]]:
+    all_labels = _get_labels_from_livestatus(label_type)
+    if search_label is None:
+        return list(all_labels)
+    return [
+        (ident, value) for ident, value in all_labels if search_label in ":".join([ident, value])
+    ]
+
+
+def _get_labels_from_livestatus(
+    label_type: LabelType,
+) -> set[tuple[str, str]]:
+    if label_type == LabelType.HOST:
+        query = "GET hosts\nCache: reload\nColumns: labels\n"
+    elif label_type == LabelType.SERVICE:
+        query = "GET services\nCache: reload\nColumns: labels\n"
+    elif label_type == LabelType.ALL:
+        query = "GET labels\nCache: reload\nColumns: name value\n"
+    else:
+        raise ValueError("Unsupported livestatus query")
+
+    try:
+        sites.live().set_auth_domain("labels")
+        with sites.only_sites(list(user.authorized_sites().keys())):
+            label_rows = sites.live().query(query)
+    finally:
+        sites.live().set_auth_domain("read")
+
+    if label_type == LabelType.ALL:
+        return {(str(label[0]), str(label[1])) for label in label_rows}
+
+    return {(k, v) for row in label_rows for labels in row for k, v in labels.items()}
+
+
+def _parse_label_groups_to_http_vars(
+    label_groups: LabelGroups, object_type: Literal["host", "service"]
+) -> FilterHTTPVariables:
+    prefix: str = f"{object_type}_labels"  # "[host|service]_labels"
+    filter_vars: dict[str, str] = {
+        f"{prefix}_count": "%d" % len(label_groups),
+    }
+    for i, (group_operator, group) in enumerate(label_groups, 1):
+        filter_vars.update(
+            {
+                f"{prefix}_{i}_vs_count": "%d" % len(group),
+                f"{prefix}_{i}_bool": group_operator,
+            }
+        )
+
+        for j, (label_operator, label) in enumerate(group, 1):
+            filter_vars.update(
+                {
+                    f"{prefix}_{i}_vs_{j}_bool": label_operator,
+                    f"{prefix}_{i}_vs_{j}_vs": label,
+                }
+            )
+
+    return filter_vars
+
+
+def _single_label_group_from_labels(
+    labels: Sequence[str], operator: AndOrNotLiteral = "and"
+) -> LabelGroups:
+    return [
+        (
+            "and",
+            [(operator, label) for label in labels],
+        )
+    ]
+
+
+def filter_http_vars_for_simple_label_group(
+    labels: Sequence[str],
+    object_type: Literal["host", "service"],
+    operator: AndOrNotLiteral = "and",
+) -> FilterHTTPVariables:
+    """Return HTTP vars for one label group of type <object_type>, containing all <labels> and
+    connecting all of them by the same logical <operator>.
+
+    >>> filter_http_vars_for_simple_label_group(["foo:bar", "check:mk"], "host")
+    {'host_labels_count': '1', 'host_labels_1_vs_count': '2', 'host_labels_1_bool': 'and', 'host_labels_1_vs_1_bool': 'and', 'host_labels_1_vs_1_vs': 'foo:bar', 'host_labels_1_vs_2_bool': 'and', 'host_labels_1_vs_2_vs': 'check:mk'}
+    """
+    return _parse_label_groups_to_http_vars(
+        _single_label_group_from_labels(labels, operator),
+        object_type,
+    )

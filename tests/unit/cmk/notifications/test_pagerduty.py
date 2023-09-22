@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import pytest
 
-from cmk.notification_plugins.pagerduty import (
-    _notification_source_from_context,
-    pagerduty_msg,
-)
+from cmk.notification_plugins.pagerduty import _notification_source_from_context, _pagerduty_msg
 
 
 @pytest.mark.parametrize(
@@ -46,7 +42,7 @@ from cmk.notification_plugins.pagerduty import (
         ),
     ],
 )
-def test_notification_source_from_context(context, result):
+def test_notification_source_from_context(context: dict[str, str], result: str) -> None:
     msg = _notification_source_from_context(context)
     assert msg == result
 
@@ -84,7 +80,7 @@ def test_notification_source_from_context(context, result):
                     },
                     "severity": "critical",
                     "source": "127.0.0.1",
-                    "summary": "CRITICAL: first on site1"
+                    "summary": "CRITICAL: first on site1",
                 },
                 "routing_key": "somehex",
                 "client": "Check_MK",
@@ -120,7 +116,7 @@ def test_notification_source_from_context(context, result):
                     },
                     "severity": "info",
                     "source": "10.3.1.239",
-                    "summary": "win7vm is UP"
+                    "summary": "win7vm is UP",
                 },
                 "routing_key": "somehex",
             },
@@ -154,7 +150,7 @@ def test_notification_source_from_context(context, result):
                     },
                     "severity": "info",
                     "source": "win7vm",
-                    "summary": "win7vm is UP"
+                    "summary": "win7vm is UP",
                 },
                 "routing_key": "somehex",
             },
@@ -162,6 +158,9 @@ def test_notification_source_from_context(context, result):
         ),
     ],
 )
-def test_pagerduty_message(context, result):
-    msg = pagerduty_msg(context)
+def test_pagerduty_message(
+    context: dict[str, str],
+    result: dict[str, str | dict[str, str | dict[str, str | dict[str, str]]]],
+) -> None:
+    msg = _pagerduty_msg(context)
     assert msg == result

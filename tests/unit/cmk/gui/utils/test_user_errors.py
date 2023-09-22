@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from cmk.gui.globals import user_errors
-from cmk.gui.utils.user_errors import UserErrors
+import pytest
+
 from cmk.gui.exceptions import MKUserError
+from cmk.gui.utils.user_errors import user_errors, UserErrors
 
 
-def test_user_errors_request_context_integration(register_builtin_html) -> None:
+@pytest.mark.usefixtures("request_context")
+def test_user_errors_request_context_integration() -> None:
     assert not user_errors
     user_errors.add(MKUserError(None, "abc"))
     assert user_errors[None] == "abc"

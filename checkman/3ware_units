@@ -1,12 +1,12 @@
 title: 3ware ATA RAID Controller: State of Units
 agents: linux
 catalog: os/storage
-license: GPL
+license: GPLv2
 distribution: check_mk
 description:
  This check monitors the state of units of an 3ware ATA RAID Controller.
 
- The Linux agent sends the neccessary data if the command line utility
+ The Linux agent sends the necessary data if the command line utility
  {tw_cli} is found in the shells search path.
  The usual way is to install it into {/usr/local/bin} or {/usr/bin}.
 
@@ -17,5 +17,5 @@ description:
 item:
  The unit number of the adapter, e.g. {"u0"}.
 
-inventory:
+discovery:
  One service is created for each logical unit.

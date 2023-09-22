@@ -1,14 +1,14 @@
-// Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+// Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 // This file is part of Checkmk (https://checkmk.com). It is subject to the
 // terms and conditions defined in the file COPYING, which is part of this
 // source code package.
 
 #include "stdafx.h"
 
-#include "onlyfrom.h"
+#include "wnx/onlyfrom.h"
 
 //
-#include "asio.h"
+#include "wnx/asio.h"
 //
 #include <asio/ip/address_v4.hpp>
 #include <asio/ip/address_v6.hpp>
@@ -17,8 +17,8 @@
 #include <string>
 #include <string_view>
 
-#include "cfg.h"
-#include "logger.h"
+#include "wnx/cfg.h"
+#include "wnx/logger.h"
 
 namespace cma::cfg::of {
 
@@ -121,7 +121,7 @@ bool IsValid(std::string_view addr_template, std::string_view address) {
         XLOG::l("Invalid entry '{}' ignored", addr_template);
         return false;
 
-    } catch (const std::exception& e) {
+    } catch (const std::exception &e) {
         XLOG::l(
             XLOG_FUNC + " Parameters are invalid '{}' '{}', exception is '{}'",
             addr_template, address, e.what());
@@ -136,7 +136,7 @@ std::string MapToV6Address(std::string_view address) {
                 asio::ip::make_address_v6(asio::ip::v4_mapped, address_v4);
             return address_v6.to_string();
         }
-    } catch (const std::exception& e) {
+    } catch (const std::exception &e) {
         XLOG::l(XLOG_FUNC + " Parameter is invalid '{}', exception is '{}'",
                 address, e.what());
         return {};
@@ -151,12 +151,13 @@ std::string MapToV6Network(std::string_view network) {
             auto address_v4 = network_v4.network();
             auto address_v6 =
                 asio::ip::make_address_v6(asio::ip::v4_mapped, address_v4);
-            auto prefix_len = network_v4.prefix_length() + 128 - 32;
+            const unsigned short prefix_len =
+                network_v4.prefix_length() + 128 - 32;
             auto end_network =
                 asio::ip::make_network_v6(address_v6, prefix_len);
             return end_network.to_string();
         }
-    } catch (const std::exception& e) {
+    } catch (const std::exception &e) {
         XLOG::l(XLOG_FUNC + " Parameter is invalid '{}', exception is '{}'",
                 network, e.what());
         return {};

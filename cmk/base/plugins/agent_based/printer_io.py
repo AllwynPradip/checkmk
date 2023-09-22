@@ -1,20 +1,29 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import enum
-from typing import NamedTuple, Mapping, List, Any, Dict
+from collections.abc import Mapping
+from typing import Any, NamedTuple
 
+from .agent_based_api.v1 import (
+    check_levels,
+    OIDEnd,
+    register,
+    render,
+    Result,
+    Service,
+    SNMPTree,
+    State,
+)
+from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult, StringTable
 from .utils.printer import DETECT_PRINTER
-from .agent_based_api.v1.type_defs import DiscoveryResult, CheckResult, StringTable
-from .agent_based_api.v1 import (check_levels, register, Result, Service, State, render, SNMPTree,
-                                 OIDEnd)
 
 printer_io_units = {
     "-1": "unknown",
     "0": "unknown",
+    "1": "unknown",
     "2": "unknown",  # defined by PrtCapacityUnitTC used in newer revs.
     "3": "1/10000 in",
     "4": "micrometers",
@@ -65,7 +74,7 @@ class Tray(NamedTuple):
     level: int
 
 
-Section = Dict[str, Tray]
+Section = dict[str, Tray]
 
 STATES_MAP = {
     AvailabilityStatus.AVAILABLE_AND_IDLE: State.OK,
@@ -80,11 +89,11 @@ STATES_MAP = {
 ALARM_MAP = {
     AlertStatus.NONE: State.OK,
     AlertStatus.NON_CRITICAL: State.WARN,
-    AlertStatus.CRITICAL: State.CRIT
+    AlertStatus.CRITICAL: State.CRIT,
 }
 
 
-def parse_printer_io(string_table: List[StringTable]) -> Section:
+def parse_printer_io(string_table: list[StringTable]) -> Section:
     parsed: Section = {}
     for line in string_table[0]:
         tray_index, name, descr, snmp_status_raw, capacity_unit, capacity_max, level = line[:7]
@@ -141,7 +150,8 @@ register.snmp_section(
                 "8",  # Printer-MIB::prtInputCapacityUnit
                 "9",  # Printer-MIB::prtInputMaxCapacity
                 "10",  # Printer-MIB::prtInputCurrentLevel
-            ]),
+            ],
+        ),
     ],
 )
 
@@ -160,7 +170,8 @@ register.snmp_section(
                 "3",  # Printer-MIB::prtOutputCapacityUnit
                 "4",  # Printer-MIB::prtOutputMaxCapacity
                 "5",  # Printer-MIB::prtOutputRemainingCapacity
-            ]),
+            ],
+        ),
     ],
 )
 
@@ -172,15 +183,16 @@ def discovery_printer_io(section: Section) -> DiscoveryResult:
         if tray.capacity_max == 0:  # useless
             continue
         if tray.states.availability in [
-                AvailabilityStatus.UNAVAILABLE_BECAUSE_BROKEN,
-                AvailabilityStatus.UNKNOWN,
+            AvailabilityStatus.UNAVAILABLE_BECAUSE_BROKEN,
+            AvailabilityStatus.UNKNOWN,
         ]:
             continue
         yield Service(item=tray.name)
 
 
-def check_printer_io(item: str, params: Mapping[str, Any], section: Section,
-                     io_type: IOType) -> CheckResult:
+def check_printer_io(
+    item: str, params: Mapping[str, Any], section: Section, io_type: IOType
+) -> CheckResult:
     tray = section.get(item)
     if tray is None:
         return
@@ -206,12 +218,15 @@ def check_printer_io(item: str, params: Mapping[str, Any], section: Section,
         return  # totally skip this info when level is unknown or not limited
 
     if tray.capacity_max in (-2, -1, 0):
-        # -2: unknown, -1: no restriction, 0: due to saveint
-        yield Result(state=State.OK, summary="Capacity: %s%s" % (tray.level, tray.capacity_unit))
+        if tray.capacity_unit != " unknown":
+            # -2: unknown, -1: no restriction, 0: due to saveint
+            yield Result(state=State.OK, summary=f"Capacity: {tray.level}{tray.capacity_unit}")
         return
 
-    yield Result(state=State.OK,
-                 summary=f"Maximal capacity: {tray.capacity_max}{tray.capacity_unit}")
+    if tray.capacity_unit != " unknown":
+        yield Result(
+            state=State.OK, summary=f"Maximal capacity: {tray.capacity_max}{tray.capacity_unit}"
+        )
 
     quantity_message = "remaining" if io_type == IOType.INPUT else "filled"
 
@@ -224,7 +239,8 @@ def check_printer_io(item: str, params: Mapping[str, Any], section: Section,
         levels_upper=None if io_type == IOType.INPUT else params["capacity_levels"],
         levels_lower=params["capacity_levels"] if io_type == IOType.INPUT else None,
         render_func=render.percent,
-        label=quantity_message.capitalize())
+        label=quantity_message.capitalize(),
+    )
 
 
 def check_printer_input(item: str, params: Mapping[str, Any], section: Section) -> CheckResult:

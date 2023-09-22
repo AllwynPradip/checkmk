@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """
@@ -21,19 +20,16 @@ crontab 1
 OVERALL 2
 """
 
-from typing import Mapping, Dict, Optional, Any
-from .agent_based_api.v1 import (
-    register,
-    Service,
-    Result,
-    State as state,
-)
-from .agent_based_api.v1.type_defs import StringTable, DiscoveryResult, CheckResult
+from collections.abc import Mapping
+from typing import Any
 
-Section = Dict[str, Dict[str, Any]]
+from .agent_based_api.v1 import register, Result, Service, State
+from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult, StringTable
+
+Section = dict[str, dict[str, Any]]
 
 
-def parse_omd_status(string_table: StringTable) -> Optional[Section]:
+def parse_omd_status(string_table: StringTable) -> Section | None:
     """
     >>> for site, status in parse_omd_status([
     ...     ['[heute]'],
@@ -46,7 +42,7 @@ def parse_omd_status(string_table: StringTable) -> Optional[Section]:
     stable {'stopped': [], 'existing': ['cmc', 'apache'], 'overall': 'running'}
     """
     result: Section = {}
-    current_item: Optional[Dict[str, Any]] = None
+    current_item: dict[str, Any] | None = None
 
     for name, *states in string_table:
         if name.startswith("["):
@@ -54,15 +50,15 @@ def parse_omd_status(string_table: StringTable) -> Optional[Section]:
             continue
         if current_item is None:
             continue
-        if name == 'OVERALL':
-            if states[0] == '0':
+        if name == "OVERALL":
+            if states[0] == "0":
                 current_item["overall"] = "running"
-            elif states[0] == '1':
+            elif states[0] == "1":
                 current_item["overall"] = "stopped"
             current_item = None
             continue
         current_item["existing"].append(name)
-        if states[0] != '0':
+        if states[0] != "0":
             current_item["stopped"].append(name)
             current_item["overall"] = "partially"
     return result
@@ -72,8 +68,8 @@ register.agent_section(name="omd_status", parse_function=parse_omd_status)
 
 
 def discovery_omd_status(
-    section_omd_status: Optional[Section],
-    section_omd_info: Optional[Section],
+    section_omd_status: Section | None,
+    section_omd_info: Section | None,
 ) -> DiscoveryResult:
     """
     >>> for service in discovery_omd_status(
@@ -103,7 +99,7 @@ def discovery_omd_status(
     for site in (section_omd_status or {}).keys():
         # if we have omd_info we want to ensure that checks are only executed for sites
         # that do have autostart enabled
-        if (section_omd_info or {}).get("sites", {}).get(site, {}).get("autostart") != '0':
+        if (section_omd_info or {}).get("sites", {}).get(site, {}).get("autostart") != "0":
             yield Service(item=site)
 
 
@@ -123,24 +119,27 @@ def _check_omd_status(
     Result(state=<State.OK: 0>, summary='running')
     """
     if "overall" not in site_services:
-        yield Result(state=state.CRIT, summary="defective installation")
+        yield Result(state=State.CRIT, summary="defective installation")
     elif site_services["overall"] == "running":
-        yield Result(state=state.OK, summary="running")
+        yield Result(state=State.OK, summary="running")
     elif site_services["overall"] == "stopped":
         # stopped sites are only CRIT when all are stopped
-        yield Result(state=(state.OK if others_running else state.CRIT),
-                     summary="stopped%s" % extra_text)
+        yield Result(
+            state=(State.OK if others_running else State.CRIT), summary="stopped%s" % extra_text
+        )
     else:
         # partially running sites are always CRIT
-        yield Result(state=state.CRIT,
-                     summary="partially running, stopped services: %s" %
-                     (", ".join(site_services["stopped"])))
+        yield Result(
+            state=State.CRIT,
+            summary="partially running, stopped services: %s"
+            % (", ".join(site_services["stopped"])),
+        )
 
 
 def check_omd_status(
     item: str,
-    section_omd_status: Optional[Section],
-    section_omd_info: Optional[Section],
+    section_omd_status: Section | None,
+    section_omd_info: Section | None,
 ) -> CheckResult:
     """
     >>> for result in check_omd_status(
@@ -160,8 +159,8 @@ def check_omd_status(
 
 def cluster_check_omd_status(
     item: str,
-    section_omd_status: Mapping[str, Section],
-    section_omd_info: Mapping[str, Section],
+    section_omd_status: Mapping[str, Section | None],
+    section_omd_info: Mapping[str, Section | None],
 ) -> CheckResult:
     """
     >>> for result in cluster_check_omd_status(
@@ -177,10 +176,13 @@ def cluster_check_omd_status(
     """
     # TODO(frans)(question): shouldn't it be better to look for =="running" ?
     any_running = any(
-        section[item]["overall"] != "stopped" for section in section_omd_status.values())
+        section[item]["overall"] != "stopped"
+        for section in section_omd_status.values()
+        if section is not None and item in section
+    )
 
     for node, section in section_omd_status.items():
-        if item not in section:
+        if section is None or item not in section:
             continue
         yield from _check_omd_status(item, section[item], any_running, " on %s" % node)
 

@@ -1,0 +1,14 @@
+Title: Unify MRPE features across Unix agents
+Class: feature
+Compatible: compat
+Component: checks
+Date: 1656721567
+Edition: cre
+Knowledge: undoc
+Level: 1
+Version: 2.2.0b1
+
+The features of the Unix agents with respect to the MRPE functionality are unified:
+
+LI: The Checkmk agents for AIX and FreeBSD now support asynchronous executions of remote plugins (MRPE).
+LI: The Checkmk agent for OpenWRT now fully supports MRPE plugins

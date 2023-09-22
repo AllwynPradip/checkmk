@@ -1,29 +1,32 @@
-FROM shimizukawa/python-all-dev
+ARG PYTHON_VERSION_MAJ_MIN
 
-ENV LC_ALL=C.UTF-8 LANG=C.UTF-8
+FROM python:${PYTHON_VERSION_MAJ_MIN}
 
-ARG PYTHON_VERSION
+# Yes, really again the same ARG: https://ryandaniels.ca/blog/docker-dockerfile-arg-from-arg-trouble/
+ARG PYTHON_VERSION_MAJ_MIN
+
+ENV DEBIAN_FRONTEND=noninteractive LC_ALL=C.UTF-8 LANG=C.UTF-8 PATH="/opt/bin:${PATH}"
+
+# conditional copy magic. Similar to || true in bash
+# https://redgreenrepeat.com/2018/04/13/how-to-conditionally-copy-file-in-dockerfile/
+COPY --from=python:3.9-slim /usr/local/lib/python3.9/distutils optional_file* /usr/lib/python3.9/distutils
 
 RUN \
-    if [ "$PYTHON_VERSION" = "2.7" ] || [ "$PYTHON_VERSION" = "2.6" ] || [ "$PYTHON_VERSION" = "3.4" ] || [ "$PYTHON_VERSION" = "3.3" ]; then \
-        GET_PIP_URL="https://bootstrap.pypa.io/pip/$PYTHON_VERSION/get-pip.py" ; \
-    elif [ "$PYTHON_VERSION" = "3.5" ]; then \
-        GET_PIP_URL="https://bootstrap.pypa.io/pip/3.4/get-pip.py" ; \
+    if [ "$PYTHON_VERSION_MAJ_MIN" = "2.7" ] || [ "$PYTHON_VERSION_MAJ_MIN" = "3.4" ] || [ "$PYTHON_VERSION_MAJ_MIN" = "3.5" ] || [ "$PYTHON_VERSION_MAJ_MIN" = "3.6" ]; then \
+        GET_PIP_URL="https://bootstrap.pypa.io/pip/$PYTHON_VERSION_MAJ_MIN/get-pip.py" ; \
     else \
-        GET_PIP_URL="https://bootstrap.pypa.io/get-pip.py" ; \
+    GET_PIP_URL="https://bootstrap.pypa.io/get-pip.py" ; \
     fi && \
-    if [ "$PYTHON_VERSION" = "2.6" ]; then \
-        PYMONGO="pymongo==3.7.2" ; \
-    elif [ "$PYTHON_VERSION" = "3.3" ]; then \
-        PYMONGO="pymongo==3.5.1" ; \
+    if [ "$PYTHON_VERSION_MAJ_MIN" = "3.4" ]; then \
+    PYMONGO="pymongo==3.12" ; \
     else \
-        PYMONGO="pymongo" ; \
+    PYMONGO="pymongo" ; \
     fi && \
     python3 -c "import urllib.request ; urllib.request.urlretrieve('$GET_PIP_URL', '/get-pip.py')" && \
-    python$PYTHON_VERSION /get-pip.py && \
-    pip$PYTHON_VERSION install pytest pytest-mock mock requests "$PYMONGO" && \
+    python$PYTHON_VERSION_MAJ_MIN /get-pip.py --target $(python$PYTHON_VERSION_MAJ_MIN -c 'import sys; print(sys.path[-1])') && \
+    python$PYTHON_VERSION_MAJ_MIN -m pip install pytest pytest-mock mock requests "$PYMONGO" --target $(python$PYTHON_VERSION_MAJ_MIN -c 'import sys; print(sys.path[-1])') && \
     # In python 3.4, it seemes we need to have typing installed in order to run pytest
     # As typing is ignored during run-time, this should not introduce a dependencies for the host envs
-    if [ "$PYTHON_VERSION" = "3.4" ]; then \
-        pip$PYTHON_VERSION install typing; \
+    if [ "$PYTHON_VERSION_MAJ_MIN" = "3.4" ]; then \
+    python$PYTHON_VERSION_MAJ_MIN -m pip  install typing; \
     fi \

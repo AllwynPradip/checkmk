@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import time
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
+
 from .agent_based_api.v1 import register, type_defs
 from .utils import interfaces
 
@@ -13,7 +14,7 @@ from .utils import interfaces
 def check_interfaces(
     item: str,
     params: Mapping[str, Any],
-    section: interfaces.Section,
+    section: interfaces.Section[interfaces.TInterfaceType],
 ) -> type_defs.CheckResult:
     yield from interfaces.check_multiple_interfaces(
         item=item,
@@ -21,7 +22,6 @@ def check_interfaces(
         section=section,
         group_name="Interface group",
         timestamp=time.time(),
-        input_is_rate=False,
     )
 
 

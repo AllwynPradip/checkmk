@@ -9,15 +9,16 @@ if not exist %save_dir% powershell Write-Host "`'%save_dir%`' absent" -foregroun
 
 cd %save_dir%
 powershell Write-Host "Patching environment" -foreground green
-echo home = C:\ProgramData\checkmk\agent\modules\python-3.8>.venv\pyvenv.cfg
+echo home = C:\ProgramData\checkmk\agent\modules\python-3>.venv\pyvenv.cfg
 echo version_info = %PY_VER%.%PY_SUBVER%>>.venv\pyvenv.cfg
 echo include-system-site-packages = false>>.venv\pyvenv.cfg
 
 :: postinstall
+if "%PY_VER%" == "3.4" ( 
+  copy /Y %cur_dir%\postinstall-3.4.4.cmd .\postinstall.cmd
+  exit /b 0
+)
 copy /Y %cur_dir%\postinstall.cmd .\postinstall.cmd
-if "%PY_VER%" == "3.4" exit /b 0
-
-:: runtime
 copy /Y %cur_dir%\runtime\*.dll .venv\Scripts\
 
 exit /b 0

@@ -4,8 +4,8 @@ export OMD_ROOT=###ROOT###
 PATH=$OMD_ROOT/local/bin:$OMD_ROOT/bin:$OMD_ROOT/local/lib/perl5/bin:$PATH
 export LD_LIBRARY_PATH=$OMD_ROOT/local/lib:$OMD_ROOT/lib
 
-# Create files and directories not accessible for "world" by default
-umask 0007
+# Create files and directories not accessible for "world" and "group" by default
+umask 0077
 
 # enable local perl env
 export PERL5LIB="$OMD_ROOT/local/lib/perl5/lib/perl5:$OMD_ROOT/lib/perl5/lib/perl5:$PERL5LIB"
@@ -17,6 +17,8 @@ export MAILRC="$OMD_ROOT/etc/mail.rc"
 
 # Make the python requests module trust the CAs configured in Check_MK
 export REQUESTS_CA_BUNDLE=$OMD_ROOT/var/ssl/ca-certificates.crt
+# Make the openssl trust the CAs configured in Check_MK
+export SSL_CERT_FILE=$OMD_ROOT/var/ssl/ca-certificates.crt
 
 # Enforce a non localized environment. The reason for this configuration is
 # that the parameters and outputs of the monitoring plug-ins are localized. If

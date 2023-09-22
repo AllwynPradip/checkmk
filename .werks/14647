@@ -1,0 +1,38 @@
+Title: Agent Bakery: Configure generic agents for any folder
+Class: feature
+Compatible: compat
+Component: agents
+Date: 1663223097
+Edition: cee
+Knowledge: undoc
+Level: 1
+Version: 2.2.0b1
+
+Users can now configure Checkmk to bake generic agents for any folder.
+
+Previously this was only (and always) done for the root folder (usually called <i>Main</i>).
+All rules that match the root folder without any host condition where used to create an agent configuration.
+The resulting agent package was refered to as "<i>GENERIC</i>".
+
+The same logic can now be used to bake a generic agent for any other folder.
+
+To activate this users can check the box "<i>Bake agent packages</i>" in the folders settings.
+An generic agent is then created for this very folder (not for its children), even if the folder is empty.
+The default behaviour is unchanged, only the root folders package will be created.
+
+As a side effect, the names on the download pages are changed from
+
+C+:
+  GENERIC, VANILLA, MyHost1, MyHost2
+C-:
+
+to
+
+C+:
+  Vanilla (factory settings)
+  Folders: / (root folder)
+  Hosts: MyHost1, MyHost2
+C-:
+
+In the REST API users can download these generic agents by setting <tt>agent_type='generic'</tt> and adding the <i>folder_name</i> field to the request.
+Omiting the <i>folder_name</i> will default to the generic agent of the root folder, to provide compatibility.

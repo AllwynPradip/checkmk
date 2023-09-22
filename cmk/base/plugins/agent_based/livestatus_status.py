@@ -1,24 +1,21 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 import time
-from typing import Any, Dict, Mapping, MutableMapping, Optional
+from collections.abc import Mapping, MutableMapping
+from typing import Any
 
 from .agent_based_api.v1 import (
     check_levels,
-    get_rate,
     get_value_store,
-    GetRateError,
-    IgnoreResults,
     Metric,
     register,
     render,
     Result,
     Service,
+    State,
 )
-from .agent_based_api.v1 import State as state
 from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult, StringTable
 from .utils.livestatus_status import LivestatusSection
 
@@ -47,7 +44,6 @@ livestatus_status_default_levels = {
     "average_latency_cmk": (30, 60),
     "average_latency_fetcher": (30, 60),
     "helper_usage_generic": (80.0, 90.0),
-    "helper_usage_cmk": (80.0, 90.0),
     "helper_usage_fetcher": (80.0, 90.0),
     "helper_usage_checker": (80.0, 90.0),
     "livestatus_usage": (60.0, 80.0),
@@ -80,7 +76,7 @@ register.agent_section(
 
 
 def parse_livestatus_ssl_certs(string_table: StringTable) -> LivestatusSection:
-    parsed: Dict[str, Dict[str, str]] = {}
+    parsed: dict[str, dict[str, str]] = {}
     site = None
     for line in string_table:
         if line and line[0][0] == "[" and line[0][-1] == "]":
@@ -101,8 +97,8 @@ register.agent_section(
 
 
 def discovery_livestatus_status(
-    section_livestatus_status: Optional[LivestatusSection],
-    section_livestatus_ssl_certs: Optional[LivestatusSection],
+    section_livestatus_status: LivestatusSection | None,
+    section_livestatus_ssl_certs: LivestatusSection | None,
 ) -> DiscoveryResult:
     if section_livestatus_status is None:
         return
@@ -114,8 +110,8 @@ def discovery_livestatus_status(
 def check_livestatus_status(
     item: str,
     params: Mapping[str, Any],
-    section_livestatus_status: Optional[LivestatusSection],
-    section_livestatus_ssl_certs: Optional[LivestatusSection],
+    section_livestatus_status: LivestatusSection | None,
+    section_livestatus_ssl_certs: LivestatusSection | None,
 ) -> CheckResult:
     # Check Performance counters
     this_time = time.time()
@@ -130,11 +126,11 @@ def check_livestatus_status(
     )
 
 
-def _generate_livestatus_results(
+def _generate_livestatus_results(  # pylint: disable=too-many-branches
     item: str,
     params: Mapping[str, Any],
-    section_livestatus_status: Optional[LivestatusSection],
-    section_livestatus_ssl_certs: Optional[LivestatusSection],
+    section_livestatus_status: LivestatusSection | None,
+    section_livestatus_ssl_certs: LivestatusSection | None,
     value_store: MutableMapping[str, Any],
     this_time: float,
 ) -> CheckResult:
@@ -145,67 +141,103 @@ def _generate_livestatus_results(
     # Ignore down sites. This happens on a regular basis due to restarts
     # of the core. The availability of a site is monitored with 'omd_status'.
     if status is None:
-        yield Result(state=state(params["site_stopped"]), summary="Site is currently not running")
+        yield Result(state=State(params["site_stopped"]), summary="Site is currently not running")
         return
 
-    yield Result(state=state.OK, summary="Livestatus version: %s" % status["livestatus_version"])
+    yield Result(state=State.OK, summary="Livestatus version: %s" % status["livestatus_version"])
 
-    for key, title in [
-        ("host_checks", "Host checks"),
-        ("service_checks", "Service checks"),
-        ("forks", "Process creations"),
-        ("connections", "Livestatus connects"),
-        ("requests", "Livestatus requests"),
-        ("log_messages", "Log messages"),
+    for metric_name, key, title in [
+        ("host_checks", "host_checks_rate", "Host checks"),
+        ("service_checks", "service_checks_rate", "Service checks"),
+        ("forks", "forks_rate", "Process creations"),
+        ("connections", "connections_rate", "Livestatus connects"),
+        ("requests", "requests_rate", "Livestatus requests"),
+        ("log_messages", "log_messages_rate", "Log messages"),
     ]:
-        try:
-            value = get_rate(
-                value_store=value_store,
-                key=key,
-                time=this_time,
-                value=float(status[key]),
-            )
-        except GetRateError as error:
-            yield IgnoreResults(str(error))
-            continue
-
-        if key in ("host_checks", "service_checks"):
-            yield Result(state=state.OK, summary="%s: %.1f/s" % (title, value))
+        value = float(status[key])
+        if key in ("host_checks_rate", "service_checks_rate"):
+            yield Result(state=State.OK, summary=f"{title}: {value:.1f}/s")
         else:
-            yield Result(state=state.OK, notice="%s: %.1f/s" % (title, value))
+            yield Result(state=State.OK, notice=f"{title}: {value:.1f}/s")
 
-        yield Metric(name=key, value=value, boundaries=(0, None))
+        yield Metric(name=metric_name, value=value, boundaries=(0, None))
 
     if status["program_version"].startswith("Check_MK"):
         # We have a CMC here.
-
-        for factor, render_func, key, label in [
-            (1, lambda x: "%.3fs" % x, "average_latency_generic", "Average check latency"),
-            (1, lambda x: "%.3fs" % x, "average_latency_cmk", "Average Checkmk latency"),
+        metrics = [
+            (1, lambda x: "%.3fs" % x, "average_latency_generic", "Average active check latency"),
+            (1, lambda x: "%.3fs" % x, "average_latency_checker", "Average checker latency"),
             (1, lambda x: "%.3fs" % x, "average_latency_fetcher", "Average fetcher latency"),
-            (100, render.percent, "helper_usage_generic", "Check helper usage"),
-            (100, render.percent, "helper_usage_cmk", "Checkmk helper usage"),
+            (100, render.percent, "helper_usage_generic", "Active check helper usage"),
             (100, render.percent, "helper_usage_fetcher", "Fetcher helper usage"),
             (100, render.percent, "helper_usage_checker", "Checker helper usage"),
             (100, render.percent, "livestatus_usage", "Livestatus usage"),
-            (1, lambda x: "%.1f/s" % x, "livestatus_overflows_rate", "Livestatus overflow rate"),
-        ]:
-
+            (1, lambda x: "%.2f/s" % x, "livestatus_overflows_rate", "Livestatus overflow rate"),
+            (1, lambda x: "%d/s" % x, "perf_data_count_rate", "Rate of performance data received"),
+            (1, lambda x: "%d/s" % x, "metrics_count_rate", "Rate of metrics received"),
+        ]
+        for conn, name in (("carbon", "Carbon"), ("influxdb", "InfluxDB"), ("rrdcached", "RRD")):
+            metrics.extend(
+                (
+                    (100, render.percent, f"{conn}_queue_usage", f"{name} queue usage"),
+                    (
+                        100,
+                        lambda x: "%d/s" % x,
+                        f"{conn}_queue_usage_rate",
+                        f"{name} queue usage rate",
+                    ),
+                    (
+                        1,
+                        lambda x: "%d/s" % x,
+                        f"{conn}_overflows_rate",
+                        f"Rate of performance data loss for {name}",
+                    ),
+                    (
+                        1,
+                        render.iobandwidth,
+                        f"{conn}_bytes_sent_rate",
+                        f"Rate of bytes sent to the {name} connection",
+                    ),
+                )
+            )
+        for factor, render_func, key, label in metrics:
             try:
                 value = factor * float(status[key])
             except KeyError:
                 # may happen if we are trying to query old host
-                if key in [
-                        "helper_usage_fetcher", "helper_usage_checker", "average_latency_fetcher"
+                if key == "average_latency_checker":
+                    value = float(status["average_latency_cmk"])
+                elif key in [
+                    "helper_usage_fetcher",
+                    "helper_usage_checker",
+                    "average_latency_fetcher",
+                    "carbon_overflows_rate",
+                    "carbon_queue_usage",
+                    "carbon_queue_usage_rate",
+                    "carbon_bytes_sent_rate",
+                    "influxdb_overflows_rate",
+                    "influxdb_queue_usage",
+                    "influxdb_queue_usage_rate",
+                    "influxdb_bytes_sent_rate",
+                    "rrdcached_overflows_rate",
+                    "rrdcached_queue_usage",
+                    "rrdcached_queue_usage_rate",
+                    "rrdcached_bytes_sent_rate",
+                    "perf_data_count_rate",
+                    "metrics_count_rate",
                 ]:
                     value = 0.0
                 else:
                     raise
 
+            # The column was incorrectly named, but we want to keep the parameter configuration and the persisted metrics.
+            if key == "average_latency_checker":
+                key = "average_latency_cmk"
+
             yield from check_levels(
                 value=value,
                 metric_name=key,
-                levels_upper=params[key],
+                levels_upper=params.get(key),
                 render_func=render_func,
                 label=label,
                 notice_only=True,
@@ -230,7 +262,7 @@ def _generate_livestatus_results(
     )
     # Output some general information
     yield Result(
-        state=state.OK,
+        state=State.OK,
         notice="Core version: %s" % status["program_version"].replace("Check_MK", "Checkmk"),
     )
 
@@ -239,13 +271,16 @@ def _generate_livestatus_results(
     # for 32bit systems, dates after 19th Jan 2038 (32bit limit)
     # the 'date'-command will return an error and thus no result
     # this happens e.g. for hacky raspberry pi setups that are not officially supported
-    pem_path = "/omd/sites/%s/etc/ssl/sites/%s.pem" % (item, item)
-    valid_until_str = (None if section_livestatus_ssl_certs is None else
-                       section_livestatus_ssl_certs.get(item, {}).get(pem_path))
+    pem_path = f"/omd/sites/{item}/etc/ssl/sites/{item}.pem"
+    valid_until_str = (
+        None
+        if section_livestatus_ssl_certs is None
+        else section_livestatus_ssl_certs.get(item, {}).get(pem_path)
+    )
     if valid_until_str:
         valid_until = int(valid_until_str)
         yield Result(
-            state=state.OK,
+            state=State.OK,
             notice="Site certificate valid until %s" % render.date(valid_until),
         )
         secs_left = valid_until - this_time
@@ -275,42 +310,23 @@ def _generate_livestatus_results(
     ]
     # Check settings of enablings. Here we are quiet unless a non-OK state is found
     for settingname, title in settings:
-        if status[settingname] != '1':
-            yield Result(state=state(params[settingname]), notice=title)
+        if status[settingname] != "1":
+            yield Result(state=State(params[settingname]), notice=title)
 
     # special considerations for enable_event_handlers
     if status["program_version"].startswith("Check_MK 1.2.6"):
         # In CMC <= 1.2.6 event handlers cannot be enabled. So never warn.
         return
-    if status.get("has_event_handlers", '1') == '0':
+    if status.get("has_event_handlers", "1") == "0":
         # After update from < 1.2.7 the check would warn about disabled alert
         # handlers since they are disabled in this case. But the user has no alert
         # handlers defined, so this is nothing to warn about. Start warn when the
         # user defines his first alert handlers.
         return
-    if status["enable_event_handlers"] != '1':
+    if status["enable_event_handlers"] != "1":
         yield Result(
-            state=state(params["enable_event_handlers"]),
+            state=State(params["enable_event_handlers"]),
             notice="Alert handlers are disabled",
-        )
-
-
-def cluster_check_livestatus_status(
-    item: str,
-    params: Mapping[str, Any],
-    section_livestatus_status: Mapping[str, LivestatusSection],
-    section_livestatus_ssl_certs: Mapping[str, LivestatusSection],
-) -> CheckResult:
-    this_time = time.time()
-    value_store = get_value_store()
-    for node_name, node_section_status in section_livestatus_status.items():
-        yield from _generate_livestatus_results(
-            item,
-            params,
-            node_section_status,
-            section_livestatus_ssl_certs.get(node_name),
-            value_store,
-            this_time,
         )
 
 
@@ -322,5 +338,4 @@ register.check_plugin(
     discovery_function=discovery_livestatus_status,
     check_function=check_livestatus_status,
     check_default_parameters=livestatus_status_default_levels,
-    cluster_check_function=cluster_check_livestatus_status,
 )

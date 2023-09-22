@@ -1,29 +1,23 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """Infoblox services and node services
 """
-from typing import Dict, List, Mapping, Tuple
 
 from .agent_based_api.v1 import (
-    SNMPTree,
-    register,
-    Service,
-    Result,
-    State as state,
     any_of,
-    startswith,
     contains,
+    register,
+    Result,
+    Service,
+    SNMPTree,
+    startswith,
+    State,
 )
-from .agent_based_api.v1.type_defs import (
-    StringTable,
-    CheckResult,
-    DiscoveryResult,
-)
+from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult, StringTable
 
-Section = Dict[str, Tuple[str, str]]
+Section = dict[str, tuple[str, str]]
 
 DETECT_INFOBLOX = any_of(
     contains(".1.3.6.1.2.1.1.1.0", "infoblox"),
@@ -90,6 +84,8 @@ SERVICE_ID = {
     "57": "cloud-api",
     "58": "threat-analytics",
     "59": "taxii",
+    "60": "bfd",
+    "61": "outbound",
 }
 STATUS_ID = {
     "1": "working",
@@ -99,14 +95,14 @@ STATUS_ID = {
     "5": "unknown",
 }
 STATE = {
-    "working": state.OK,
-    "warning": state.WARN,
-    "failed": state.CRIT,
-    "unexpected": state.UNKNOWN,
+    "working": State.OK,
+    "warning": State.WARN,
+    "failed": State.CRIT,
+    "unexpected": State.UNKNOWN,
 }
 
 
-def parse_infoblox_services(string_table: List[StringTable]) -> Section:
+def parse_infoblox_services(string_table: list[StringTable]) -> Section:
     """
     >>> for item, status in parse_infoblox_services([[
     ...         ['9', '1', 'Running'],
@@ -155,41 +151,12 @@ def check_infoblox_services(item: str, section: Section) -> CheckResult:
     ...     print(result)
     Result(state=<State.OK: 0>, summary='Status: working (14% - System memory usage is OK.)')
     """
-    if not item in section:
+    if item not in section:
         return
     status, description = section[item]
     yield Result(
         state=STATE[status],
-        summary="Status: %s%s" % (status, description and " (%s)" % description),
-    )
-
-
-def cluster_check_infoblox_services(item: str, section: Mapping[str, Section]) -> CheckResult:
-    """
-    >>> for result in cluster_check_infoblox_services("memory", {
-    ...     "node1": {
-    ...         'memory': ('warning', '54% - System memory usage is LOW.'),
-    ...         'replication': ('working', 'Online'),
-    ...     }, "node2": {
-    ...         'memory': ('working', '14% - System memory usage is OK.'),
-    ...         'replication': ('working', 'Online'),
-    ...     }, "node3": {
-    ...         'memory': ('failed', '74% - System memory usage is CRIT.'),
-    ...         'replication': ('working', 'Online'),
-    ... }}):
-    ...     print(result)
-    Result(state=<State.OK: 0>, summary='Status: working (14% - System memory usage is OK.)')
-    """
-    try:
-        status, description = min(
-            (node_section[item] for node_section in section.values() if item in node_section),
-            key=lambda x: STATE[x[0]].value)
-    except ValueError:
-        # no node with given item found
-        return
-    yield Result(
-        state=STATE[status],
-        summary="Status: %s%s" % (status, description and " (%s)" % description),
+        summary="Status: {}{}".format(status, description and " (%s)" % description),
     )
 
 
@@ -204,7 +171,8 @@ register.snmp_section(
                 "1",  # IB-PLATFORMONE-MIB::ibServiceName
                 "2",  # IB-PLATFORMONE-MIB::ibServiceStatus
                 "3",  # IB-PLATFORMONE-MIB::ibServiceDesc
-            ]),
+            ],
+        ),
     ],
 )
 
@@ -213,7 +181,6 @@ register.check_plugin(
     service_name="Service %s",
     discovery_function=discovery_infoblox_services,
     check_function=check_infoblox_services,
-    cluster_check_function=cluster_check_infoblox_services,
 )
 
 register.snmp_section(
@@ -227,7 +194,8 @@ register.snmp_section(
                 "1",  # IB-PLATFORMONE-MIB::ibNodeServiceName
                 "2",  # IB-PLATFORMONE-MIB::ibNodeServiceStatus
                 "3",  # IB-PLATFORMONE-MIB::ibNodeServiceDesc
-            ]),
+            ],
+        ),
     ],
 )
 
@@ -236,5 +204,4 @@ register.check_plugin(
     service_name="Node service %s",
     discovery_function=discovery_infoblox_services,
     check_function=check_infoblox_services,
-    cluster_check_function=cluster_check_infoblox_services,
 )

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2020 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2020 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -13,23 +12,23 @@
 # Host.name=heute
 import collections
 import pprint
-from typing import Tuple
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 
 import dateutil.parser
-import pyparsing as pp  # type: ignore
+import pyparsing as pp
 
 from cmk.utils.livestatus_helpers import tables
 
 
 class Node:
-    def __init__(self, value):
+    def __init__(self, value) -> None:  # type: ignore[no-untyped-def]
         self.value = value
         self.parsed = self.parse(value)
 
     def parse(self, value):
         return value
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"{self.__class__.__name__}({self.parsed})"
 
 
@@ -96,32 +95,33 @@ class ListNode(Node):
 def make_grammar():
     name_expr = pp.Word(pp.alphas + "_").setName("Name")
     table_expr = pp.Word(pp.alphas + "_").setName("Table")
-    column_expr = (table_expr - pp.Suppress(".") -
-                   name_expr).setName("Column").setParseAction(ColumnNode)
+    column_expr = (
+        (table_expr - pp.Suppress(".") - name_expr).setName("Column").setParseAction(ColumnNode)
+    )
 
     number_expr = pp.Word(pp.nums).setName("number expression").setParseAction(IntNode)
-    string_expr = pp.QuotedString(quoteChar='"',
-                                  endQuoteChar='"',
-                                  escChar='\\',
-                                  unquoteResults=True).setParseAction(StringNode)
+    string_expr = pp.QuotedString(
+        quoteChar='"', endQuoteChar='"', escChar="\\", unquoteResults=True
+    ).setParseAction(StringNode)
     iso_date_time_expr = pp.pyparsing_common.iso8601_datetime.copy().setParseAction(DateTimeNode)
 
     list_expr = pp.Forward()
-    value = (string_expr | iso_date_time_expr | number_expr | list_expr)
+    value = string_expr | iso_date_time_expr | number_expr | list_expr
     list_expr <<= pp.nestedExpr(opener="[", closer="]", content=pp.delimitedList(value))
     list_expr.setName("list expression, starting with [ ending with ]")
     list_expr.setParseAction(ListNode)
 
-    infix_op = pp.oneOf("< > = ~").setName('infix_op').setParseAction(InfixOpNode)
+    infix_op = pp.oneOf("< > = ~").setName("infix_op").setParseAction(InfixOpNode)
 
-    regexp_expr = pp.QuotedString(quoteChar='/',
-                                  endQuoteChar='/',
-                                  escChar='\\',
-                                  unquoteResults=True).setParseAction(RegexpNode)
+    regexp_expr = pp.QuotedString(
+        quoteChar="/", endQuoteChar="/", escChar="\\", unquoteResults=True
+    ).setParseAction(RegexpNode)
 
     binary_expression = (
-        column_expr - infix_op -
-        (value | regexp_expr)).setName("binary expression").setParseAction(BinaryNode)
+        (column_expr - infix_op - (value | regexp_expr))
+        .setName("binary expression")
+        .setParseAction(BinaryNode)
+    )
 
     logical_expression = pp.Forward()
 
@@ -142,13 +142,13 @@ def make_grammar():
     not_expression = _logical_expr("not", base_expr, NotNode, single_argument=True)
 
     log_expression = and_expression | or_expression | not_expression
-    logical_expression <<= log_expression.setName('logical expression')
+    logical_expression <<= log_expression.setName("logical expression")
     base_expr <<= logical_expression | binary_expression
 
     return base_expr
 
 
-def parse_filter(fstr: str):
+def parse_filter(fstr: str) -> None:
     """
     >>> parse_filter(r'''
     ... and(
@@ -186,7 +186,12 @@ def parse_filter(fstr: str):
     return pprint.pprint(root_expr)
 
 
-def nested_loop_join(t1, t2, key1: Tuple[str, ...], key2: Tuple[str, ...]):
+def nested_loop_join(
+    t1: Iterable[Mapping[str, object]],
+    t2: Iterable[Mapping[str, object]],
+    key1: tuple[str, ...],
+    key2: tuple[str, ...],
+) -> Iterator[tuple[Mapping[str, object], Mapping[str, object]]]:
     """Joins two datasets with the nested-loop join algorithm.
 
     >>> l1 = [{'a': 1}, {'a': 2}]
@@ -221,11 +226,11 @@ def nested_loop_join(t1, t2, key1: Tuple[str, ...], key2: Tuple[str, ...]):
 
 
 def hash_join(
-    t1,
-    t2,
-    key1: Tuple[str, ...],
-    key2: Tuple[str, ...],
-):
+    t1: Sequence[dict[str, object]],
+    t2: Sequence[dict[str, object]],
+    key1: tuple[str, ...],
+    key2: tuple[str, ...],
+) -> Iterator[tuple[dict[str, object], dict[str, object]]]:
     """Joins two datasets with the hash-join algorithm.
 
     Notes:

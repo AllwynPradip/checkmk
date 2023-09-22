@@ -3,9 +3,12 @@
 //
 #include "pch.h"
 
-#include "cfg.h"
+#include <ranges>
+
+#include "wnx/cfg.h"
 #include "common/wtools.h"
 #include "providers/df.h"
+namespace rs = std::ranges;
 
 namespace cma::provider {
 
@@ -17,8 +20,8 @@ TEST(DfTest, GetDriveVector) {
     auto all_drives = df::GetDriveVector();
     ASSERT_TRUE(!all_drives.empty());
 
-    auto c_disk_found = std::any_of(
-        std::begin(all_drives), std::end(all_drives),
+    const auto c_disk_found = rs::any_of(
+        all_drives,
         [](std::string_view drive) { return tools::IsEqual(drive, "c:\\"); });
     ASSERT_TRUE(c_disk_found);
 }
@@ -46,14 +49,16 @@ TEST(DfTest, ProduceFileSystemOutput) {
 
 TEST(DfTest, ProduceMountPointsOutput) {
     auto mp = df::ProduceMountPointsOutput(g_volume_id_c);
-    ASSERT_FALSE(mp.empty())
-        << "Mounting points absent: you have mount at least two different points\n";
+    if (mp.empty()) {
+        GTEST_SKIP()
+            << "Mounting points absent: you have mount at least two different points\n";
+    }
 
     auto raws = tools::SplitString(mp, "\n");
 
     std::set<std::string> all;
 
-    for (auto& raw : raws) {
+    for (auto &raw : raws) {
         auto table = tools ::SplitString(raw, "\t");
         EXPECT_EQ(table.size(), 7);
         all.insert(raw);
@@ -84,7 +89,7 @@ TEST(DfTest, CalcUsage) {
     EXPECT_EQ(1, df::CalcUsage(99, 100));
 }
 
-TEST(DfTest, Integration) {
+TEST(DfTest, Component) {
     cma::provider::Df df;
     auto result = df.generateContent();
     ASSERT_TRUE(!result.empty());
@@ -93,7 +98,7 @@ TEST(DfTest, Integration) {
     EXPECT_TRUE(rows.size() > 1);
     EXPECT_EQ(rows[0], "<<<df:sep(9)>>>");
     rows.erase(rows.begin());
-    for (auto& r : rows) {
+    for (auto &r : rows) {
         auto table = tools::SplitString(r, "\t");
         EXPECT_EQ(table.size(), 7);
     }

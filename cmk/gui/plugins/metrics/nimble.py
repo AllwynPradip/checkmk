@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+from cmk.gui.graphing._utils import graph_info, metric_info
 from cmk.gui.i18n import _
 
-from cmk.gui.plugins.metrics import (
-    metric_info,
-    graph_info,
-)
-
-#.
+# .
 #   .--Metrics-------------------------------------------------------------.
 #   |                   __  __      _        _                             |
 #   |                  |  \/  | ___| |_ _ __(_) ___ ___                    |
@@ -42,13 +37,13 @@ for nimble_op_ty in ["read", "write"]:
         ("500", "200-500 ms", "13/a"),
         ("1000", "500+ ms", "12/a"),
     ]:
-        metric_info["nimble_%s_latency_%s" % (nimble_op_ty, nimble_key.replace(".", ""))] = {
-            "title": _("%s latency %s" % (nimble_op_ty.title(), nimble_title)),
+        metric_info["nimble_{}_latency_{}".format(nimble_op_ty, nimble_key.replace(".", ""))] = {
+            "title": _("%s latency %s") % (nimble_op_ty.title(), nimble_title),
             "unit": "%",
             "color": nimble_color,
         }
 
-#.
+# .
 #   .--Graphs--------------------------------------------------------------.
 #   |                    ____                 _                            |
 #   |                   / ___|_ __ __ _ _ __ | |__  ___                    |

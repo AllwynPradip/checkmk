@@ -1,7 +1,7 @@
 title: Etherbox / MessPC: Sensor Switch Contact
 catalog: hw/environment/betternet
 agents: snmp
-license: GPL
+license: GPLv2
 distribution: check_mk
 description:
  This check monitors the state of the etherbox switch contact sensor
@@ -12,8 +12,7 @@ description:
 item:
  The port number of the sensor followed by the sensor type
 
- Example: "2.4" A switch contact sensor(type 4) on port 2
+ Example: "2.4" - A switch contact sensor(type 4) on port 2
 
-inventory:
+discovery:
  One service is created for each switch contact sensor.
-

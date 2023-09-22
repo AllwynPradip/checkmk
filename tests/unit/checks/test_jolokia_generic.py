@@ -1,30 +1,42 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+from collections.abc import Sequence
+
 import pytest
-from testlib import Check
-from checktestlib import assertDiscoveryResultsEqual, DiscoveryResult
+
+from tests.testlib import Check
+
+from cmk.base.plugins.agent_based.agent_based_api.v1.type_defs import StringTable
+
+from .checktestlib import assertDiscoveryResultsEqual, DiscoveryResult
 
 pytestmark = pytest.mark.checks
 
-info = [[u'PingFederate-CUK-CDI', u'TotalRequests', u'64790', u'number'],
-        [u'PingFederate-CUK-CDI', u'MaxRequestTime', u'2649', u'rate']]
+info = [
+    ["PingFederate-CUK-CDI", "TotalRequests", "64790", "number"],
+    ["PingFederate-CUK-CDI", "MaxRequestTime", "2649", "rate"],
+]
 
 
-@pytest.mark.parametrize("check,lines,expected_result", [
-    ('jolokia_generic', info, [(u'PingFederate-CUK-CDI TotalRequests', {})]),
-    ('jolokia_generic.rate', info, [(u'PingFederate-CUK-CDI MaxRequestTime', {})]),
-])
-def test_jolokia_generic_discovery(check, lines, expected_result):
-    parsed = Check('jolokia_generic').run_parse(lines)
+@pytest.mark.parametrize(
+    "check,lines,expected_result",
+    [
+        ("jolokia_generic", info, [("PingFederate-CUK-CDI MBean TotalRequests", {})]),
+        ("jolokia_generic.rate", info, [("PingFederate-CUK-CDI MBean MaxRequestTime", {})]),
+    ],
+)
+def test_jolokia_generic_discovery(
+    check: str, lines: StringTable, expected_result: Sequence[tuple[str, dict[str, object]]]
+) -> None:
+    parsed = Check("jolokia_generic").run_parse(lines)
 
-    check = Check(check)
-    discovered = check.run_discovery(parsed)
+    check_val = Check(check)
+    discovered = check_val.run_discovery(parsed)
     assertDiscoveryResultsEqual(
-        check,
+        check_val,
         DiscoveryResult(discovered),
         DiscoveryResult(expected_result),
     )

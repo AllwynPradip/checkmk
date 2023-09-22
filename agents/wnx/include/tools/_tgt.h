@@ -1,11 +1,12 @@
-// Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
-// This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
-// conditions defined in the file COPYING, which is part of this source code package.
+// Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
+// This file is part of Checkmk (https://checkmk.com). It is subject to the
+// terms and conditions defined in the file COPYING, which is part of this
+// source code package.
 
 // C++ cross platform support for OS and compilers and targets
 #pragma once
-#if !defined(___TGT_H)
-#define ___TGT_H
+#ifndef TGT_H
+#define TGT_H
 
 #if defined(DEBUG) || defined(DBG) || defined(_DEBUG)
 #define DEBUG_TARGET 1
@@ -45,4 +46,4 @@ constexpr bool IsWindows() {
 
 }  // namespace tgt
 
-#endif  // ___TGT_H
+#endif  // TGT_H

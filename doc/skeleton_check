@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# REMOVE THIS:
-# type: ignore
-# pylint: disable
+from collections.abc import Mapping
+from typing import Any
 
-from typing import Any, Mapping
-from .agent_based_api.v1.type_defs import HostLabelGenerator, StringTable
-
-from .agent_based_api.v1 import HostLabel, register, Result, RuleSetType, Service, State
+from .agent_based_api.v1 import (  # type: ignore[import] # pylint: disable=import-error
+    HostLabel,
+    register,
+    Result,
+    RuleSetType,
+    Service,
+    State,
+)
+from .agent_based_api.v1.type_defs import (  # type: ignore[import] # pylint: disable=import-error
+    CheckResult,
+    DiscoveryResult,
+    HostLabelGenerator,
+    StringTable,
+)
 
 
 # define an appropriate section type
@@ -21,13 +29,13 @@ class Section:
 
 def parse_norris(string_table: StringTable) -> Section:
     """
-        >>> parse_norris([
-        ... # Example output from agent:
-        ... # Put here the example output of the data source
-        ... ])
-        Section(...)
+    >>> parse_norris([
+    ... # Example output from agent:
+    ... # Put here the example output of the data source
+    ... ])
+    Section(...)
     """
-    return section
+    return Section()
 
 
 def host_labels_norris(section: Section) -> HostLabelGenerator:
@@ -39,28 +47,31 @@ register.snmp_section(
     # Don't use this unless you known what you're doing!
     # parsed_section_name="mr_pickle",  # you can' rename norris, norris renames you!
     parse_function=parse_norris,
-    host_label_function=host_label_norris,
+    host_label_function=host_labels_norris,
 )
 
 
-def discover_norris(params: Mapping[str, Any], section: Section):
+def discover_norris(params: Mapping[str, Any], section: Section) -> DiscoveryResult:
     yield Service(...)
 
 
-def check_norris(item: str, params: Mapping[str, Any], section: Section):
+def check_norris(item: str, params: Mapping[str, Any], section: Section) -> CheckResult:
     yield Result(
         state=State.UNKNOWN,
         summary="Check not implemented",
-        details=("Check not implemented.\n"
-                 f"item: {item!r}\n"
-                 f"params: {params!r}\n"
-                 f"section: {section!r}\n"),
+        details=(
+            "Check not implemented.\n"
+            f"item: {item!r}\n"
+            f"params: {params!r}\n"
+            f"section: {section!r}\n"
+        ),
     )
 
 
-def cluster_check_norris(item: str, params: Mapping[str, Any], section: Mapping[str, Section]):
-    """This is just an example.
-    """
+def cluster_check_norris(
+    item: str, params: Mapping[str, Any], section: Mapping[str, Section]
+) -> CheckResult:
+    """This is just an example."""
     aggregated_data = Section()
     for _node_name, _node_section in section.items():
         # do something  clever here!

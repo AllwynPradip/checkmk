@@ -1,6 +1,5 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """
@@ -34,33 +33,33 @@ sections in Licenses.ods to have both package listing and detailed license
 information in one document and to make things look better (colored headings).
 """
 
-import sys
-import os
-import traceback
-import re
 import argparse
-import fnmatch
 import csv
+import fnmatch
 import json
-
-from shutil import rmtree
-from pathlib import Path
+import os
+import re
+import sys
+import traceback
 from datetime import date
-from typing import Dict, List
+from pathlib import Path
+from shutil import rmtree
+
+from pipfile import Pipfile
 
 ZIP_ENDINGS = [".tar.gz", ".zip", ".tar.bz2", ".tar.xz", ".cab"]
 license_links_file = "License_links.csv"
 
 
-def find(pattern, path, find_dirs=False) -> List[str]:
-    '''Simple function for finding all files under path that include
-    pattern within their file name (similar to shell command "find -name")'''
+def find(pattern, path, find_dirs=False) -> list[str]:
+    """Simple function for finding all files under path that include
+    pattern within their file name (similar to shell command "find -name")"""
     result = []
     for root, dirs, files in os.walk(path):
         if find_dirs:
             files = dirs
         for name in files:
-            full_path_str = "%s/%s" % (root, name)
+            full_path_str = f"{root}/{name}"
             if isinstance(pattern, list):
                 for patt in pattern:
                     if fnmatch.fnmatch(name, patt):
@@ -78,11 +77,11 @@ def print_separator():
 def path_from_zipped(file_string) -> Path:
     for ending in ZIP_ENDINGS:
         if file_string.endswith(ending):
-            return file_string[:-len(ending)] + "/"
+            return file_string[: -len(ending)] + "/"
     return Path(file_string)
 
 
-def available_files(pkg_dir: Path, needles) -> List[Path]:
+def available_files(pkg_dir: Path, needles) -> list[Path]:
     found_files = []
     for needle in needles:
         for f in pkg_dir.iterdir():
@@ -92,8 +91,8 @@ def available_files(pkg_dir: Path, needles) -> List[Path]:
 
 
 def detect_license(pkg_dir: Path) -> str:
-    '''Return the license for a given package directory pkg_dir if it can be
-    obtained from available license files'''
+    """Return the license for a given package directory pkg_dir if it can be
+    obtained from available license files"""
     license_needles = ["LICENSE", "LICENCE", "COPYING", "PKG-INFO", "README", "METADATA"]
     license_files = available_files(pkg_dir, license_needles)
     for lf in license_files:
@@ -104,7 +103,7 @@ def detect_license(pkg_dir: Path) -> str:
 
 
 def license_from_file(file_path: Path) -> str:
-    with open(file_path, "r", encoding="utf-8") as lfile:
+    with open(file_path, encoding="utf-8") as lfile:
         try:
             # lower case string for comparisons
             ltxt = lfile.read().lower()
@@ -138,8 +137,10 @@ def license_from_file(file_path: Path) -> str:
             return "Apache-UNKN"
         # BSD
         if "redistribution and use in source and binary forms" in ltxt:
-            if "redistributions of source code must" in ltxt and \
-                    "redistributions in binary form must" in ltxt:
+            if (
+                "redistributions of source code must" in ltxt
+                and "redistributions in binary form must" in ltxt
+            ):
                 if "neither the name of" in ltxt:
                     if "all advertising materials mentioning features" in ltxt:
                         return "BSD-4-Clause"
@@ -159,11 +160,9 @@ def license_from_file(file_path: Path) -> str:
             return "MIT"
         # Artistic
         if "artistic" in ltxt:
-            if "license 1.0" in ltxt or \
-               "\"package\" refers to the collection of files" in ltxt:
+            if "license 1.0" in ltxt or '"package" refers to the collection of files' in ltxt:
                 return "Artistic-1.0"
-            if "license 2.0" in ltxt or \
-                 "everyone is permitted to copy and distribute" in ltxt:
+            if "license 2.0" in ltxt or "everyone is permitted to copy and distribute" in ltxt:
                 return "Artistic-2.0"
             return "Artistic-UNKN"
         # CC0 1.0
@@ -200,19 +199,19 @@ def license_from_file(file_path: Path) -> str:
 
 
 def detect_version(pkg_dir: Path, name="") -> str:
-    '''Return the version for a given package directory pkg_dir and package
-    name name if it can be obtained from available files'''
+    """Return the version for a given package directory pkg_dir and package
+    name name if it can be obtained from available files"""
     version_needles = ["PKG-INFO", "VERSION", "FAQ", "README", "METADATA"]
-    version_files: List[Path] = available_files(pkg_dir, version_needles)
+    version_files: list[Path] = available_files(pkg_dir, version_needles)
     for vf in version_files:
         if vf.is_dir():
             return detect_version(vf)
-        with open(vf, "r") as vfile:
+        with open(vf) as vfile:
             try:
                 lines = vfile.readlines()
             except UnicodeDecodeError:
                 print("Could not read file %s." % vf)
-                #sys.stderr.write(traceback.format_exc())
+                # sys.stderr.write(traceback.format_exc())
                 return "Version ERR"
             for line in lines:
                 if re.match("version: ", line.lower()):
@@ -230,10 +229,10 @@ def detect_version(pkg_dir: Path, name="") -> str:
 
 
 def detect_name(pkg_dir: Path, case_sensitive_names) -> str:
-    name_files: List[Path] = available_files(pkg_dir, ["PKG-INFO", "METADATA"])
+    name_files: list[Path] = available_files(pkg_dir, ["PKG-INFO", "METADATA"])
     name = ""
     for nf in name_files:
-        with open(nf, "r") as file_:
+        with open(nf) as file_:
             lines = file_.readlines()
             for line in lines:
                 if re.match("name: ", line.lower()):
@@ -270,16 +269,18 @@ def download_cmk_sources(version) -> Path:
 
     print_separator()
     print("Downloading sources package %s from download.checkmk.com\n" % file_name)
-    os.system("wget --user d-intern https://download.checkmk.com/checkmk/%s/%s --ask-password" %
-              (version, file_name))
+    os.system(
+        "wget --user d-intern https://download.checkmk.com/checkmk/%s/%s --ask-password"
+        % (version, file_name)
+    )
     return Path(file_name)
 
 
-def get_license_links() -> Dict[str, str]:
-    '''Returns a dict with license id as key and license link as value based on the
-    specified license links CSV file'''
+def get_license_links() -> dict[str, str]:
+    """Returns a dict with license id as key and license link as value based on the
+    specified license links CSV file"""
     license_links = {}
-    with open(license_links_file, "r") as csv_file:
+    with open(license_links_file) as csv_file:
         csv_file.readline()  # Drop line of headers
         reader = csv.reader(csv_file)
         for line in reader:
@@ -287,36 +288,89 @@ def get_license_links() -> Dict[str, str]:
     return license_links
 
 
-def update_py_packages(rows, path_cmk_dir: Path, verbose=False) -> List[List[str]]:
+def update_py3_modules(
+    rows: list[list[str]], py3_modules: dict[str, str], verbose: bool = False
+) -> list[list[str]]:
+    pm_rows = [row for row in rows if row[0].startswith("Python module: ")]
+    py_module_str_tag: str = "Python module: "
+
+    drop_rows: list[list[str]] = []
+    for row in pm_rows:
+        name = re.sub(f"^{py_module_str_tag}", "", row[0])
+        listed_version: str = row[1]
+        found_version: str | None = py3_modules.get(name, None)
+
+        if not found_version:
+            if verbose:
+                print(
+                    f"Removing package: {row[0]}, {row[1]}"
+                    + (" (%s)" % row[4] if len(row) > 4 else "")
+                )
+            drop_rows.append(row)
+        elif found_version != listed_version:
+            if verbose:
+                print(f"Removing package: {row[0]}, {row[1]} ({row[2]})")
+                print(f"Adding package: {row[0]}, {found_version} (License UNKN)")
+            drop_rows.append(row)
+            rows.append([row[0], found_version, "License UNKN", "", "", ""])
+            del py3_modules[name]
+        else:
+            del py3_modules[name]
+
+    for name, version in py3_modules.items():
+        name = py_module_str_tag + name
+        if verbose:
+            print(f"Adding package: {name}, {version} (License UNKN)")
+        rows.append([name, version, "License UNKN", "", "", ""])
+
+    rows = [x for x in rows if not x in drop_rows]
+    return rows
+
+
+def update_py_packages(
+    rows: list[list[str]], path_cmk_dir: Path, verbose: bool = False
+) -> list[list[str]]:
     print_separator()
-    print("Inspecting Checkmk repository \"%s\" for python package update\n" % path_cmk_dir)
+    print('Inspecting Checkmk repository "%s" for python package update\n' % path_cmk_dir)
 
     # Find all package paths within the given Checkmk sources repository
-    found_packages: List[str] = find(["*" + ze for ze in ZIP_ENDINGS], path_cmk_dir)
+    found_packages: list[str] = find(["*" + ze for ze in ZIP_ENDINGS], path_cmk_dir)
     if not found_packages:
-        print("For the given Checkmk repository \"%s\" no package paths were found." % path_cmk_dir)
+        print('For the given Checkmk repository "%s" no package paths were found.' % path_cmk_dir)
         sys.exit()
 
+    # Get all python 3 modules from Pipfile and update them separately
+    py3_modules: dict[str, str] = get_packages_from_pipfile(path_cmk_dir)
+    rows = update_py3_modules(
+        rows,
+        py3_modules,
+        verbose,
+    )
+
     # Exceptional package paths that cannot be matched via package name
-    # TODO: Keep these up to date
-    exceptions = {
+    # TODO: Keep these up to date or rather get rid of these altogether
+    exceptions: dict[str, str] = {
         "GNU patch": "omd/packages/patch/patch-2.7.6.tar.gz",
         "Heirloom Packaging Tools": "omd/packages/heirloom-pkgtools/heirloom-pkgtools-070227.tar.bz2",
         "Perl module: DateTime::TimeZone": "omd/packages/perl-modules/src/DateTime-TimeZone-1.88.tar.gz",
         "Perl module: Iperl module: O": "omd/packages/perl-modules/src/IO-1.25.tar.gz",
     }
 
-    case_sensitive_names = {}
-    drop_rows = []
-    pywinag_entries = []
+    case_sensitive_names: dict[str, str] = {}
+    drop_rows: list[list[str]] = []
+    pywinag_entries: list[list[str]] = []
     # Go through all packages already listed and try to match them with
-    # the found package paths
+    # the exceptions and the found package paths
     for row in rows:
-        name = row[0]
+        name: str = row[0]
         case_sensitive_names[name.lower()] = name
-        path = row[4]
+        path: str = row[4]
+
         if "PyWinAg" in name:
             pywinag_entries.append(row)
+            continue
+
+        if "Python module: " in name:
             continue
 
         # Match the exceptional package paths first
@@ -332,7 +386,7 @@ def update_py_packages(rows, path_cmk_dir: Path, verbose=False) -> List[List[str
                 break
         if not path_match:
             if verbose:
-                print("Removing package: %s (%s)" % (name, path))
+                print(f"Removing package: {name} ({path})")
             drop_rows.append(row)
 
     rows = [x for x in rows if not x in drop_rows]
@@ -346,18 +400,18 @@ def update_py_packages(rows, path_cmk_dir: Path, verbose=False) -> List[List[str
         os.mkdir(path_tmp_dir)
         match_path = path_cmk_dir / path
         if "tar" in path:
-            os.system("tar xf %s --directory %s" % (match_path, path_tmp_dir))
+            os.system(f"tar xf {match_path} --directory {path_tmp_dir}")
         elif "zip" in path:
-            os.system("unzip -oq %s -d %s" % (match_path, path_tmp_dir))
+            os.system(f"unzip -oq {match_path} -d {path_tmp_dir}")
         elif "cab" in path:
-            os.system("cabextract -q %s -d %s" % (match_path, path_tmp_dir))
+            os.system(f"cabextract -q {match_path} -d {path_tmp_dir}")
         else:
             if verbose:
                 print("No extractable file found under: %s" % path)
             continue
 
         unzipped_dir: Path = path_tmp_dir / path_from_zipped(os.path.basename(path))
-        search_dirs: List[Path] = [unzipped_dir]
+        search_dirs: list[Path] = [unzipped_dir]
         is_pywinag = False
         if not os.path.isdir(unzipped_dir):
             # Handle Python packages included in the Windows agent
@@ -373,12 +427,13 @@ def update_py_packages(rows, path_cmk_dir: Path, verbose=False) -> List[List[str
 
                 if not pywinag_match:
                     name = "Python for Windows agent (PyWinAg)"
-                    version = re.sub(r"python-|%s" % "|".join(ZIP_ENDINGS), "",
-                                     os.path.basename(path))
+                    version = re.sub(
+                        r"python-|%s" % "|".join(ZIP_ENDINGS), "", os.path.basename(path)
+                    )
                     license_ = "Python-2.0"
                     license_link = license_links[license_] if license_ in license_links else ""
                     if verbose:
-                        print("Adding package: %s, %s (%s)" % (name, version, path))
+                        print(f"Adding package: {name}, {version} ({path})")
                     rows.append([name, version, license_, license_link, path])
 
                 # Search for *.dist-info and *.egg-info directories within the Python package
@@ -396,7 +451,7 @@ def update_py_packages(rows, path_cmk_dir: Path, verbose=False) -> List[List[str
             name = detect_name(path_pkg_dir, case_sensitive_names)
             if name == "check_mk":
                 if verbose:
-                    print("Skipping package: %s (%s)" % (name, path))
+                    print(f"Skipping package: {name} ({path})")
                 continue
             version = detect_version(path_pkg_dir, name)
             name = prepend_name(name, path)
@@ -411,9 +466,9 @@ def update_py_packages(rows, path_cmk_dir: Path, verbose=False) -> List[List[str
                     continue
 
             if verbose:
-                print("Adding package: %s, %s (%s)" % (name, version, path))
+                print(f"Adding package: {name}, {version} ({path})")
                 if "UNKN" in version or "UNKN" in license_:
-                    print("\t- unknown version or license: %s, %s" % (version, license_))
+                    print(f"\t- unknown version or license: {version}, {license_}")
             rows.append([name, version, license_, license_link, path])
 
     rmtree(path_tmp_dir)
@@ -421,34 +476,63 @@ def update_py_packages(rows, path_cmk_dir: Path, verbose=False) -> List[List[str
     for row in pywinag_entries:
         if row not in pywinag_matches:
             if verbose:
-                print("Removing package: %s (%s)" % (row[0], row[4]))
+                print(f"Removing package: {row[0]} ({row[4]})")
             rows.remove(row)
 
-    rows.sort(key=lambda x: x[0].lower())
-    return rows
+    return sorted(rows, key=lambda x: x[0].lower())
 
 
-def update_js_dependencies(rows) -> List[List[str]]:
+def update_js_dependencies(rows: list[list[str]], verbose: bool = False) -> list[list[str]]:
     print_separator()
-    print("Inspecting current Checkmk git on branch \"%s\" for js dependency update\n" %
-          os.popen("git branch --show-current").read().rstrip("\n"))
-
-    with os.popen("npx license-checker --json --start ../../") as os_output:
-        license_json = json.loads(os_output.read())
-
-    old_pkg_keys = ["%s@%s" % (row[0], row[1]) for row in rows]
+    print(
+        'Inspecting current Checkmk git on branch "%s" for js dependency update\n'
+        % os.popen("git branch --show-current").read().rstrip("\n")
+    )
     license_links = get_license_links()
 
+    with os.popen("npx license-checker --json --start ../../", "r", 1) as os_output:
+        license_json = json.loads(os_output.read())
+
+    found_rows: list[list[str]] = []
     for key, data in license_json.items():
-        if key in old_pkg_keys:
-            continue
         name = re.sub(r"@[^@]*$", "", key)
         version = re.sub(r"^.+@", "", key)
         license_ = data["licenses"]
         license_link = license_links[license_] if license_ in license_links else ""
-        rows.append([name, version, license_, license_link, ""])
-    rows.sort(key=lambda x: x[0].lower())
-    return rows
+        found_rows.append([name, version, license_, license_link, ""])
+
+    drop_rows: list[list[str]] = []
+    match: bool
+    frow: list[str] | None
+    for row in rows:
+        match = False
+        frow = None
+        for frow in found_rows:
+            if row[:2] == frow[:2]:
+                match = True
+                break
+            if row[0] == frow[0]:
+                if verbose:
+                    print(f"Removing package: {row[0]}, {row[1]} ({row[2]})")
+                    print(f"Adding package: {frow[0]}, {frow[1]} ({frow[2]})")
+                drop_rows.append(row)
+                rows.append(frow)
+                match = True
+                break
+        if match:
+            if frow:
+                found_rows.remove(frow)
+        else:
+            if verbose:
+                print(f"Removing package: {row[0]}, {row[1]} ({row[2]})")
+            drop_rows.append(row)
+
+    for frow in found_rows:
+        if verbose:
+            print(f"Adding package: {frow[0]}, {frow[1]} ({frow[2]})")
+        rows.append(frow)
+
+    return sorted([x for x in rows if not x in drop_rows], key=lambda x: x[0].lower())
 
 
 def write_to_csv(data, licenses_csv):
@@ -462,23 +546,28 @@ def write_to_csv(data, licenses_csv):
 
 
 def parse_arguments():
-    '''Argument parser for update licenses script handling the following arguments:
+    """Argument parser for update licenses script handling the following arguments:
     version     Set the Checkmk version for which licenses shall be updated.
     path        Provide a path to a local CheckMK source repository (instead of downloading)
-    '''
+    """
     parser = argparse.ArgumentParser(
-        description="Script for helping you update the list of licenses for any " +\
-            "given Checkmk source repository",
-        usage="./update_licenses [-h] [-v] [--path] [--version]")
-    parser.add_argument("--version",
-                        help="Set the Checkmk version for which licenses shall be updated.")
+        description="Script for helping you update the list of licenses for any "
+        + "given Checkmk source repository",
+        usage="./update_licenses [-h] [-v] [--path] [--version]",
+    )
+    parser.add_argument(
+        "--version", help="Set the Checkmk version for which licenses shall be updated."
+    )
     parser.add_argument(
         "--path",
-        help="Provide a path to a local CheckMK source repository (instead of downloading)")
-    parser.add_argument("-v",
-                        "--verbose",
-                        action="store_true",
-                        help="Write updated and missing package information to the terminal")
+        help="Provide a path to a local CheckMK source repository (instead of downloading)",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Write updated and missing package information to the terminal",
+    )
     parsed = parser.parse_args()
     if not parsed.path and not parsed.version:
         print("Either argument --path or --version needed. None given.\n")
@@ -486,6 +575,24 @@ def parse_arguments():
         sys.exit(2)
 
     return parsed
+
+
+def get_packages_from_pipfile(path_sources_dir) -> dict[str, str]:
+    pipfile_path: Path = Path(path_sources_dir / "Pipfile")
+    pipfile = Pipfile.load(filename=pipfile_path)
+    data: dict[str, str] = pipfile.data["default"]
+    delete_keys: list[str] = []
+
+    for k, d in data.items():
+        if isinstance(d, str) and d.startswith("=="):
+            data[k] = re.sub("^==", "", d)
+        else:
+            delete_keys.append(k)
+
+    for k in delete_keys:
+        del data[k]
+
+    return data
 
 
 def main(args):
@@ -511,7 +618,7 @@ def main(args):
         raise OSError
 
     old_data = []
-    with open(licenses_csv, "r") as csv_file:
+    with open(licenses_csv) as csv_file:
         for line in csv.reader(csv_file):
             old_data.append(line)
 
@@ -527,7 +634,7 @@ def main(args):
         needle = section_needles[section_idx]
         if set(needle) <= set(line):  # if A is a subset of B
             if section_idx > 0:
-                data_per_section[section_idx - 1].append(old_data[start:idx - 1])
+                data_per_section[section_idx - 1].append(old_data[start : idx - 1])
             start = idx + 1
             data_per_section.append([line])
             if section_idx == len(section_needles) - 1:
@@ -535,9 +642,10 @@ def main(args):
                 break
             section_idx += 1
 
-    data_per_section[0][1] = update_py_packages(data_per_section[0][1], path_sources_dir,
-                                                args.verbose)
-    data_per_section[3][1] = update_js_dependencies(data_per_section[3][1])
+    data_per_section[0][1] = update_py_packages(
+        data_per_section[0][1], path_sources_dir, args.verbose
+    )
+    data_per_section[3][1] = update_js_dependencies(data_per_section[3][1], args.verbose)
     write_to_csv(data_per_section, licenses_csv)
 
     if not args.path:

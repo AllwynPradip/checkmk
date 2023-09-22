@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Callable, Dict, List, Generator, Mapping, Optional, Tuple, Union
-from .agent_based_api.v1.type_defs import InventoryResult, StringTable
-
 import time
+from collections.abc import Callable, Generator, Mapping
 
 from .agent_based_api.v1 import Attributes, register, TableRow
+from .agent_based_api.v1.type_defs import InventoryResult, StringTable
 
-Section = List[Tuple[str, StringTable]]
+Section = list[tuple[str, StringTable]]
 
-Converter = Union[str, Tuple[str, Callable[[str], Union[str, float, None]]]]
+Converter = str | tuple[str, Callable[[str], str | float | None]]
 
 
 def parse_dmidecode(string_table: StringTable) -> Section:
@@ -111,13 +109,13 @@ def inventory_dmidecode(section: Section) -> InventoryResult:
     # by multiple "Memory Device" sections. Keep track of which belongs where:
     memory_array_number = 0
     for title, lines in section:
-        memory_array_number += (title == "Physical Memory Array")
+        memory_array_number += title == "Physical Memory Array"
         yield from _dispatch_subsection(title, lines, memory_array_number)
 
 
 def _dispatch_subsection(
     title: str,
-    lines: List[List[str]],
+    lines: list[list[str]],
     memory_array_number: int,
 ) -> InventoryResult:
     if title == "BIOS Information":
@@ -145,59 +143,68 @@ def _dispatch_subsection(
         return
 
 
-def _make_inventory_bios(lines: List[List[str]]) -> Attributes:
+def _make_inventory_bios(lines: list[list[str]]) -> Attributes:
     return Attributes(
         path=["software", "bios"],
         inventory_attributes=_make_dict(
-            lines, {
+            lines,
+            {
                 "Vendor": "vendor",
                 "Version": "version",
                 "Release Date": ("date", _parse_date),
                 "BIOS Revision": "revision",
                 "Firmware Revision": "firmware",
-            }),
+            },
+        ),
     )
 
 
-def _make_inventory_system(lines: List[List[str]]) -> Attributes:
+def _make_inventory_system(lines: list[list[str]]) -> Attributes:
     return Attributes(
         path=["hardware", "system"],
         inventory_attributes=_make_dict(
-            lines, {
+            lines,
+            {
                 "Manufacturer": "manufacturer",
                 "Product Name": "product",
                 "Version": "version",
                 "Serial Number": "serial",
                 "UUID": "uuid",
                 "Family": "family",
-            }),
+            },
+        ),
     )
 
 
-def _make_inventory_chassis(lines: List[List[str]]) -> Attributes:
+def _make_inventory_chassis(lines: list[list[str]]) -> Attributes:
     return Attributes(
         path=["hardware", "chassis"],
-        inventory_attributes=_make_dict(lines, {
-            "Manufacturer": "manufacturer",
-            "Type": "type",
-        }),
+        inventory_attributes=_make_dict(
+            lines,
+            {
+                "Manufacturer": "manufacturer",
+                "Type": "type",
+            },
+        ),
     )
 
 
 # Note: This node is also being filled by lnx_cpuinfo
-def _make_inventory_processor(lines: List[List[str]]) -> Generator[Attributes, None, None]:
+def _make_inventory_processor(lines: list[list[str]]) -> Generator[Attributes, None, None]:
     vendor_map = {
         "GenuineIntel": "intel",
         "Intel(R) Corporation": "intel",
         "AuthenticAMD": "amd",
     }
     cpu_info = _make_dict(
-        lines, {
+        lines,
+        {
             "Manufacturer": ("vendor", lambda v: vendor_map.get(v, v)),
             "Max Speed": ("max_speed", _parse_speed),
             "Voltage": ("voltage", _parse_voltage),
             "Status": "status",
-        })
+        },
+    )
 
     if cpu_info.pop("Status", "") == "Unpopulated":
         # Only update our CPU information if the socket is populated
@@ -209,22 +216,24 @@ def _make_inventory_processor(lines: List[List[str]]) -> Generator[Attributes, N
     )
 
 
-def _make_inventory_physical_mem_array(lines: List[List[str]], array_number: int) -> Attributes:
+def _make_inventory_physical_mem_array(lines: list[list[str]], array_number: int) -> Attributes:
     # We expect several possible arrays
     return Attributes(
-        path=["hardware", "memory", f"array_{array_number}"],
+        path=["hardware", "memory", "arrays", str(array_number)],
         inventory_attributes=_make_dict(
-            lines, {
+            lines,
+            {
                 "Location": "location",
                 "Use": "use",
                 "Error Correction Type": "error_correction",
                 "Maximum Capacity": ("maximum_capacity", _parse_size),
-            }),
+            },
+        ),
     )
 
 
 def _make_inventory_mem_device(
-    lines: List[List[str]],
+    lines: list[list[str]],
     array_number: int,
 ) -> Generator[TableRow, None, None]:
     device = _make_dict(
@@ -252,19 +261,19 @@ def _make_inventory_mem_device(
     device["speed"] = _parse_speed(device.get("speed", "Unknown"))  # type: ignore[arg-type]
     device["size"] = _parse_size(device.get("size", "Unknown"))  # type: ignore[arg-type]
 
-    key_keys = ['set']  # match hp_proliant_mem!
+    key_keys = ["set"]  # match hp_proliant_mem!
     yield TableRow(
-        path=["hardware", "memory", f"array_{array_number}", "devices"],
+        path=["hardware", "memory", "arrays", str(array_number), "devices"],
         key_columns={k: device.pop(k) for k in key_keys},
         inventory_columns=device,
     )
 
 
 def _make_dict(
-    lines: List[List[str]],
+    lines: list[list[str]],
     converter_map: Mapping[str, Converter],
-) -> Dict[str, Union[float, str, None]]:
-    dict_: Dict[str, Union[float, str, None]] = {}
+) -> dict[str, float | str | None]:
+    dict_: dict[str, float | str | None] = {}
     for name, raw_value, *_rest in lines:
         if name not in converter_map or raw_value == "Not Specified":
             continue
@@ -296,14 +305,14 @@ register.inventory_plugin(
 #
 
 
-def _parse_date(value: str) -> Optional[float]:
+def _parse_date(value: str) -> float | None:
     try:
         return time.mktime(time.strptime(value, "%m/%d/%Y"))
     except ValueError:
         return None
 
 
-def _parse_size(v: str) -> Optional[float]:  # into Bytes (int)
+def _parse_size(v: str) -> float | None:  # into Bytes (int)
     if not v or v == "Unknown":
         return None
 
@@ -319,7 +328,7 @@ def _parse_size(v: str) -> Optional[float]:  # into Bytes (int)
     return int(parts[0])
 
 
-def _parse_speed(v: str) -> Optional[float]:  # into Hz (float)
+def _parse_speed(v: str) -> float | None:  # into Hz (float)
     if not v or v == "Unknown":
         return None
 
@@ -335,7 +344,7 @@ def _parse_speed(v: str) -> Optional[float]:  # into Hz (float)
     return None
 
 
-def _parse_voltage(v: str) -> Optional[float]:
+def _parse_voltage(v: str) -> float | None:
     if not v or v == "Unknown":
         return None
 

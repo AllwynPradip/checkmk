@@ -1,25 +1,29 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import abc
+import os
 import signal
+from contextlib import redirect_stdout
 from types import FrameType
-from typing import NoReturn, Dict, Any, List, Optional
+from typing import Any, NoReturn
 
 import cmk.utils.debug
-from cmk.utils.exceptions import MKTimeout
-from cmk.utils.plugin_loader import load_plugins
-from cmk.utils.exceptions import MKException
-import cmk.utils.python_printer as python_printer
+import cmk.utils.log as log
+import cmk.utils.paths as paths
+from cmk.utils import version as cmk_version
+from cmk.utils.exceptions import MKException, MKTimeout
 from cmk.utils.log import console
+from cmk.utils.plugin_loader import import_plugins
 
-import cmk.base.config as config
-import cmk.base.profiling as profiling
+from cmk.automations.results import ABCAutomationResult
+
 import cmk.base.check_api as check_api
+import cmk.base.config as config
 import cmk.base.obsolete_output as out
+import cmk.base.profiling as profiling
 
 
 # TODO: Inherit from MKGeneralException
@@ -29,15 +33,15 @@ class MKAutomationError(MKException):
 
 class Automations:
     def __init__(self) -> None:
-        super(Automations, self).__init__()
-        self._automations: Dict[str, Automation] = {}
+        super().__init__()
+        self._automations: dict[str, Automation] = {}
 
-    def register(self, automation: 'Automation') -> None:
+    def register(self, automation: "Automation") -> None:
         if automation.cmd is None:
             raise TypeError()
         self._automations[automation.cmd] = automation
 
-    def execute(self, cmd: str, args: List[str]) -> Any:
+    def execute(self, cmd: str, args: list[str]) -> Any:
         self._handle_generic_arguments(args)
 
         try:
@@ -47,7 +51,13 @@ class Automations:
                 raise MKAutomationError("Automation command '%s' is not implemented." % cmd)
 
             if automation.needs_checks:
-                config.load_all_agent_based_plugins(check_api.get_check_api_context)
+                with redirect_stdout(open(os.devnull, "w")):
+                    log.setup_console_logging()
+                    config.load_all_plugins(
+                        check_api.get_check_api_context,
+                        local_checks_dir=paths.local_checks_dir,
+                        checks_dir=paths.checks_dir,
+                    )
 
             if automation.needs_config:
                 config.load(validate_hosts=False)
@@ -69,12 +79,12 @@ class Automations:
         finally:
             profiling.output_profile()
 
-        out.output(python_printer.pformat(result))
-        out.output('\n')
+        out.output(result.serialize(cmk_version.Version.from_str(cmk_version.__version__)))
+        out.output("\n")
 
         return 0
 
-    def _handle_generic_arguments(self, args: List[str]) -> None:
+    def _handle_generic_arguments(self, args: list[str]) -> None:
         """Handle generic arguments (currently only the optional timeout argument)"""
         if len(args) > 1 and args[0] == "--timeout":
             args.pop(0)
@@ -84,18 +94,18 @@ class Automations:
                 signal.signal(signal.SIGALRM, self._raise_automation_timeout)
                 signal.alarm(timeout)
 
-    def _raise_automation_timeout(self, signum: int, stackframe: Optional[FrameType]) -> NoReturn:
+    def _raise_automation_timeout(self, signum: int, stackframe: FrameType | None) -> NoReturn:
         raise MKTimeout("Action timed out.")
 
 
-class Automation(metaclass=abc.ABCMeta):
-    cmd: Optional[str] = None
+class Automation(abc.ABC):
+    cmd: str | None = None
     needs_checks = False
     needs_config = False
 
     @abc.abstractmethod
-    def execute(self, args: List[str]) -> Any:
-        raise NotImplementedError()
+    def execute(self, args: list[str]) -> ABCAutomationResult:
+        ...
 
 
 #
@@ -104,4 +114,4 @@ class Automation(metaclass=abc.ABCMeta):
 
 automations = Automations()
 
-load_plugins(__file__, __package__)
+import_plugins(__file__, __package__)

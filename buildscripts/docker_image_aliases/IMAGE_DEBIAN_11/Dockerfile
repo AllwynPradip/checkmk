@@ -1,0 +1,1 @@
+FROM artifacts.lan.tribe29.com:4000/debian@sha256:da1a55850480753941bb8aff55935742562aca344adac8544799e6551b4fe802

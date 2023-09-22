@@ -1,44 +1,41 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """Render functions for check development
 
 These are meant to be exposed in the API
 """
-from typing import Iterable, Optional, Tuple
 import math
 import time
+from collections.abc import Iterable
 
 _DATE_FORMAT = "%b %d %Y"
 
 _TIME_UNITS = [
-    ('years', 31536000),
-    ('days', 86400),
-    ('hours', 3600),
-    ('minutes', 60),
-    ('seconds', 1),
-    ('milliseconds', 1e-3),
-    ('microseconds', 1e-6),
-    ('nanoseconds', 1e-9),
-    ('picoseconds', 1e-12),
-    ('femtoseconds', 1e-15),
+    ("years", 31536000),
+    ("days", 86400),
+    ("hours", 3600),
+    ("minutes", 60),
+    ("seconds", 1),
+    ("milliseconds", 1e-3),
+    ("microseconds", 1e-6),
+    ("nanoseconds", 1e-9),
+    ("picoseconds", 1e-12),
+    ("femtoseconds", 1e-15),
     # and while we're at it:
-    ('attoseconds', 1e-18),
-    ('zeptoseconds', 1e-21),
-    ('yoctoseconds', 1e-24),
+    ("attoseconds", 1e-18),
+    ("zeptoseconds", 1e-21),
+    ("yoctoseconds", 1e-24),
 ]
 
 # Karl Marx Gave The Proletariat Eleven Zeppelins, Yo!
-_SIZE_PREFIXES_SI = ['', 'k', 'M', 'G', 'T', 'P', 'E', 'Z', 'Y']
+_SIZE_PREFIXES_SI = ["", "k", "M", "G", "T", "P", "E", "Z", "Y"]
 _SIZE_PREFIXES_IEC = _SIZE_PREFIXES_SI[:]
-_SIZE_PREFIXES_IEC[1] = 'K'
-
-_PERCENT_MAX_DIGITS = 12  # arbitrarily chosen, and borderline ridiculous.
+_SIZE_PREFIXES_IEC[1] = "K"
 
 
-def date(epoch: Optional[float]) -> str:
+def date(epoch: float | None) -> str:
     """Render seconds since epoch as date
 
     Example:
@@ -54,7 +51,7 @@ def date(epoch: Optional[float]) -> str:
     return time.strftime(_DATE_FORMAT, time.localtime(float(epoch)))
 
 
-def datetime(epoch: Optional[float]) -> str:
+def datetime(epoch: float | None) -> str:
     """Render seconds since epoch as date and time
 
     Example:
@@ -80,10 +77,10 @@ def _gen_timespan_chunks(seconds: float, nchunks: int) -> Iterable[str]:
     except StopIteration:
         start = len(_TIME_UNITS) - 1
 
-    for unit, scale in _TIME_UNITS[start:start + nchunks]:
+    for unit, scale in _TIME_UNITS[start : start + nchunks]:
         last_chunk = unit.endswith("seconds")
         value = (round if last_chunk else int)(seconds / scale)  # type: ignore[operator]
-        yield "%.0f %s" % (value, unit if value != 1 else unit[:-1])
+        yield f"{value:.0f} {unit if value != 1 else unit[:-1]}"
         if last_chunk:
             break
         seconds %= scale
@@ -92,11 +89,19 @@ def _gen_timespan_chunks(seconds: float, nchunks: int) -> Iterable[str]:
 def timespan(seconds: float) -> str:
     """Render a time span in seconds
 
+    unaware of leap-years...
+
     Example:
         >>> timespan(1606721)
         '18 days 14 hours'
         >>> timespan(0.0001)
         '100 microseconds'
+        >>> timespan(24*60*60)
+        '1 day 0 hours'
+        >>> timespan(365*24*60*60)
+        '1 year 0 days'
+        >>> timespan(100*365*24*60*60)
+        '100 years 0 days'
 
     """
     ts = " ".join(_gen_timespan_chunks(float(seconds), nchunks=2))
@@ -119,7 +124,7 @@ def _digits_left(value: float) -> int:
         return 1
 
 
-def _auto_scale(value: float, use_si_units: bool, add_bytes_prefix: bool = True) -> Tuple[str, str]:
+def _auto_scale(value: float, use_si_units: bool, add_bytes_prefix: bool = True) -> tuple[str, str]:
     if use_si_units:
         base = 1000
         size_prefixes = _SIZE_PREFIXES_SI
@@ -135,7 +140,7 @@ def _auto_scale(value: float, use_si_units: bool, add_bytes_prefix: bool = True)
     exponent = min(max(log_value, 0), len(size_prefixes) - 1)
     unit = size_prefixes[exponent]
     if add_bytes_prefix:
-        unit = (unit + ("B" if use_si_units else "iB")).lstrip('i')
+        unit = (unit + ("B" if use_si_units else "iB")).lstrip("i")
     scaled_value = float(value) / base**exponent
     fmt = "%%.%df" % max(3 - _digits_left(scaled_value), 0)
     return fmt % scaled_value, unit
@@ -159,7 +164,7 @@ def disksize(bytes_: float) -> str:
       '1.02 kB'
     """
     value_str, unit = _auto_scale(float(bytes_), use_si_units=True)
-    return "%s %s" % (value_str if unit != "B" else value_str.split('.')[0], unit)
+    return "{} {}".format(value_str if unit != "B" else value_str.split(".")[0], unit)
 
 
 def bytes(bytes_: float) -> str:  # pylint: disable=redefined-builtin
@@ -170,7 +175,7 @@ def bytes(bytes_: float) -> str:  # pylint: disable=redefined-builtin
       '1.00 MiB'
     """
     value_str, unit = _auto_scale(float(bytes_), use_si_units=False)
-    return "%s %s" % (value_str if unit != "B" else value_str.split('.')[0], unit)
+    return "{} {}".format(value_str if unit != "B" else value_str.split(".")[0], unit)
 
 
 def filesize(bytes_: float) -> str:
@@ -183,8 +188,8 @@ def filesize(bytes_: float) -> str:
     val_str = "%.0f" % float(bytes_)
     offset = len(val_str) % 3
 
-    groups = [val_str[0:offset]] + [val_str[i:i + 3] for i in range(offset, len(val_str), 3)]
-    return "%s B" % ','.join(groups).strip(',')
+    groups = [val_str[0:offset]] + [val_str[i : i + 3] for i in range(offset, len(val_str), 3)]
+    return "%s B" % ",".join(groups).strip(",")
 
 
 def networkbandwidth(octets_per_sec: float) -> str:
@@ -201,9 +206,9 @@ def nicspeed(octets_per_sec: float) -> str:
 
     """
     value_str, unit = _auto_scale(float(octets_per_sec) * 8, use_si_units=True)
-    if '.' in value_str:
+    if "." in value_str:
         value_str = value_str.rstrip("0").rstrip(".")
-    return "%s %sit/s" % (value_str, unit)
+    return f"{value_str} {unit}it/s"
 
 
 def iobandwidth(bytes_: float) -> str:

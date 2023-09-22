@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
+# This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
+# conditions defined in the file COPYING, which is part of this source code package.
+
+from cmk.gui.http import request
+from cmk.gui.i18n import _
+from cmk.gui.utils.urls import makeuri_contextless
+
+from .base import Icon
+
+
+class ShowParentChildTopology(Icon):
+    @classmethod
+    def ident(cls):
+        return "parent_child_topology"
+
+    @classmethod
+    def title(cls) -> str:
+        return _("Network Topology")
+
+    def host_columns(self):
+        return ["name"]
+
+    def default_sort_index(self):
+        return 51
+
+    def render(  # type: ignore[no-untyped-def]
+        self, what, row, tags, custom_vars
+    ) -> tuple[str, str, str]:
+        url = makeuri_contextless(
+            request,
+            [("host_name", row["host_name"])],
+            filename="parent_child_topology.py",
+        )
+        return "aggr", _("Host Parent/Child topology"), url

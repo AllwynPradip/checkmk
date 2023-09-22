@@ -1,45 +1,116 @@
+# Describes stages for test-gerrit Job
+
 # some thoughts about this file:
 # - stages should abort early if semantical condition is not met
-# - stages should be sorted by propability to fail * duration
-# - `make` is not needed at this level (but make-target could still call verify_changes)
+# - stages should be sorted by probability to fail * duration
+# - `make` is not needed at this level (but make-target could still call validate_changes.py)
 # - running inside docker should be optional
 # - some variables are not needed
 
 VARIABLES:
+    - NAME: PATCHSET_REVISION
+      # Will be used if not provided by Jenkins
+      SH: "git rev-parse HEAD"
+
+    - NAME: BASE_COMMIT_ID
+      # Can be provided directly instead of PATCHSET_REVISION in order to compare HEAD against
+      # arbitrary refs like `origin/master`
+      SH: "git rev-parse ${PATCHSET_REVISION}^"
+
     - NAME: CHANGED_FILES_REL
-      SH: "git diff-tree --no-commit-id --name-only -r ${PATCHSET_REVISION} | sed -E 's#(enterprise|managed)/cmk/#cmk/#g' | sort"
+      SH: "git diff-tree --no-commit-id --name-only -r ${BASE_COMMIT_ID}..HEAD | sed -E 's#(enterprise|managed|cloud)/cmk/#cmk/#g' | sort"
 
-    - NAME: CHANGED_FILES_ABS
-      SH: "echo '${CHANGED_FILES_REL}' | sed 's|^|${WORKSPACE}/|g'"
+    - NAME: CHANGED_MAKEFILE
+      SH: "echo '${CHANGED_FILES_REL}' | grep '^Makefile' - || true"
 
-    - NAME: GREP_PATTERNS
-      SH: "echo '${CHANGED_FILES_ABS}' | sed 's/^/-e /g'"
-      REPLACE_NEWLINES: true
+    - NAME: CHANGED_TESTS_MAKEFILE
+      SH: "echo '${CHANGED_FILES_REL}' | grep '^tests/Makefile' - || true"
 
     - NAME: CHANGED_PYTHON_FILES
-      SH: "${WORKSPACE}/scripts/find-python-files | grep -h ${GREP_PATTERNS} - | sort"
+      SH: "git diff-tree --no-commit-id --name-only -r ${BASE_COMMIT_ID}..HEAD | xargs realpath | ${WORKSPACE}/scripts/find-python-files --filter"
+
+    - NAME: CHANGED_SHELL_FILES
+      SH: "git diff-tree --no-commit-id --name-only -r ${BASE_COMMIT_ID}..HEAD | xargs realpath | ${WORKSPACE}/scripts/find-shell-files --filter"
+
+    - NAME: CHANGED_AGENT_CONTROLLER_FILES
+      SH: "echo '${CHANGED_FILES_REL}' | grep '^packages/cmk-agent-ctl/' || true"
+
+    - NAME: CHANGED_SQL_CHECK_FILES
+      SH: "echo '${CHANGED_FILES_REL}' | grep '^packages/database_checks/sql_check/' || true"
 
     - NAME: CHANGED_PYLINT_RC_FILE
-      SH: "echo '${CHANGED_FILES_ABS}' | grep -h '${WORKSPACE}/.pylintrc' - || true"
+      SH: "echo '${CHANGED_FILES_REL}' | grep '^\\.pylintrc' - || true"
 
-      # Gather the list of changed agent plugins
+    - NAME: CHANGED_PYPROJECT_TOML_FILE
+      SH: "echo '${CHANGED_FILES_REL}' | grep '^pyproject.toml' - || true"
+
+    - NAME: CHANGED_PIPFILE
+      SH: "echo '${CHANGED_FILES_REL}' | grep '^Pipfile' - || true"
+
+    - NAME: CHANGED_PIPFILE_LOCK
+      SH: "echo '${CHANGED_FILES_REL}' | grep '^Pipfile.lock' - || true"
+
+    - NAME: CHANGED_RUN_BLACK_SCRIPT
+      SH: "echo '${CHANGED_FILES_REL}' | grep '^scripts/run-black' - || true"
+
+    - NAME: CHANGED_RUN_MYPY_SCRIPT
+      SH: "echo '${CHANGED_FILES_REL}' | grep '^scripts/run-mypy' - || true"
+
+    - NAME: CHANGED_RUN_PIPENV_SCRIPT
+      SH: "echo '${CHANGED_FILES_REL}' | grep '^scripts/run-pipenv' - || true"
+
+    - NAME: CHANGED_RUN_PRETTIER_SCRIPT
+      SH: "echo '${CHANGED_FILES_REL}' | grep '^scripts/run-prettier' - || true"
+
+    - NAME: CHANGED_RUN_JS_LINT_SCRIPT
+      SH: "echo '${CHANGED_FILES_REL}' | grep '^scripts/check-js-lint.sh' - || true"
+
+    - NAME: CHANGED_RUN_TYPESCRIPT_TYPES_SCRIPT
+      SH: "echo '${CHANGED_FILES_REL}' | grep '^scripts/check-typescript-types.sh' - || true"
+
+    - NAME: CHANGED_TYPESCRIPT_CONFIG
+      SH: "echo '${CHANGED_FILES_REL}' | grep '^tsconfig.*.json' - || true"
+
+    - NAME: CHANGED_BAZEL_FILES
+      SH: "echo '${CHANGED_FILES_REL}' | grep -e '\\.bzl$' -e '^BUILD.*' || true"
+
+    - NAME: CHANGED_WEBPACK_CONFIG
+      SH: "echo '${CHANGED_FILES_REL}' | grep '^webpack.config.js' - || true"
+
     - NAME: CHANGED_AGENT_PLUGINS
       SH: "echo '${CHANGED_FILES_REL}' | grep '^agents/plugins/' || true"
       REPLACE_NEWLINES: true
 
-      # Gather the list of changed agent plugins unit tests
     - NAME: CHANGED_AGENT_PLUGINS_TESTS
       SH: "echo '${CHANGED_FILES_REL}' | grep '^tests/agent-plugin-unit/' || true"
       REPLACE_NEWLINES: true
 
-      # Gather the list of changed livestatus / core files
-    - NAME: CHANGED_CORE_FILES
-      SH: "echo '${CHANGED_FILES_REL}' | grep -e '^livestatus' -e '^enterprise/core' || true"
+    - NAME: CHANGED_UNIXCAT_FILES
+      SH: "echo '${CHANGED_FILES_REL}' | grep '^packages/unixcat/' || true"
       REPLACE_NEWLINES: true
 
-      # Gather the list of changed JavaScript and CSS files in raw and enterprise edition
+    - NAME: CHANGED_LIVESTATUS_FILES
+      SH: "echo '${CHANGED_FILES_REL}' | grep '^packages/livestatus/' || true"
+      REPLACE_NEWLINES: true
+
+    - NAME: CHANGED_NEB_FILES
+      SH: "echo '${CHANGED_FILES_REL}' | grep '^packages/neb/' || true"
+      REPLACE_NEWLINES: true
+
+    - NAME: CHANGED_CMC_FILES
+      SH: "echo '${CHANGED_FILES_REL}' | grep '^packages/cmc' || true"
+      REPLACE_NEWLINES: true
+
+    - NAME: CHANGED_CMC_PROTO_FILES
+      SH: "echo '${CHANGED_FILES_REL}' | grep '^enterprise/protocols/checkmk/cmc' || true"
+      REPLACE_NEWLINES: true
+
     - NAME: CHANGED_JS_FILES
-      SH: "echo '${CHANGED_FILES_REL}' | grep 'web/htdocs/js/' || true"
+      SH: "echo '${CHANGED_FILES_REL}' | grep '^web/htdocs/js/\\|\\.js$\\|\\.ts$' || true"
+      REPLACE_NEWLINES: true
+
+    - NAME: CHANGED_NPM_NODE_SETUP
+      SH: "echo '${CHANGED_FILES_REL}' | grep -e 'package\\(-lock\\)\\?.json$' -e '^scripts/npm-ci$' || true"
       REPLACE_NEWLINES: true
 
     - NAME: CHANGED_CSS_FILES
@@ -50,141 +121,258 @@ VARIABLES:
       SH: "echo '${CHANGED_FILES_REL}' | grep 'doc/documentation/' || true"
       REPLACE_NEWLINES: true
 
+    - NAME: CHANGED_WERK_FILES
+      SH: "echo '${CHANGED_FILES_REL}' | grep '.werks/' || true"
+      REPLACE_NEWLINES: true
+
+    - NAME: CHANGED_CHECKMAN_FILES
+      SH: "echo '${CHANGED_FILES_REL}' | grep 'checkman/' || true"
+      REPLACE_NEWLINES: true
+
+    - NAME: CHANGED_ASIO_FILES
+      SH: "echo '${CHANGED_FILES_REL}' | grep '^third_party/asio' - || true"
+
+    - NAME: CHANGED_GOOGLETEST_FILES
+      SH: "echo '${CHANGED_FILES_REL}' | grep '^third_party/googletest' - || true"
+
+    - NAME: CHANGED_RE2_FILES
+      SH: "echo '${CHANGED_FILES_REL}' | grep '^third_party/re2' - || true"
+
+    - NAME: CHANGED_IMAGE_TESTING
+      SH: "echo '${CHANGED_FILES_REL}' | grep 'buildscripts/docker_image_aliases/IMAGE_TESTING/' - || true"
+
 STAGES:
     - NAME: 'Python Typing'
-      ONLY_WHEN_NOT_EMPTY: CHANGED_PYTHON_FILES
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_PYTHON_FILES,CHANGED_PIPFILE_LOCK,CHANGED_TESTS_MAKEFILE,CHANGED_RUN_PIPENV_SCRIPT,CHANGED_RUN_MYPY_SCRIPT
       DIR: 'tests'
       ENV_VARS:
-        JUNIT_XML: "--junit-xml ${RESULTS}/mypy.xml"
-      COMMAND: 'make --quiet test-mypy-docker'
+        MYPY_ADDOPTS: "--no-color-output --junit-xml ${RESULTS}/mypy.xml"
+      COMMAND: 'make --quiet test-mypy-docker &> ${RESULTS}/python-typing.txt'
       TEXT_ON_SKIP: 'No Python files changed'
+      RESULT_CHECK_TYPE: "MYPY"
+      RESULT_CHECK_FILE_PATTERN: "results/python-typing.txt"
 
     - NAME: 'Python Format'
-      ONLY_WHEN_NOT_EMPTY: CHANGED_PYTHON_FILES
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_PYTHON_FILES,CHANGED_PIPFILE_LOCK,CHANGED_PYPROJECT_TOML_FILE,CHANGED_TESTS_MAKEFILE,CHANGED_RUN_PIPENV_SCRIPT,CHANGED_RUN_BLACK_SCRIPT
       DIR: 'tests'
       ENV_VARS:
         PYTHON_FILES: "${CHANGED_PYTHON_FILES}"
-      COMMAND: "make --quiet test-format-python-docker &> ${RESULTS}/python-yapf.txt"
+      COMMAND: "make --quiet test-format-python-docker &> ${RESULTS}/python-format.txt"
       TEXT_ON_SKIP: 'No Python files changed'
+      RESULT_CHECK_TYPE: "GCC"
+      RESULT_CHECK_FILE_PATTERN: "results/python-format.txt"
 
-    - NAME: 'Python Unit Test'
-      ONLY_WHEN_NOT_EMPTY: CHANGED_PYTHON_FILES
+    - NAME: 'Python Cyclic Dependencies'
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_TESTS_MAKEFILE,CHANGED_PIPFILE_LOCK,CHANGED_PYTHON_FILES
+      DIR: 'tests'
+      COMMAND: 'make test-cycles-docker &> ${RESULTS}/py-import-cycles.txt'
+      TEXT_ON_SKIP: 'No Python files changed'
+      RESULT_CHECK_FILE_PATTERN: "results/py-import-cycles.txt"
+
+    - NAME: 'Python Unit Tests'
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_PYTHON_FILES,CHANGED_PIPFILE_LOCK,CHANGED_PYPROJECT_TOML_FILE,CHANGED_TESTS_MAKEFILE,CHANGED_RUN_PIPENV_SCRIPT,CHANGED_CHECKMAN_FILES
       DIR: 'tests'
       ENV_VARS:
-        PYTEST_ADDOPTS: "--junitxml=${RESULTS}/python3-unit-junit.xml"
+        PYTEST_ADDOPTS: "--junitxml=${RESULTS}/python3-unit-junit.xml --color=no"
       COMMAND: "make test-unit-docker"
       TEXT_ON_SKIP: 'No Python files changed'
+      RESULT_CHECK_TYPE: "JUNIT"
+      RESULT_CHECK_FILE_PATTERN: "results/python3-unit-junit.xml"
 
-    - NAME: 'Python Linting'
-      ONLY_WHEN_NOT_EMPTY: CHANGED_PYLINT_RC_FILE,CHANGED_PYTHON_FILES
+    - NAME: 'Python License Headers Test'
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_PYTHON_FILES
       DIR: 'tests'
       ENV_VARS:
-        # this variable is needed as long as we have base plugins that are
-        # concantenated for pylint (See tests/pylint/test_pylint.py)
-        WORKDIR: "${WORKSPACE}/tmp"
-        PYLINT_ARGS: "--output-format=cmk_parseable"
+        PYTEST_ADDOPTS: "--junitxml=${RESULTS}/python3-license-headers-junit.xml --color=no"
+        PYTHON_FILES: "${CHANGED_PYTHON_FILES}"
+      COMMAND: "make test-license-headers-docker"
+      TEXT_ON_SKIP: 'No Python files changed'
+      RESULT_CHECK_TYPE: "JUNIT"
+      RESULT_CHECK_FILE_PATTERN: "results/python3-license-headers-junit.xml"
+
+    - NAME: 'Python Pipfile Test'
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_PIPFILE,CHANGED_PIPFILE_LOCK,CHANGED_PYTHON_FILES
+      DIR: 'tests'
+      ENV_VARS:
+        PYTEST_ADDOPTS: "--junitxml=${RESULTS}/python3-pipfile-junit.xml --color=no"
+      COMMAND: "make test-pipfile-docker"
+      TEXT_ON_SKIP: 'Pipfile and Pipfile.lock files not changed'
+      RESULT_CHECK_TYPE: "JUNIT"
+      RESULT_CHECK_FILE_PATTERN: "results/python3-pipfile-junit.xml"
+
+    - NAME: 'Python File Content Test'
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_FILES_REL
+      DIR: 'tests'
+      ENV_VARS:
+        PYTEST_ADDOPTS: "--junitxml=${RESULTS}/python3-file-content-junit.xml --color=no"
+        CHANGED_FILES_REL: "${CHANGED_FILES_REL}"
+      COMMAND: "make test-file-content-docker"
+      TEXT_ON_SKIP: 'No files changed'
+      RESULT_CHECK_TYPE: "JUNIT"
+      RESULT_CHECK_FILE_PATTERN: "results/python3-file-content-junit.xml"
+
+    - NAME: 'Python Werks Test'
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_WERK_FILES
+      DIR: 'tests'
+      ENV_VARS:
+        PYTEST_ADDOPTS: "--junitxml=${RESULTS}/python3-werks-junit.xml --color=no"
+      COMMAND: "make test-werks-docker"
+      TEXT_ON_SKIP: 'No Werk files changed'
+      RESULT_CHECK_TYPE: "JUNIT"
+      RESULT_CHECK_FILE_PATTERN: "results/python3-werks-junit.xml"
+
+    - NAME: 'Python Pylint'
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_PYLINT_RC_FILE,CHANGED_PYTHON_FILES,CHANGED_PIPFILE_LOCK,CHANGED_PYPROJECT_TOML_FILE,CHANGED_TESTS_MAKEFILE,CHANGED_RUN_PIPENV_SCRIPT
+      DIR: 'tests'
+      ENV_VARS:
+        PYLINT_ARGS: "--jobs=10 --output-format=parseable"
       COMMAND: "make test-pylint-docker &> ${RESULTS}/pylint.txt"
       TEXT_ON_SKIP: 'Neither .pylintrc nor Python files changed'
+      RESULT_CHECK_TYPE: "PYLINT"
+      RESULT_CHECK_FILE_PATTERN: "results/pylint.txt"
+
+    - NAME: 'Python Bandit'
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_PYTHON_FILES,CHANGED_PIPFILE_LOCK,CHANGED_PYPROJECT_TOML_FILE,CHANGED_TESTS_MAKEFILE,CHANGED_RUN_PIPENV_SCRIPT
+      DIR: 'tests'
+      ENV_VARS:
+          BANDIT_OUTPUT_ARGS: "-f xml -o ${RESULTS}/bandit_results.xml"
+      COMMAND: "make test-bandit-docker"
+      TEXT_ON_SKIP: 'No Python files changed'
+      RESULT_CHECK_TYPE: "JUNIT"
+      RESULT_CHECK_FILE_PATTERN: "results/bandit_results.xml"
 
     - NAME: 'Shell Format'
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_SHELL_FILES
       DIR: 'tests'
       COMMAND: "make --quiet test-format-shell &> ${RESULTS}/shell-format.txt"
+      RESULT_CHECK_FILE_PATTERN: "results/shell-format.txt"
 
-    - NAME: 'Shell Unit'
+    - NAME: 'Shellcheck'
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_SHELL_FILES
       DIR: 'tests'
-      COMMAND: "make test-unit-sh-docker &> ${RESULTS}/shell-unit.txt"
+      COMMAND: "make test-shellcheck-docker &> ${RESULTS}/shellcheck.txt"
+      TEXT_ON_SKIP: 'No Shell files changed'
+      RESULT_CHECK_TYPE: "SHELLCHECK"
+      RESULT_CHECK_FILE_PATTERN: "results/shellcheck.txt"
+
+    - NAME: 'Shell Unit Tests'
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_SHELL_FILES
+      DIR: 'tests'
+      COMMAND: "make test-unit-shell-docker &> ${RESULTS}/shell-unit.txt"
+      TEXT_ON_SKIP: 'No Shell files changed'
+      RESULT_CHECK_TYPE: "SHELLUNIT"
+      RESULT_CHECK_FILE_PATTERN: "results/shell-unit.txt"
 
     - NAME: 'JavaScript Format'
-      ONLY_WHEN_NOT_EMPTY: CHANGED_JS_FILES
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_JS_FILES,CHANGED_TESTS_MAKEFILE,CHANGED_RUN_PRETTIER_SCRIPT,CHANGED_NPM_NODE_SETUP
       DIR: 'tests'
       COMMAND: "make --quiet test-format-js-docker &> ${RESULTS}/js-prettier.txt"
       TEXT_ON_SKIP: 'No JavaScript files changed'
+      RESULT_CHECK_TYPE: "TSJSFORMAT"
+      RESULT_CHECK_FILE_PATTERN: "results/js-prettier.txt"
+
+    - NAME: 'JavaScript Build'
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_JS_FILES,CHANGED_TESTS_MAKEFILE,CHANGED_WEBPACK_CONFIG,CHANGED_NPM_NODE_SETUP
+      DIR: 'tests'
+      COMMAND: 'make test-build-js-docker &> ${RESULTS}/js-build.txt'
+      TEXT_ON_SKIP: 'No relevant JS/TS files changed'
+      RESULT_CHECK_TYPE: "TSJSBUILD"
+      RESULT_CHECK_FILE_PATTERN: "results/js-build.txt"
+
+    - NAME: 'JavaScript Lint'
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_JS_FILES,CHANGED_TESTS_MAKEFILE,CHANGED_RUN_JS_LINT_SCRIPT,CHANGED_NPM_NODE_SETUP
+      DIR: 'tests'
+      COMMAND: 'make test-lint-js-docker &> ${RESULTS}/js-lint.txt'
+      TEXT_ON_SKIP: 'No relevant JS/TS files changed'
+      RESULT_CHECK_FILE_PATTERN: "results/js-lint.txt"
+
+    - NAME: 'TypeScript Type Checking'
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_JS_FILES,CHANGED_TESTS_MAKEFILE,CHANGED_TYPESCRIPT_CONFIG,CHANGED_RUN_TYPESCRIPT_TYPES_SCRIPT,CHANGED_NPM_NODE_SETUP
+      DIR: 'tests'
+      COMMAND: 'make test-typescript-types-docker &> ${RESULTS}/js-types.txt'
+      TEXT_ON_SKIP: 'No relevant JS/TS files changed'
+      RESULT_CHECK_TYPE: "TSJSTYPES"
+      RESULT_CHECK_FILE_PATTERN: "results/js-types.txt"
 
     - NAME: 'CSS Format'
-      ONLY_WHEN_NOT_EMPTY: CHANGED_CSS_FILES
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_CSS_FILES,CHANGED_TESTS_MAKEFILE,CHANGED_RUN_PRETTIER_SCRIPT,CHANGED_NPM_NODE_SETUP
       DIR: 'tests'
       COMMAND: "make --quiet test-format-css-docker &> ${RESULTS}/css-prettier.txt"
       TEXT_ON_SKIP: 'No CSS files changed'
+      RESULT_CHECK_TYPE: "CSSFORMAT"
+      RESULT_CHECK_FILE_PATTERN: "results/css-prettier.txt"
+
+    - NAME: 'Bazel Format'
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_BAZEL_FILES
+      DIR: 'tests'
+      COMMAND: "make --quiet test-format-bazel-docker &> ${RESULTS}/bazel-prettier.txt"
+      TEXT_ON_SKIP: 'No Bazel files changed'
+      RESULT_CHECK_TYPE: "BAZELFORMAT"
+      RESULT_CHECK_FILE_PATTERN: "results/bazel-prettier.txt"
+
+    - NAME: 'Bazel Lint'
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_BAZEL_FILES
+      DIR: 'tests'
+      COMMAND: "make --quiet test-lint-bazel-docker &> ${RESULTS}/bazel-lint.txt"
+      TEXT_ON_SKIP: 'No Bazel files changed'
+      RESULT_CHECK_TYPE: "BAZELLINT"
+      RESULT_CHECK_FILE_PATTERN: "results/bazel-lint.txt"
 
     - NAME: 'Agent Plugin Unit Tests'
-      ONLY_WHEN_NOT_EMPTY: CHANGED_AGENT_PLUGINS,CHANGED_AGENT_PLUGINS_TESTS
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_AGENT_PLUGINS,CHANGED_AGENT_PLUGINS_TESTS,CHANGED_TESTS_MAKEFILE
       DIR: 'tests'
       COMMAND: "make test-agent-plugin-docker > ${RESULTS}/agent-plugin-unit-junit.txt"
       TEXT_ON_SKIP: 'No agent files changed'
+      RESULT_CHECK_FILE_PATTERN: "results/agent-plugin-unit-junit.txt"
 
-    - NAME: 'NEB/CMC Compile (neb-cmc-compile.txt)'
-      COMMAND: "make compile-neb-cmc-docker &> ${RESULTS}/neb-cmc-compile.txt"
+    - NAME: 'unixcat'
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_UNIXCAT_FILES
+      DIR: 'packages/unixcat'
+      COMMAND: "GCC_TOOLCHAIN=/opt/gcc-13.2.0 ../../scripts/run-in-docker.sh ./run --all &> ${RESULTS}/unixcat.txt"
+      TEXT_ON_SKIP: 'No unixcat files changed'
+      RESULT_CHECK_TYPE: "GCC"
+      RESULT_CHECK_FILE_PATTERN: "results/unixcat.txt"
 
-    - NAME: 'Cppcheck Livestatus (cppcheck-neb.xml)'
-      ONLY_WHEN_NOT_EMPTY: CHANGED_CORE_FILES
-      DIR: 'tests'
-      ENV_VARS:
-        RESULTS: "${RESULTS}"
-      COMMAND: "make test-cppcheck-livestatus-docker"
-      TEXT_ON_SKIP: 'No core files changed'
+    - NAME: 'Livestatus'
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_LIVESTATUS_FILES,CHANGED_ASIO_FILES,CHANGED_GOOGLETEST_FILES,CHANGED_RE2_FILES
+      DIR: 'packages/livestatus'
+      COMMAND: "GCC_TOOLCHAIN=/opt/gcc-13.2.0 ../../scripts/run-in-docker.sh ./run --all &> ${RESULTS}/livestatus.txt"
+      TEXT_ON_SKIP: 'No Livestatus files changed'
+      RESULT_CHECK_TYPE: "GCC"
+      RESULT_CHECK_FILE_PATTERN: "results/livestatus.txt"
 
-    - NAME: 'Cppcheck core (cppcheck-cmc.xml)'
-      ONLY_WHEN_NOT_EMPTY: CHANGED_CORE_FILES
-      DIR: 'tests'
-      ENV_VARS:
-        RESULTS: "${RESULTS}"
-      COMMAND: "make test-cppcheck-core-docker"
-      TEXT_ON_SKIP: 'No core files changed'
+    - NAME: 'NEB'
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_NEB_FILES,CHANGED_LIVESTATUS_FILES,CHANGED_ASIO_FILES,CHANGED_GOOGLETEST_FILES,CHANGED_RE2_FILES
+      DIR: 'packages/neb'
+      COMMAND: "GCC_TOOLCHAIN=/opt/gcc-13.2.0 ../../scripts/run-in-docker.sh ./run --all &> ${RESULTS}/neb.txt"
+      TEXT_ON_SKIP: 'No NEB files changed'
+      RESULT_CHECK_TYPE: "GCC"
+      RESULT_CHECK_FILE_PATTERN: "results/neb.txt"
 
-    - NAME: 'Clang Tidy Livestatus (livestatus-tidy.txt)'
-      ONLY_WHEN_NOT_EMPTY: CHANGED_CORE_FILES
-      DIR: 'tests'
-      ENV_VARS:
-        RESULTS: "${RESULTS}"
-        GERRIT_PATCHSET_REVISION: "${PATCHSET_REVISION}"
-      COMMAND: "make test-tidy-livestatus-docker"
-      TEXT_ON_SKIP: 'No core files changed'
-
-    - NAME: 'Clang Tidy core (core-tidy.txt)'
-      ONLY_WHEN_NOT_EMPTY: CHANGED_CORE_FILES
-      DIR: 'tests'
-      ENV_VARS:
-        RESULTS: "${RESULTS}"
-        GERRIT_PATCHSET_REVISION: "${PATCHSET_REVISION}"
-      COMMAND: "make test-tidy-core-docker"
-      TEXT_ON_SKIP: 'No core files changed'
-
-    - NAME: 'IWYU Livestatus (livestatus-iwyu.txt)'
-      ONLY_WHEN_NOT_EMPTY: CHANGED_CORE_FILES
-      DIR: 'tests'
-      ENV_VARS:
-        RESULTS: "${RESULTS}"
-        GERRIT_PATCHSET_REVISION: "${PATCHSET_REVISION}"
-      COMMAND: "make test-iwyu-livestatus-docker"
-      TEXT_ON_SKIP: 'No core files changed'
-
-    - NAME: 'IWYU core (core-iwyu.txt)'
-      ONLY_WHEN_NOT_EMPTY: CHANGED_CORE_FILES
-      DIR: 'tests'
-      ENV_VARS:
-        RESULTS: "${RESULTS}"
-        GERRIT_PATCHSET_REVISION: "${PATCHSET_REVISION}"
-      COMMAND: "make test-iwyu-core-docker"
-      TEXT_ON_SKIP: 'No core files changed'
-
-    - NAME: 'Unit Test Livestatus (livestatus-neb-cmc.txt)'
-      ONLY_WHEN_NOT_EMPTY: CHANGED_CORE_FILES
-      DIR: 'livestatus/src/test'
-      ENV_VARS:
-        RESULTS: "${RESULTS}"
-      COMMAND: "./.f12 &> ${RESULTS}/livestatus-neb-cmc.txt"
-      TEXT_ON_SKIP: 'No core files changed'
-
-    - NAME: 'Unit Test core (core-neb-cmc.txt)'
-      ONLY_WHEN_NOT_EMPTY: CHANGED_CORE_FILES
-      DIR: 'enterprise/core/src/test'
-      ENV_VARS:
-        RESULTS: "${RESULTS}"
-      COMMAND: "./.f12 &> ${RESULTS}/core-neb-cmc.txt"
-      TEXT_ON_SKIP: 'No core files changed'
+    - NAME: 'CMC'
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_CMC_FILES,CHANGED_CMC_PROTO_FILES,CHANGED_LIVESTATUS_FILES,CHANGED_ASIO_FILES,CHANGED_GOOGLETEST_FILES,CHANGED_RE2_FILES
+      DIR: 'packages/cmc'
+      COMMAND: "GCC_TOOLCHAIN=/opt/gcc-13.2.0 ../../scripts/run-in-docker.sh ./run --all &> ${RESULTS}/cmc.txt"
+      TEXT_ON_SKIP: 'No CMC files changed'
+      RESULT_CHECK_TYPE: "GCC"
+      RESULT_CHECK_FILE_PATTERN: "results/cmc.txt"
 
     - NAME: 'Software Documentation Generation'
-      ONLY_WHEN_NOT_EMPTY: CHANGED_SW_DOC_FILES
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_SW_DOC_FILES,CHANGED_MAKEFILE
       COMMAND: "make sw-documentation-docker &> ${RESULTS}/sw-documentation.txt"
       TEXT_ON_SKIP: 'No SW Documentation files changed'
+      RESULT_CHECK_FILE_PATTERN: "results/sw-documentation.txt"
 
+    - NAME: 'Agent Controller'
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_AGENT_CONTROLLER_FILES
+      DIR: 'packages/cmk-agent-ctl'
+      COMMAND: "../../scripts/run-in-docker.sh ./run --setup-environment --all &> ${RESULTS}/agent-controller.txt"
+      TEXT_ON_SKIP: 'No agent controller files changed'
+      RESULT_CHECK_FILE_PATTERN: "results/agent-controller.txt"
+
+    - NAME: 'SQL Check'
+      ONLY_WHEN_NOT_EMPTY: CHANGED_IMAGE_TESTING,CHANGED_SQL_CHECK_FILES
+      DIR: 'packages/database_checks/sql_check'
+      COMMAND: "../../../scripts/run-in-docker.sh ./run --setup-environment --all &> ${RESULTS}/sql_check.txt"
+      TEXT_ON_SKIP: 'No SQL check files changed'
+      RESULT_CHECK_FILE_PATTERN: "results/sql_check.txt"

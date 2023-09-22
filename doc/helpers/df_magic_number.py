@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -20,11 +19,11 @@ def print_levels(level, exp):
         scale = felt_size / hgb_size  # fixed: true-division
         new_level = 1 - ((1 - level) * scale)
         freegb = size * (1.0 - new_level)
-        sys.stdout.write("%4.0fGB:%4.0f%%(%3.0fG) " % (size, new_level * 100, freegb))
+        sys.stdout.write(f"{size:4.0f}GB:{new_level * 100:4.0f}%({freegb:3.0f}G) ")
     sys.stdout.write("\n")
 
 
-for level_ in [.80, .85, .90, .95]:
+for level_ in [0.80, 0.85, 0.90, 0.95]:
     sys.stdout.write("Level for %.0f GB Normpartition: %d%%\n" % (normsize, int(level_ * 100)))
     for exp_ in [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2]:
         print_levels(level_, exp_)

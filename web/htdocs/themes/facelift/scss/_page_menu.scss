@@ -1,5 +1,5 @@
 @charset "UTF-8";
-// Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+// Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 // This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 // conditions defined in the file COPYING, which is part of this source code package.
 
@@ -16,16 +16,21 @@ div#top_heading {
   padding: 0;
 
   div.titlebar {
+    display: flex;
     height: 53px;
     padding: 0.5 * $spacing $spacing 0;
-    background-color: $color-background;
+    background-color: $bg-color;
+
+    > div:first-child {
+      flex-grow: 1;
+    }
   }
 
   a.title {
     padding: 0;
     margin: 6px 0 0;
     font-size: $font-size-page-title;
-    font-weight: bold;
+    font-weight: $font-weight-bold;
     color: $font-color;
     text-decoration: none;
     white-space: nowrap;
@@ -36,16 +41,11 @@ div#top_heading {
   }
 
   div.page_state {
-    position: absolute;
-    top: 14px;
-    right: 17px;
+    position: relative;
     display: flex;
     align-items: center;
     height: inherit;
-
-    &.default {
-      top: 6px;
-    }
+    box-sizing: border-box;
 
     > a {
       display: inherit;
@@ -53,22 +53,49 @@ div#top_heading {
       text-decoration: none;
 
       &:hover {
-        color: $success;
+        color: $font-color-green;
       }
     }
 
-    div.text_container span {
-      display: table;
+    &.pending_changes {
+      padding-bottom: 4px;
+
+      div.text_container span {
+        display: block;
+        text-align: center;
+
+        &.changes_number {
+          font-size: $font-size-page-title;
+          font-weight: $font-weight-bold;
+        }
+      }
+    }
+
+    &.no_changes {
+      padding-top: 18px;
+
+      div.text_container {
+        span.changes_number {
+          display: none;
+        }
+
+        span.changes_str {
+          color: $font-color-dimmed;
+
+          &:hover {
+            color: $font-color;
+          }
+        }
+      }
     }
 
     div.icon_container {
-      margin-top: -2px; // align icon with text
       margin-left: 8px;
 
       img.icon {
         display: block;
-        width: 14px;
-        height: 14px;
+        width: 2.8 * $spacing;
+        height: 2.8 * $spacing;
 
         &:hover {
           /* disable hover effect */
@@ -77,10 +104,12 @@ div#top_heading {
       }
     }
 
-    &.default {
-      div.text_container {
+    &.reload {
+      padding-top: 2px;
+
+      div.text_container span {
         position: absolute;
-        right: 5.5px;
+        right: 6px;
         bottom: 21px;
         font-size: $font-size-small;
         line-height: $font-size-small;
@@ -127,7 +156,7 @@ div#top_heading {
       &:last-child:after {
         content: "";
       }
-      color: rgba($font-color, 0.8);
+      color: $font-color-dimmed;
       text-decoration: none;
     }
 
@@ -145,7 +174,7 @@ div#top_heading {
     width: 100%;
     padding: 0 0 $spacing;
     white-space: nowrap;
-    background-color: $color-background;
+    background-color: $bg-color;
     border-spacing: 0;
 
     td {
@@ -177,7 +206,7 @@ div#top_heading {
       }
 
       &.icon_container {
-        padding-right: 3px;
+        padding-right: $spacing;
         background-color: $page-menu-bg-color;
         border-right: 1px solid $headline-color;
 
@@ -230,7 +259,7 @@ div#top_heading {
         }
 
         &:focus {
-          border: 10px solid #fff;
+          border: 10px solid $white;
           outline: none;
         }
 
@@ -264,6 +293,7 @@ div#top_heading {
           width: 14px;
           height: 14px;
           margin-right: 5px;
+          padding-bottom: 2px;
 
           &.emblem {
             right: 0;
@@ -280,8 +310,8 @@ div#top_heading {
 
           div.topic_title {
             padding: $spacing 0 2px 12px;
-            font-weight: normal;
-            color: rgba($font-color, 0.5);
+            font-weight: $font-weight-default;
+            color: $font-color-dimmed;
             cursor: default;
           }
 
@@ -295,7 +325,7 @@ div#top_heading {
             }
 
             &.enabled a:hover {
-              color: $success;
+              color: $font-color-green;
             }
 
             &.disabled a {
@@ -303,6 +333,10 @@ div#top_heading {
               pointer-events: none;
               cursor: default;
               opacity: 0.5;
+            }
+
+            &.hidden {
+              display: none;
             }
           }
         }
@@ -357,7 +391,7 @@ div#top_heading {
       form {
         padding: 0;
         margin: 0;
-        background-color: $inpage-highlight-color;
+        background-color: $input-background-color;
         border-radius: 2px;
       }
 
@@ -371,7 +405,7 @@ div#top_heading {
       }
 
       input[type="text"] {
-        width: 110px !important;
+        width: 180px !important;
         height: 18px;
       }
 
@@ -416,7 +450,7 @@ div#top_heading {
   }
 
   tr#suggestions {
-    background-color: $color-background;
+    background-color: $bg-color;
 
     td {
       width: 100%;
@@ -456,17 +490,26 @@ div#top_heading {
           padding: 0 8px;
           font-weight: $font-weight-bold;
           line-height: 16px;
-          color: $button-font-color-default;
+          color: $font-color;
           text-decoration: none;
           background-color: $button-bg-color-suggestions;
+          border: 1px solid $default-button-border-color;
           border-radius: 4px;
           box-sizing: border-box;
+
+          &:hover {
+            cursor: pointer;
+            background-color: $button-bg-color-default;
+
+            animation-duration: 0.5s;
+            animation-name: easyhoverbg;
+            animation-fill-mode: forwards;
+          }
 
           img {
             width: 15px;
             height: 15px;
             padding: 0;
-            margin-top: -1.5px;
             margin-right: 5px;
 
             &:hover {
@@ -480,14 +523,13 @@ div#top_heading {
             }
           }
 
-          &:hover {
-            cursor: pointer;
-            background-color: $button-bg-color-default;
-
-            animation-duration: 0.5s;
-            animation-name: easyhoverbg;
-            animation-fill-mode: forwards;
+          span {
+            padding-top: 3px;
           }
+        }
+
+        &.submit a {
+          border: 1px solid $default-submit-button-border-color;
         }
       }
     }
@@ -504,80 +546,156 @@ div#page_menu_popups {
     .confirm_popup {
       padding: 16px;
       background-color: $headline-color;
+      margin-bottom: $spacing;
+
+      button.confirm_question,
+      button.confirm_warning {
+        margin-left: 0px;
+      }
+
+      button.confirm_question {
+        &,
+        &:active {
+          color: $font-color-light-bg;
+          background-color: $color-state-1-background;
+          border-color: $color-state-1-background;
+        }
+
+        &:hover {
+          background-color: darken($color-state-1-background, 5%);
+          border-color: darken($color-state-1-background, 5%);
+        }
+      }
+
+      button.confirm_warning {
+        &,
+        &:active {
+          color: $white;
+          background-color: darken($color-state-2-background, 5%);
+          border-color: darken($color-state-2-background, 5%);
+        }
+
+        &:hover {
+          background-color: $color-state-2-background;
+          border-color: $color-state-2-background;
+        }
+      }
+    }
+  }
+
+  .confirm_icon {
+    position: absolute;
+    width: 25px;
+    height: 100%;
+    background-color: $success-dimmed;
+    border: 0;
+    border-radius: $border-radius-left;
+    margin: 0;
+    font-size: 7px;
+    font-weight: $font-weight-bold;
+    color: $font-color-light-bg;
+
+    &.confirm_question {
+      background-color: $yellow;
+      border-color: $yellow;
     }
 
-    .confirm_content {
+    &.confirm_warning {
+      color: $white;
+      background-color: $color-state-2-background;
+      border-color: $color-state-2-background;
+    }
+  }
+
+  .confirm_title,
+  .confirm_content {
+    color: $font-color;
+    font-size: $font-size-large;
+    padding: 0;
+    text-align: left;
+  }
+
+  .confirm_title {
+    margin: 0 25px 0px;
+    font-weight: $font-weight-bold;
+  }
+
+  .confirm_content {
+    margin: 5px 25px 0px;
+  }
+
+  .confirm_actions {
+    justify-content: flex-start;
+    margin: $spacing 25px 0;
+  }
+}
+
+div.page_menu_popup {
+  position: relative;
+  display: none;
+  margin-bottom: $spacing;
+  background-color: $base-color;
+  border: none;
+  border-radius: $popup-filters-border-radius;
+
+  &.active {
+    display: block;
+  }
+
+  &.side_popup > .head {
+    background-color: inherit;
+  }
+
+  > .head {
+    padding: 6px 0 5px $spacing;
+    background-color: $headline-color;
+
+    h3 {
       padding: 0;
+      margin: 0;
+      font-weight: $font-weight-bold;
       color: $font-color;
-      text-align: left;
     }
 
-    .confirm_actions {
-      justify-content: flex-start;
-      margin: $spacing 0 0;
-    }
-  }
-
-  div.page_menu_popup {
-    position: relative;
-    display: none;
-    margin-bottom: $spacing;
-    background-color: $base-color;
-    border: none;
-    border-radius: $popup-filters-border-radius;
-
-    &.active {
-      display: block;
-    }
-
-    &.side_popup > .head {
-      background-color: inherit;
-    }
-
-    > .head {
-      padding: 6px 0 5px $spacing;
-      background-color: $headline-color;
-
-      h3 {
-        padding: 0;
-        margin: 0;
-        font-weight: $font-weight-bold;
-        color: $font-color;
-      }
-
-      a.close_popup img {
-        position: absolute;
-        top: 6px;
-        right: $spacing;
-        width: 12px;
-        height: auto;
-      }
-    }
-
-    &.side_popup > .content {
-      padding: 0;
-    }
-
-    div.group {
-      padding-top: $spacing;
-
-      &:first-of-type {
-        padding-top: 0;
-      }
-    }
-
-    form span.checkbox {
-      padding-right: $spacing;
-      white-space: initial;
+    a.close_popup img {
+      position: absolute;
+      top: 8px;
+      right: $simplebar-track-width;
+      width: 12px;
+      height: auto;
     }
   }
 
-  button,
-  input.button {
-    padding: 8px 16px;
-    margin-top: 0;
-    margin-bottom: 0;
+  &.side_popup > .content {
+    padding: 0;
   }
+
+  div.group {
+    padding-top: $spacing;
+
+    &:first-of-type {
+      padding-top: 0;
+    }
+
+    .button {
+      margin: 0px 20px 0px 0px;
+
+      &.border_hot {
+        border: 1px solid $success-dimmed;
+      }
+    }
+  }
+
+  form span.checkbox {
+    padding-right: $spacing;
+    white-space: initial;
+  }
+}
+
+button,
+input.button {
+  padding: 8px 16px;
+  margin: 0 $spacing;
 }
 
 /* Dashboard editor specific styling */
@@ -588,17 +706,13 @@ body.dashboard {
     right: 0;
     bottom: 0;
     left: 0;
+    align-content: center;
     // Important needed to override swal2 internal definition
-    background-color: rgba(0, 0, 0, 0.2) !important; // sass-lint:disable-line no-important
+    background-color: rgba($black, 0.2) !important;
 
     .confirm_popup {
-      flex: 0 0 auto;
+      width: 400px;
       margin: auto;
-    }
-
-    .confirm_content {
-      width: max-content;
-      min-width: 300px;
     }
   }
 }
@@ -726,7 +840,7 @@ div#page_menu_popups div.side_popup {
         div.description {
           display: inline-block;
           margin: 5px 10px 0;
-          color: #5a6782;
+          color: $font-color-blue-1;
         }
 
         &:hover,
@@ -780,15 +894,15 @@ div#page_menu_popups div.side_popup {
     a.filter_group_title {
       display: block;
       padding: 8px 10px;
-      font-weight: bold;
-      color: $filter-group-title-font-color;
+      font-weight: $font-weight-bold;
+      color: $font-color;
       cursor: pointer;
     }
 
     a.more {
       position: absolute;
-      top: 6px;
-      right: 4px;
+      top: 8px;
+      right: 6px;
     }
 
     ul {

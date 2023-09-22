@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import List
+
 import pytest
 
-from cmk.gui.utils.output_funnel import OutputFunnel
 from cmk.gui.http import Response
+from cmk.gui.utils.output_funnel import OutputFunnel
 
 
-def written(funnel) -> bytes:
+def written(funnel: OutputFunnel) -> bytes:
     return funnel._response_stack[-1].get_data()
 
 
-def response_texts(funnel: OutputFunnel) -> List[List[str]]:
+def response_texts(funnel: OutputFunnel) -> list[list[str]]:
     return [[e.decode("utf-8") for e in r.iter_encoded()] for r in funnel._response_stack[1:]]
 
 
@@ -75,10 +74,10 @@ def test_output_funnel_context_drain(funnel: OutputFunnel) -> None:
     assert written(funnel) == b"A"
     with funnel.plugged():
         funnel.write(b"B")
-        assert response_texts(funnel) == [['B']]
+        assert response_texts(funnel) == [["B"]]
         code = funnel.drain()
         assert response_texts(funnel) == [[]]
-    assert code == 'B'
+    assert code == "B"
     assert written(funnel) == b"A"
 
 
@@ -88,7 +87,7 @@ def test_output_funnel_context_raise(funnel: OutputFunnel) -> None:
         assert written(funnel) == b"A"
         with funnel.plugged():
             funnel.write(b"B")
-            assert response_texts(funnel) == [['B']]
+            assert response_texts(funnel) == [["B"]]
             raise Exception("Test exception")
     except Exception as e:
         assert "%s" % e == "Test exception"

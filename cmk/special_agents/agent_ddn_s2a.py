@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -8,12 +7,14 @@ import argparse
 import socket
 import sys
 
+from cmk.utils.password_store import replace_passwords
+
 # This special agent uses the S2A RCM API. Please refer to the
 # official documentation.
 
 
 def commandstring(command_txt, username_txt, password_txt):
-    return "%s@%s@%s@0@0@$" % (command_txt, username_txt, password_txt)
+    return f"{command_txt}@{username_txt}@{password_txt}@0@0@$"
 
 
 def query(s, command_txt):
@@ -29,11 +30,12 @@ def query(s, command_txt):
 
 def main(sys_argv=None):
     if sys_argv is None:
+        replace_passwords()
         sys_argv = sys.argv[1:]
 
-    parser = argparse.ArgumentParser(description=\
-                'A datasource program for Data Direct'
-                'Networks Silicon Storage Appliances')
+    parser = argparse.ArgumentParser(
+        description="A datasource program for Data Direct" "Networks Silicon Storage Appliances"
+    )
 
     parser.add_argument("ip_address")
     parser.add_argument("port", type=int)

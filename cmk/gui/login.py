@@ -1,50 +1,64 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
+from __future__ import annotations
 
-import http.client
-import os
-import traceback
 import contextlib
-from hashlib import sha256
-from typing import List, Union, Optional, Tuple, Iterator
-from pathlib import Path
-from contextlib import suppress
+import http.client
+from collections.abc import Iterator
+from datetime import datetime
+from urllib.parse import unquote
 
-from six import ensure_binary, ensure_str
-from werkzeug.local import LocalProxy
-
-import cmk.utils.version as cmk_version
 import cmk.utils.paths
-from cmk.utils.type_defs import UserId
+import cmk.utils.version as cmk_version
+from cmk.utils.crypto.password import Password
+from cmk.utils.licensing.handler import LicenseStateError, RemainingTrialTime
+from cmk.utils.licensing.registry import get_remaining_trial_time
+from cmk.utils.log.security_event import log_security_event
+from cmk.utils.site import omd_site, url_prefix
+from cmk.utils.urls import is_allowed_url
+from cmk.utils.user import UserId
 
-import cmk.gui.config as config
-import cmk.gui.userdb as userdb
-import cmk.gui.utils as utils
-from cmk.gui.log import logger
-import cmk.gui.i18n
 import cmk.gui.mobile
-from cmk.gui.http import Request
-from cmk.gui.pages import page_registry, Page
-from cmk.gui.i18n import _
-from cmk.gui.globals import (html, local, request, response, transactions, user_errors, theme)
-from cmk.gui.htmllib import HTML
+import cmk.gui.userdb as userdb
+from cmk.gui.auth import is_site_login
 from cmk.gui.breadcrumb import Breadcrumb
-
-from cmk.gui.exceptions import HTTPRedirect, MKInternalError, MKAuthException, MKUserError, FinalizeRequest
-
-from cmk.gui.utils.urls import makeuri, urlencode, requested_file_name
+from cmk.gui.config import active_config
+from cmk.gui.exceptions import FinalizeRequest, HTTPRedirect, MKAuthException, MKUserError
+from cmk.gui.htmllib.generator import HTMLWriter
+from cmk.gui.htmllib.header import make_header
+from cmk.gui.htmllib.html import html
+from cmk.gui.http import request, response
+from cmk.gui.i18n import _, ungettext
+from cmk.gui.log import AuthenticationFailureEvent, AuthenticationSuccessEvent
+from cmk.gui.logged_in import LoggedInNobody, LoggedInUser, user
+from cmk.gui.main import get_page_heading
+from cmk.gui.pages import Page, PageRegistry
+from cmk.gui.session import session, UserContext
+from cmk.gui.userdb import active_connections_by_type
+from cmk.gui.userdb.session import auth_cookie_name
+from cmk.gui.utils.escaping import escape_to_html
+from cmk.gui.utils.html import HTML
+from cmk.gui.utils.login import show_saml2_login, show_user_errors
 from cmk.gui.utils.mobile import is_mobile
-from cmk.gui.utils.language_cookie import del_language_cookie
-from cmk.gui.utils.escaping import escape_html
+from cmk.gui.utils.theme import theme
+from cmk.gui.utils.transaction_manager import transactions
+from cmk.gui.utils.urls import makeuri, requested_file_name, urlencode
+from cmk.gui.utils.user_errors import user_errors
 
-auth_logger = logger.getChild("auth")
+
+def register(page_registry: PageRegistry) -> None:
+    # TODO: only overwrite this in cse specific files
+    if cmk_version.edition() == cmk_version.Edition.CSE:
+        page_registry.register_page("login")(SaasLoginPage)
+    else:
+        page_registry.register_page("login")(LoginPage)
+    page_registry.register_page("logout")(LogoutPage)
 
 
 @contextlib.contextmanager
-def authenticate(req: Request) -> Iterator[bool]:
+def authenticate() -> Iterator[bool]:
     """Perform the user authentication
 
     This is called by index.py to ensure user
@@ -54,95 +68,35 @@ def authenticate(req: Request) -> Iterator[bool]:
     The user may have configured (basic) authentication by the web server. In
     case a user is provided, we trust that user and assume it as authenticated.
 
-    Otherwise we check / ask for the cookie authentication or eventually the
+    Otherwise, we check / ask for the cookie authentication or eventually the
     automation secret authentication."""
-
-    user_id = _check_auth(req)
-    if not user_id:
+    if isinstance(session.user, LoggedInNobody):
         yield False
-        return
-
-    with UserSessionContext(user_id):
-        yield True
+    else:
+        assert session.session_info.auth_type
+        with TransactionIdContext(session.user.ident):
+            yield True
 
 
 @contextlib.contextmanager
-def UserSessionContext(user_id: UserId) -> Iterator[None]:
-    """Managing context of authenticated user session with cleanup before logout."""
-    with config.UserContext(user_id):
+def TransactionIdContext(user_id: UserId) -> Iterator[None]:
+    """Managing context of authenticated user session with cleanup before logout.
+
+    Args:
+        user_id:
+            The username.
+
+    """
+    with UserContext(user_id):
+        # Auth with automation secret succeeded before - mark transid as
+        # unneeded in this case
+        if session.session_info.auth_type == "automation":
+            transactions.ignore()
         try:
             yield
         finally:
+            transactions.unignore()
             transactions.store_new()
-            userdb.on_end_of_request(user_id)
-
-
-def auth_cookie_name() -> str:
-    return 'auth%s' % site_cookie_suffix()
-
-
-def site_cookie_suffix() -> str:
-    url_prefix = config.url_prefix()
-
-    # Strip of eventual present "http://<host>". DIRTY!
-    if url_prefix.startswith('http:'):
-        url_prefix = url_prefix[url_prefix[7:].find('/') + 7:]
-
-    return os.path.dirname(url_prefix).replace('/', '_')
-
-
-def _load_secret() -> str:
-    """Reads the sites auth secret from a file
-
-    Creates the files if it does not exist. Having access to the secret means that one can issue
-    valid cookies for the cookie auth.
-    """
-    htpasswd_path = Path(cmk.utils.paths.htpasswd_file)
-    secret_path = htpasswd_path.parent.joinpath('auth.secret')
-
-    secret = u''
-    if secret_path.exists():
-        with secret_path.open(encoding="utf-8") as f:
-            secret = f.read().strip()
-
-    # Create new secret when this installation has no secret
-    #
-    # In past versions we used another bad approach to generate a secret. This
-    # checks for such secrets and creates a new one. This will invalidate all
-    # current auth cookies which means that all logged in users will need to
-    # renew their login after update.
-    if secret == '' or len(secret) == 32:
-        secret = _generate_secret()
-        with secret_path.open("w", encoding="utf-8") as f:
-            f.write(secret)
-
-    return secret
-
-
-def _generate_secret() -> str:
-    return ensure_str(utils.get_random_string(256))
-
-
-def _load_serial(username: UserId) -> int:
-    """Load the password serial of the user
-
-    This serial identifies the current config state of the user account. If either the password is
-    changed or the account gets locked the serial is increased and all cookies get invalidated.
-    Better use the value from the "serials.mk" file, instead of loading the whole user database via
-    load_users() for performance reasons.
-    """
-    return userdb.load_custom_attr(username, 'serial', int, 0)
-
-
-def _generate_auth_hash(username: UserId, session_id: str) -> str:
-    return _generate_hash(username, ensure_str(username) + session_id)
-
-
-def _generate_hash(username: UserId, value: str) -> str:
-    """Generates a hash to be added into the cookie value"""
-    secret = _load_secret()
-    serial = _load_serial(username)
-    return sha256(ensure_binary(value + str(serial) + secret)).hexdigest()
 
 
 def del_auth_cookie() -> None:
@@ -150,129 +104,12 @@ def del_auth_cookie() -> None:
     if not request.has_cookie(cookie_name):
         return
 
-    cookie = _fetch_cookie(cookie_name)
-    if auth_cookie_is_valid(cookie):
-        response.delete_cookie(cookie_name)
+    response.unset_http_cookie(cookie_name)
 
 
-def _auth_cookie_value(username: UserId, session_id: str) -> str:
-    return ":".join([ensure_str(username), session_id, _generate_auth_hash(username, session_id)])
-
-
-def _invalidate_auth_session() -> None:
-    del_auth_cookie()
-    del_language_cookie(response)
-
-
-def _renew_auth_session(username: UserId, session_id: str) -> None:
-    _set_auth_cookie(username, session_id)
-
-
-def _create_auth_session(username: UserId, session_id: str) -> None:
-    _set_auth_cookie(username, session_id)
-
-
-def update_auth_cookie(username: UserId) -> None:
-    """Is called during password change to set a new cookie
-
-    We are not able to validate the old cookie value here since the password was already changed
-    on the server side. Skip validation in this case, this is fine. The cookie was valdiated
-    before accessing this page.
-    """
-    _set_auth_cookie(username, _get_session_id_from_cookie(username, revalidate_cookie=False))
-
-
-def _set_auth_cookie(username: UserId, session_id: str) -> None:
-    response.set_http_cookie(auth_cookie_name(),
-                             _auth_cookie_value(username, session_id),
-                             secure=request.is_secure)
-
-
-def user_from_cookie(raw_cookie: str) -> Tuple[UserId, str, str]:
-    try:
-        username, session_id, cookie_hash = raw_cookie.split(':', 2)
-    except ValueError:
-        raise MKAuthException("Invalid auth cookie.")
-
-    # Refuse pre 2.0 cookies: These held the "issue time" in the 2nd field.
-    with suppress(ValueError):
-        float(session_id)
-        raise MKAuthException("Refusing pre 2.0 auth cookie")
-
-    return UserId(username), session_id, cookie_hash
-
-
-def _get_session_id_from_cookie(username: UserId, revalidate_cookie: bool) -> str:
-    cookie_username, session_id, cookie_hash = user_from_cookie(_fetch_cookie(auth_cookie_name()))
-
-    # Has been checked before, but validate before using that information, just to be sure
-    if revalidate_cookie:
-        check_parsed_auth_cookie(username, session_id, cookie_hash)
-
-    if cookie_username != username:
-        auth_logger.error("Invalid session: (User: %s, Session: %s)", username, session_id)
-        return ""
-
-    return session_id
-
-
-def _renew_cookie(cookie_name: str, username: UserId, session_id: str) -> None:
-    # Do not renew if:
-    # a) The _ajaxid var is set
-    # b) A logout is requested
-    requested_file = requested_file_name(request)
-    if (requested_file != 'logout' and not request.has_var('_ajaxid')) \
-       and cookie_name == auth_cookie_name():
-        auth_logger.debug("Renewing auth cookie (%s.py, vars: %r)" %
-                          (requested_file, dict(request.itervars())))
-        _renew_auth_session(username, session_id)
-
-
-def _check_auth_cookie(cookie_name: str) -> Optional[UserId]:
-    username, session_id, cookie_hash = user_from_cookie(_fetch_cookie(cookie_name))
-    check_parsed_auth_cookie(username, session_id, cookie_hash)
-
-    try:
-        userdb.on_access(username, session_id)
-    except MKAuthException:
-        del_auth_cookie()
-        raise
-
-    # Once reached this the cookie is a good one. Renew it!
-    _renew_cookie(cookie_name, username, session_id)
-
-    if requested_file_name(request) != 'user_change_pw':
-        result = userdb.need_to_change_pw(username)
-        if result:
-            raise HTTPRedirect('user_change_pw.py?_origtarget=%s&reason=%s' %
-                               (urlencode(makeuri(request, [])), result))
-
-    # Return the authenticated username
-    return username
-
-
-def _fetch_cookie(cookie_name: str) -> str:
-    raw_cookie = request.cookie(cookie_name, "::")
-    assert raw_cookie is not None
-    return raw_cookie
-
-
-def check_parsed_auth_cookie(username: UserId, session_id: str, cookie_hash: str) -> None:
-    if not userdb.user_exists(username):
-        raise MKAuthException(_('Username is unknown'))
-
-    if cookie_hash != _generate_auth_hash(username, session_id):
-        raise MKAuthException(_('Invalid credentials'))
-
-
-def auth_cookie_is_valid(cookie_text: str) -> bool:
-    try:
-        check_parsed_auth_cookie(*user_from_cookie(cookie_text))
-        return True
-    except MKAuthException:
-        return False
-    except Exception:
-        return False
+class SaasLoginPage(Page):
+    def page(self) -> None:
+        raise HTTPRedirect("cognito_sso.py")
 
 
 # TODO: Needs to be cleaned up. When using HTTP header auth or web server auth it is not
@@ -283,146 +120,14 @@ def auth_cookie_is_valid(cookie_text: str) -> bool:
 # - It also calls userdb.is_customer_user_allowed_to_login()
 # - It calls userdb.create_non_existing_user() but we don't
 # - It calls connection.is_locked() but we don't
-def _check_auth(req: Request) -> Optional[UserId]:
-    user_id = _check_auth_web_server(req)
-
-    if req.var("_secret"):
-        user_id = _check_auth_automation()
-
-    elif config.auth_by_http_header:
-        if not config.user_login:
-            return None
-        user_id = _check_auth_http_header()
-
-    if user_id is None:
-        if not config.user_login:
-            return None
-        user_id = _check_auth_by_cookie()
-
-    if (user_id is not None and not isinstance(user_id, str)) or user_id == u'':
-        raise MKInternalError(_("Invalid user authentication"))
-
-    if user_id and not userdb.is_customer_user_allowed_to_login(user_id):
-        # A CME not assigned with the current sites customer
-        # is not allowed to login
-        auth_logger.debug("User '%s' is not allowed to authenticate: Invalid customer" % user_id)
-        return None
-
-    if user_id and auth_type in ("http_header", "web_server"):
-        _check_auth_cookie_for_web_server_auth(user_id)
-
-    return user_id
 
 
-def verify_automation_secret(user_id: UserId, secret: str) -> bool:
-    if secret and user_id and "/" not in user_id:
-        path = Path(cmk.utils.paths.var_dir) / "web" / ensure_str(user_id) / "automation.secret"
-        if not path.is_file():
-            return False
-
-        with path.open(encoding="utf-8") as f:
-            return ensure_str(f.read()).strip() == secret
-
-    return False
-
-
-def _check_auth_automation() -> UserId:
-    secret = request.get_str_input_mandatory("_secret", "").strip()
-    user_id = request.get_unicode_input_mandatory("_username", "")
-
-    user_id = UserId(user_id.strip())
-    request.del_var_from_env('_username')
-    request.del_var_from_env('_secret')
-
-    if verify_automation_secret(user_id, secret):
-        # Auth with automation secret succeeded - mark transid as unneeded in this case
-        transactions.ignore()
-        set_auth_type("automation")
-        return user_id
-    raise MKAuthException(_("Invalid automation secret for user %s") % user_id)
-
-
-def _check_auth_http_header() -> Optional[UserId]:
-    """When http header auth is enabled, try to read the user_id from the var"""
-    assert isinstance(config.auth_by_http_header, str)
-    user_id = request.get_request_header(config.auth_by_http_header)
-    if not user_id:
-        return None
-
-    user_id = UserId(ensure_str(user_id))
-    set_auth_type("http_header")
-
-    return user_id
-
-
-def _check_auth_web_server(req: Request) -> Optional[UserId]:
-    """Try to get the authenticated user from the HTTP request
-
-    The user may have configured (basic) authentication by the web server. In
-    case a user is provided, we trust that user.
-    """
-    user = req.remote_user
-    if user is not None:
-        set_auth_type("web_server")
-        return UserId(ensure_str(user))
-    return None
-
-
-def _check_auth_by_cookie() -> Optional[UserId]:
-    cookie_name = auth_cookie_name()
-    if not request.has_cookie(cookie_name):
-        return None
-
-    try:
-        set_auth_type("cookie")
-        return _check_auth_cookie(cookie_name)
-    except MKAuthException:
-        # Suppress cookie validation errors from other sites cookies
-        auth_logger.debug('Exception while checking cookie %s: %s' %
-                          (cookie_name, traceback.format_exc()))
-    except Exception:
-        auth_logger.debug('Exception while checking cookie %s: %s' %
-                          (cookie_name, traceback.format_exc()))
-    return None
-
-
-def _check_auth_cookie_for_web_server_auth(user_id: UserId):
-    """Session handling also has to be initialized when the authentication is done
-    by the web server.
-
-    The authentication is already done on web server level. We accept the provided
-    username as authenticated and create our cookie here.
-    """
-    if auth_cookie_name() not in request.cookies:
-        session_id = userdb.on_succeeded_login(user_id)
-        _create_auth_session(user_id, session_id)
-        return
-
-    # Refresh the existing auth cookie and update the session info
-    cookie_name = auth_cookie_name()
-    try:
-        _check_auth_cookie(cookie_name)
-    except MKAuthException:
-        # Suppress cookie validation errors from other sites cookies
-        auth_logger.debug('Exception while checking cookie %s: %s' %
-                          (cookie_name, traceback.format_exc()))
-    except Exception:
-        auth_logger.debug('Exception while checking cookie %s: %s' %
-                          (cookie_name, traceback.format_exc()))
-
-
-def set_auth_type(_auth_type: str) -> None:
-    local.auth_type = _auth_type
-
-
-auth_type: Union[str, LocalProxy] = LocalProxy(lambda: local.auth_type)
-
-
-@page_registry.register_page("login")
 class LoginPage(Page):
     def __init__(self) -> None:
-        super(LoginPage, self).__init__()
+        super().__init__()
         self._no_html_output = False
+        self._username_varname = "_username"
+        self._password_varname = "_password"
 
     def set_no_html_output(self, no_html_output: bool) -> None:
         self._no_html_output = no_html_output
@@ -430,7 +135,7 @@ class LoginPage(Page):
     def page(self) -> None:
         # Initialize the cmk.gui.i18n for the login dialog. This might be
         # overridden later after user login
-        cmk.gui.i18n.localize(request.var("lang", config.get_language()))
+        cmk.gui.i18n.localize(request.var("lang", active_config.default_language))
 
         self._do_login()
 
@@ -443,168 +148,290 @@ class LoginPage(Page):
 
         self._show_login_page()
 
-    def _do_login(self) -> None:
-        """handle the sent login form"""
-        if not request.var('_login'):
+    def _do_login(self) -> None:  # pylint: disable=too-many-branches
+        """handle the login form"""
+        if not request.var("_login"):
             return
 
         try:
-            if not config.user_login:
-                raise MKUserError(None, _('Login is not allowed on this site.'))
+            username: UserId | None = None  # make sure it's defined in the except block
 
-            username_var = request.get_unicode_input('_username', '')
-            assert username_var is not None
-            username = UserId(username_var.rstrip())
-            if not username:
-                raise MKUserError('_username', _('No username given.'))
+            if not active_config.user_login and not is_site_login():
+                raise MKUserError(None, _("Login is not allowed on this site."))
 
-            password = request.var('_password', '')
-            if not password:
-                raise MKUserError('_password', _('No password given.'))
+            # Login via the GET method is allowed only after manually
+            # enabling the property "Enable login via GET" in the
+            # Global Settings. Please refer to the Werk 14261 for
+            # more details.
+            if request.request_method != "POST" and not active_config.enable_login_via_get:
+                raise MKUserError(None, _("Method not allowed"))
 
-            default_origtarget = config.url_prefix() + "check_mk/"
+            username_var = request.get_str_input(self._username_varname, "")
+            if not username_var:
+                raise MKUserError(
+                    self._username_varname, _("No username entered. Please enter a username.")
+                )
+
+            password_var = request.get_str_input(self._password_varname, "")
+            if not password_var:
+                raise MKUserError(
+                    self._password_varname, _("No password entered. Please enter a password.")
+                )
+
+            try:
+                username = UserId(username_var.rstrip())
+                password = Password(password_var)
+            except ValueError:
+                # If type validation fails the credentials cannot be valid. Show the generic error.
+                raise MKUserError(None, self._default_login_error_msg)
+
+            default_origtarget = url_prefix() + "check_mk/"
             origtarget = request.get_url_input("_origtarget", default_origtarget)
 
             # Disallow redirections to:
             #  - logout.py: Happens after login
             #  - side.py: Happens when invalid login is detected during sidebar refresh
-            if "logout.py" in origtarget or 'side.py' in origtarget:
+            if "logout.py" in origtarget or "side.py" in origtarget:
                 origtarget = default_origtarget
 
-            result = userdb.check_credentials(username, password)
-            if result:
+            now = datetime.now()
+            if result := userdb.check_credentials(username, password, now):
                 # use the username provided by the successful login function, this function
                 # might have transformed the username provided by the user. e.g. switched
                 # from mixed case to lower case.
                 username = result
 
-                session_id = userdb.on_succeeded_login(username)
-
                 # The login succeeded! Now:
                 # a) Set the auth cookie
                 # b) Unset the login vars in further processing
                 # c) Redirect to really requested page
-                _create_auth_session(username, session_id)
+                session.login(LoggedInUser(username))
 
-                # Never use inplace redirect handling anymore as used in the past. This results
-                # in some unexpected situations. We simpy use 302 redirects now. So we have a
-                # clear situation.
-                # userdb.need_to_change_pw returns either False or the reason description why the
+                # This must happen before the enforced password change is
+                # checked in order to have the redirects correct...
+                if userdb.is_two_factor_login_enabled(username):
+                    raise HTTPRedirect(
+                        "user_login_two_factor.py?_origtarget=%s" % urlencode(makeuri(request, []))
+                    )
+
+                log_security_event(
+                    AuthenticationSuccessEvent(
+                        auth_method="login_form", username=username, remote_ip=request.remote_ip
+                    )
+                )
+
+                # userdb.need_to_change_pw returns either None or the reason description why the
                 # password needs to be changed
-                change_pw_result = userdb.need_to_change_pw(username)
-                if change_pw_result:
-                    raise HTTPRedirect('user_change_pw.py?_origtarget=%s&reason=%s' %
-                                       (urlencode(origtarget), change_pw_result))
+                if change_reason := userdb.need_to_change_pw(username, now):
+                    raise HTTPRedirect(
+                        f"user_change_pw.py?_origtarget={urlencode(origtarget)}&reason={change_reason}"
+                    )
+
+                # If user pasted e.g. a view to a link in mobile mode, redirect
+                # to the correct page
+                if is_mobile(request, response) and "start_url" in origtarget:
+                    url = unquote(origtarget.split("start_url=")[1])
+                    if not is_allowed_url(url):
+                        url = default_origtarget
+                    raise HTTPRedirect(url)
+
                 raise HTTPRedirect(origtarget)
 
-            userdb.on_failed_login(username)
-            raise MKUserError(None, _('Invalid credentials.'))
+            userdb.on_failed_login(username, now)
+            raise MKUserError(self._password_varname, self._default_login_error_msg)
+
         except MKUserError as e:
+            log_security_event(
+                AuthenticationFailureEvent(
+                    user_error=e.message,
+                    auth_method="login_form",
+                    username=username,
+                    remote_ip=request.remote_ip,
+                )
+            )
             user_errors.add(e)
 
     def _show_login_page(self) -> None:
-        html.set_render_headfoot(False)
+        html.render_headfoot = False
         html.add_body_css_class("login")
-        html.header(config.get_page_heading(), Breadcrumb(), javascripts=[])
+        make_header(html, get_page_heading(), Breadcrumb())
 
-        default_origtarget = ("index.py" if requested_file_name(request) in ["login", "logout"] else
-                              makeuri(request, []))
+        default_origtarget = (
+            "index.py"
+            if requested_file_name(request) in ["login", "logout"]
+            else makeuri(request, [])
+        )
         origtarget = request.get_url_input("_origtarget", default_origtarget)
 
         # Never allow the login page to be opened in the iframe. Redirect top page to login page.
         # This will result in a full screen login page.
-        html.javascript('''if(top != self) {
+        html.javascript(
+            """if(top != self) {
     window.top.location.href = location;
-}''')
+}"""
+        )
 
         # When someone calls the login page directly and is already authed redirect to main page
-        if requested_file_name(request) == 'login' and _check_auth(request):
+        if requested_file_name(request) == "login" and session.user.id:
             raise HTTPRedirect(origtarget)
 
         html.open_div(id_="login")
 
         html.open_div(id_="login_window")
 
-        html.img(src=theme.detect_icon_path(icon_name="logo", prefix="mk-"),
-                 id_="logo",
-                 class_="custom" if config.has_custom_logo() else None)
+        html.open_a(href="https://checkmk.com", class_="login_window_logo_link")
+        html.img(
+            src=theme.detect_icon_path(
+                icon_name="login_logo" if theme.has_custom_logo("login_logo") else "checkmk_logo",
+                prefix="",
+            ),
+            id_="logo",
+        )
+        html.close_a()
 
-        html.begin_form("login", method='POST', add_transid=False, action='login.py')
-        html.hidden_field('_login', '1')
-        html.hidden_field('_origtarget', origtarget)
-        html.label("%s:" % _('Username'), id_="label_user", class_=["legend"], for_="_username")
-        html.br()
-        html.text_input("_username", id_="input_user")
-        html.label("%s:" % _('Password'), id_="label_pass", class_=["legend"], for_="_password")
-        html.br()
-        html.password_input("_password", id_="input_pass", size=None)
+        try:
+            _show_remaining_trial_time(get_remaining_trial_time())
+        except LicenseStateError:
+            pass
 
-        if user_errors:
-            html.open_div(id_="login_error")
-            html.show_user_errors()
-            html.close_div()
+        html.begin_form("login", method="POST", add_transid=False, action="login.py")
+        html.hidden_field("_login", "1")
+        html.hidden_field("_origtarget", origtarget)
+
+        saml2_user_error: str | None = None
+        if saml_connections := [
+            c for c in active_connections_by_type("saml2") if c["owned_by_site"] == omd_site()
+        ]:
+            saml2_user_error = show_saml2_login(saml_connections, saml2_user_error, origtarget)
+
+        html.open_table()
+        html.open_tr()
+        html.td(
+            html.render_label(
+                "%s:" % _("Username"),
+                id_="label_user",
+                class_=["legend"],
+                for_=self._username_varname,
+            ),
+            class_="login_label",
+        )
+        html.open_td(class_="login_input")
+        html.text_input(self._username_varname, id_="input_user")
+        html.close_td()
+        html.close_tr()
+        html.open_tr()
+        html.td(
+            html.render_label(
+                "%s:" % _("Password"),
+                id_="label_pass",
+                class_=["legend"],
+                for_=self._password_varname,
+            ),
+            class_="login_label",
+        )
+        html.open_td(class_="login_input")
+        html.password_input(self._password_varname, id_="input_pass", size=None)
+        html.close_td()
+        html.close_tr()
+        html.close_table()
 
         html.open_div(id_="button_text")
-        html.button("_login", _('Login'), cssclass="hot")
+        html.button("_login", _("Login"), cssclass=None if saml_connections else "hot")
         html.close_div()
+
+        if user_errors and not saml2_user_error:
+            show_user_errors("login_error")
+
         html.close_div()
 
         html.open_div(id_="foot")
 
-        if config.login_screen.get("login_message"):
+        if active_config.login_screen.get("login_message"):
             html.open_div(id_="login_message")
-            html.show_message(config.login_screen["login_message"])
+            html.show_message(active_config.login_screen["login_message"])
             html.close_div()
 
-        footer: List[HTML] = []
-        for title, url, target in config.login_screen.get("footer_links", []):
-            footer.append(html.render_a(title, href=url, target=target))
+        footer: list[HTML] = []
+        for title, url, target in active_config.login_screen.get("footer_links", []):
+            footer.append(HTMLWriter.render_a(title, href=url, target=target))
 
-        if "hide_version" not in config.login_screen:
-            footer.append(escape_html("Version: %s" % cmk_version.__version__))
+        if "hide_version" not in active_config.login_screen:
+            footer.append(escape_to_html("Version: %s" % cmk_version.__version__))
 
         footer.append(
-            HTML("&copy; %s" %
-                 html.render_a("tribe29 GmbH", href="https://checkmk.com", target="_blank")))
+            HTML(
+                "&copy; %s"
+                % HTMLWriter.render_a("Checkmk GmbH", href="https://checkmk.com", target="_blank")
+            )
+        )
 
         html.write_html(HTML(" - ").join(footer))
 
-        if cmk_version.is_raw_edition():
-            html.br()
-            html.br()
-            html.write_text(
-                _('You can use, modify and distribute Check_MK under the terms of the <a href="%s" target="_blank">'
-                  'GNU GPL Version 2</a>.') % "https://checkmk.com/gpl.html")
-
         html.close_div()
 
-        html.set_focus('_username')
+        html.set_focus(self._username_varname)
         html.hidden_fields()
         html.end_form()
         html.close_div()
 
         html.footer()
 
+    @property
+    def _default_login_error_msg(self) -> str:
+        return _("Incorrect username or password. Please try again.")
 
-@page_registry.register_page("logout")
+
+def _show_remaining_trial_time(remaining_trial_time: RemainingTrialTime) -> None:
+    # Add 1 to round up the remaining days/hours, to not show "0 days" or "0 hours"
+    # Note: Once the remaining trial time <= 0 seconds, this code is not reached anymore (license
+    #       switch from trial to free)
+    remaining_days: int = remaining_trial_time.days + 1
+    remaining_hours: int = remaining_trial_time.hours + 1
+    remaining_percentage: float = remaining_trial_time.perc
+
+    html.open_div(class_="trial_expiration_info" + (" warning" if remaining_days < 8 else ""))
+    html.span(
+        _("%d days") % remaining_days
+        if remaining_days > 1
+        else "%d " % remaining_hours + ungettext("hour", "hours", remaining_hours),
+        class_="remaining_time",
+    )
+
+    html.span(_(" left in your free trial"))
+
+    html.open_div(class_="time_bar")
+    html.div(
+        "",
+        class_="passed",
+        style="width: %d%%;" % (100 - remaining_percentage),
+    )
+    html.div(
+        "",
+        class_="remaining",
+        style="width: %d%%;" % remaining_percentage,
+    )
+    html.close_div()
+
+    html.close_div()
+
+
 class LogoutPage(Page):
     def page(self) -> None:
-        assert config.user.id is not None
+        assert user.id is not None
 
-        _invalidate_auth_session()
+        session.invalidate()
+        session.persist()
 
-        session_id = _get_session_id_from_cookie(config.user.id, revalidate_cookie=True)
-        userdb.on_logout(config.user.id, session_id)
-
-        if auth_type == 'cookie':
-            raise HTTPRedirect(config.url_prefix() + 'check_mk/login.py')
+        if session.session_info.auth_type == "cookie":
+            raise HTTPRedirect(url_prefix() + "check_mk/login.py")
 
         # Implement HTTP logout with cookie hack
-        if not request.has_cookie('logout'):
-            response.headers['WWW-Authenticate'] = ('Basic realm="OMD Monitoring Site %s"' %
-                                                    config.omd_site())
-            response.set_http_cookie('logout', '1', secure=request.is_secure)
+        if not request.has_cookie("logout"):
+            response.headers["WWW-Authenticate"] = (
+                'Basic realm="OMD Monitoring Site %s"' % omd_site()
+            )
+            response.set_http_cookie("logout", "1", secure=request.is_secure)
             raise FinalizeRequest(http.client.UNAUTHORIZED)
 
-        response.delete_cookie('logout')
-        raise HTTPRedirect(config.url_prefix() + 'check_mk/')
+        response.delete_cookie("logout")
+        raise HTTPRedirect(url_prefix() + "check_mk/")

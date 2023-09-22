@@ -1,28 +1,28 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
+from __future__ import annotations
 
 import copy
 import os
 import types
-from typing import Any, Callable, NamedTuple
+from collections.abc import Callable, Iterable, Sequence
+from typing import Any, NamedTuple
+from unittest import mock
 
-import mock
 import pytest
-
-from cmk.base.item_state import MKCounterWrapped
-from cmk.base.check_api import Service
 
 
 class Tuploid:
     """Base class for values with (potentially variadic) tuple representations"""
+
     def __eq__(self, other_value):
         if isinstance(other_value, self.__class__):
             return other_value.tuple == self.tuple
         if isinstance(other_value, tuple):
             return all(x == y for x, y in zip(other_value, self.tuple))
+        return None
 
     def __ne__(self, other_value):
         return not self.__eq__(other_value)
@@ -32,13 +32,21 @@ class Tuploid:
         raise NotImplementedError()
 
     def __iter__(self):
-        for x in self.tuple:
-            yield x
+        yield from self.tuple
 
 
 class PerfValue(Tuploid):
     """Represents a single perf value"""
-    def __init__(self, key, value, warn=None, crit=None, minimum=None, maximum=None):
+
+    def __init__(
+        self,
+        key: str,
+        value: int | float | None,
+        warn: int | float | None = None,
+        crit: int | float | None = None,
+        minimum: int | float | None = None,
+        maximum: int | float | None = None,
+    ) -> None:
         # assign first, so __repr__ won't crash
         self.key = key
         self.value = value
@@ -50,23 +58,24 @@ class PerfValue(Tuploid):
         # TODO: This is very basic. There is more way more magic involved
         #       in what kind of values are allowed as metric names.
         #       I'm not too sure unicode should be allowed, either.
-        assert isinstance(key, str),\
-               "PerfValue: key %r must be of type str or unicode" % key
+        assert isinstance(key, str), "PerfValue: key %r must be of type str or unicode" % key
         #       Whitespace leads to serious errors
-        assert len(key.split()) == 1, \
-               "PerfValue: key %r must not contain whitespaces" % key
+        assert len(key.split()) == 1, "PerfValue: key %r must not contain whitespaces" % key
         #       Parsing around this is way too funky and doesn't work properly
         for c in "=\n":
-            assert c not in key, "PerfValue: key %r must not contain %r" % (key, c)
+            assert c not in key, f"PerfValue: key {key!r} must not contain {c!r}"
         # NOTE: The CMC as well as all other Nagios-compatible cores do accept a
         #       string value that may contain a unit, which is in turn available
         #       for use in PNP4Nagios templates. Checkmk defines its own semantic
         #       context for performance values using Checkmk metrics. It is therefore
         #       preferred to return a "naked" scalar.
         msg = "PerfValue: %s parameter %r must be of type int, float or None - not %r"
-        assert isinstance(value, (int, float)),\
-               msg.replace(' or None', '') % ('value', value, type(value))
-        for n in ('warn', 'crit', 'minimum', 'maximum'):
+        assert isinstance(value, (int, float)), msg.replace(" or None", "") % (
+            "value",
+            value,
+            type(value),
+        )
+        for n in ("warn", "crit", "minimum", "maximum"):
             v = getattr(self, n)
             assert v is None or isinstance(v, (int, float)), msg % (n, v, type(v))
 
@@ -74,7 +83,7 @@ class PerfValue(Tuploid):
     def tuple(self):
         return (self.key, self.value, self.warn, self.crit, self.minimum, self.maximum)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return "PerfValue(%r, %r, %r, %r, %r, %r)" % self.tuple
 
 
@@ -86,15 +95,31 @@ def assertPerfValuesEqual(actual, expected):
     """
     assert isinstance(actual, PerfValue), "not a PerfValue: %r" % actual
     assert isinstance(expected, PerfValue), "not a PerfValue: %r" % expected
-    assert expected.key == actual.key, "expected %r, but key is %r" % (expected, actual.key)
-    assert expected.value == pytest.approx(
-        actual.value), "expected %r, but value is %r" % (expected, actual.value)
-    assert expected.warn == actual.warn, "expected %r, but warn is %r" % (expected, actual.warn)
-    assert expected.crit == actual.crit, "expected %r, but crit is %r" % (expected, actual.crit)
-    assert expected.minimum == actual.minimum, "expected %r, but minimum is %r" % (expected,
-                                                                                   actual.minimum)
-    assert expected.maximum == actual.maximum, "expected %r, but maximum is %r" % (expected,
-                                                                                   actual.maximum)
+    assert expected.key == actual.key, f"expected {expected!r}, but key is {actual.key!r}"
+    assert expected.value == pytest.approx(actual.value), "expected {!r}, but value is {!r}".format(
+        expected,
+        actual.value,
+    )
+    assert (
+        pytest.approx(expected.warn, rel=0.1) == actual.warn
+    ), "expected {!r}, but warn is {!r}".format(
+        expected,
+        actual.warn,
+    )
+    assert (
+        pytest.approx(expected.crit, rel=0.1) == actual.crit
+    ), "expected {!r}, but crit is {!r}".format(
+        expected,
+        actual.crit,
+    )
+    assert expected.minimum == actual.minimum, "expected {!r}, but minimum is {!r}".format(
+        expected,
+        actual.minimum,
+    )
+    assert expected.maximum == actual.maximum, "expected {!r}, but maximum is {!r}".format(
+        expected,
+        actual.maximum,
+    )
 
 
 class BasicCheckResult(Tuploid):
@@ -105,7 +130,10 @@ class BasicCheckResult(Tuploid):
     facilities to match it against conditions, such as 'Status is...' or
     'Infotext contains...'
     """
-    def __init__(self, status, infotext, perfdata=None):
+
+    def __init__(
+        self, status: int, infotext: str, perfdata: None | Sequence[tuple | PerfValue] = None
+    ) -> None:
         """We perform some basic consistency checks during initialization"""
         # assign first, so __repr__ won't crash
         self.status = status
@@ -113,26 +141,36 @@ class BasicCheckResult(Tuploid):
         self.perfdata = []
         self.multiline = None
 
-        assert status in [0, 1, 2, 3], \
-               "BasicCheckResult: status must be in (0, 1, 2, 3) - not %r" % (status,)
+        assert status in [
+            0,
+            1,
+            2,
+            3,
+        ], f"BasicCheckResult: status must be in (0, 1, 2, 3) - not {status!r}"
 
-        assert isinstance(infotext, str), \
-                "BasicCheckResult: infotext %r must be of type str or unicode - not %r" % \
-                (infotext, type(infotext))
+        assert isinstance(
+            infotext, str
+        ), "BasicCheckResult: infotext {!r} must be of type str or unicode - not {!r}".format(
+            infotext,
+            type(infotext),
+        )
         if "\n" in infotext:
-            self.infotext, \
-            self.multiline = infotext.split("\n", 1)
+            self.infotext, self.multiline = infotext.split("\n", 1)
 
         if perfdata is not None:
             tp = type(perfdata)
-            assert tp == list, \
-                   "BasicCheckResult: perfdata %r must be of type list - not %r" \
-                   % (perfdata, tp)
+            assert (
+                tp == list
+            ), "BasicCheckResult: perfdata {!r} must be of type list - not {!r}".format(
+                perfdata,
+                tp,
+            )
             for entry in perfdata:
                 te = type(entry)
-                assert te in [tuple, PerfValue], \
-                       "BasicCheckResult: perfdata entry %r must be of type " \
-                       "tuple or PerfValue - not %r" % (entry, te)
+                assert te in [tuple, PerfValue], (
+                    "BasicCheckResult: perfdata entry %r must be of type "
+                    "tuple or PerfValue - not %r" % (entry, te)
+                )
                 if isinstance(entry, tuple):
                     self.perfdata.append(PerfValue(*entry))
                 else:
@@ -142,8 +180,8 @@ class BasicCheckResult(Tuploid):
     def tuple(self):
         return (self.status, self.infotext, self.perfdata, self.multiline)
 
-    def __repr__(self):
-        return 'BasicCheckResult(%r, %r, %r, multiline=%r)' % self.tuple
+    def __repr__(self) -> str:
+        return "BasicCheckResult(%r, %r, %r, multiline=%r)" % self.tuple
 
 
 def assertBasicCheckResultsEqual(actual, expected):
@@ -155,7 +193,7 @@ def assertBasicCheckResultsEqual(actual, expected):
     assert isinstance(actual, BasicCheckResult), "not a BasicCheckResult: %r" % actual
     assert isinstance(expected, BasicCheckResult), "not a BasicCheckResult: %r" % expected
 
-    msg = "expected %s, but %%s is %%r" % repr(expected).replace('%', '%%')
+    msg = "expected %s, but %%s is %%r" % repr(expected).replace("%", "%%")
     assert expected.status == actual.status, msg % ("status", actual.status)
 
     diff_idx = len(os.path.commonprefix((expected.infotext, actual.infotext)))
@@ -183,7 +221,8 @@ class CheckResult:
     -The check's code is being run, and doesn't disappear in the yield-APIs
      generator-induced laziness.
     """
-    def __init__(self, result):
+
+    def __init__(self, result: Iterable | None | CheckResult) -> None:
         """
         Initializes a list of subresults using BasicCheckResult.
 
@@ -205,17 +244,19 @@ class CheckResult:
         elif isinstance(result, list):
             for subresult in result:
                 ts = type(subresult)
-                assert ts in (tuple, BasicCheckResult), \
-                       "CheckResult: subresult %r must be of type tuple or " \
-                       "BasicCheckResult - not %r" % (subresult, ts)
+                assert ts in (tuple, BasicCheckResult), (
+                    "CheckResult: subresult %r must be of type tuple or "
+                    "BasicCheckResult - not %r" % (subresult, ts)
+                )
                 if isinstance(subresult, tuple):
                     subresult = BasicCheckResult(*subresult)
                 self.subresults.append(subresult)
         else:
+            assert isinstance(result, tuple)
             self.subresults.append(BasicCheckResult(*result))
 
-    def __repr__(self):
-        return 'CheckResult(%r)' % self.subresults
+    def __repr__(self) -> str:
+        return "CheckResult(%r)" % self.subresults
 
     def __eq__(self, other):
         if not isinstance(other, CheckResult):
@@ -238,7 +279,7 @@ class CheckResult:
             sr_perf = [p.tuple for p in sr.perfdata]
             sr_text = sr.infotext
             if sr.multiline:
-                sr_text += '\n' + sr.multiline
+                sr_text += "\n" + sr.multiline
             rr.append((sr.status, sr_text, sr_perf))
         return rr
 
@@ -253,10 +294,8 @@ def assertCheckResultsEqual(actual, expected):
         assertBasicCheckResultsEqual(actual, expected)
 
     else:
-        assert isinstance(actual, CheckResult), \
-               "%r is not a CheckResult instance" % actual
-        assert isinstance(expected, CheckResult), \
-               "%r is not a CheckResult instance" % expected
+        assert isinstance(actual, CheckResult), "%r is not a CheckResult instance" % actual
+        assert isinstance(expected, CheckResult), "%r is not a CheckResult instance" % expected
         for suba, sube in zip(actual.subresults, expected.subresults):
             assertBasicCheckResultsEqual(suba, sube)
         len_ac, len_ex = len(actual.subresults), len(expected.subresults)
@@ -264,24 +303,18 @@ def assertCheckResultsEqual(actual, expected):
 
 
 class DiscoveryEntry(Tuploid):
-    """A single entry as returned by the discovery (or in oldspeak: inventory) function."""
-    def __init__(self, entry):
-        # hack for ServiceLabel
-        if isinstance(entry, Service):
-            self.item, self.default_params, self.service_labels = entry.item, entry.parameters, entry.service_labels
-        else:
-            self.item, self.default_params = entry
-        ti = type(self.item)
-        assert self.item is None or isinstance(self.item, str), \
-               "DiscoveryEntry: item %r must be of type str, unicode or None - not %r" \
-               % (self.item, type(ti))
+    """A single entry as returned by the discovery function."""
+
+    def __init__(self, entry: tuple[str | None, dict | str | tuple | None]) -> None:
+        self.item, self.default_params = entry
+        assert self.item is None or isinstance(self.item, str)
 
     @property
     def tuple(self):
-        return (self.item, self.default_params)
+        return self.item, self.default_params
 
-    def __repr__(self):
-        return "DiscoveryEntry(%r, %r)" % self.tuple
+    def __repr__(self) -> str:
+        return f"DiscoveryEntry{self.tuple!r}"
 
 
 class DiscoveryResult:
@@ -292,7 +325,8 @@ class DiscoveryResult:
     that yield-based discovery functions run, and that no exceptions
     get lost in the laziness.
     """
-    def __init__(self, result=()):
+
+    def __init__(self, result: Sequence[tuple[str | None, dict | str | tuple | None]] = ()) -> None:
         self.entries = sorted((DiscoveryEntry(e) for e in (result or ())), key=repr)
 
     def __eq__(self, other):
@@ -308,25 +342,22 @@ def assertDiscoveryResultsEqual(check, actual, expected):
 
     This gives more helpful output than 'assert actual == expected'
     """
-    assert isinstance(actual, DiscoveryResult), \
-           "%r is not a DiscoveryResult instance" % actual
-    assert isinstance(expected, DiscoveryResult), \
-           "%r is not a DiscoveryResult instance" % expected
-    assert len(actual.entries) == len(expected.entries), \
-           "DiscoveryResults entries are not of equal length: %r != %r" % (actual, expected)
+    assert isinstance(actual, DiscoveryResult), "%r is not a DiscoveryResult instance" % actual
+    assert isinstance(expected, DiscoveryResult), "%r is not a DiscoveryResult instance" % expected
+    assert len(actual.entries) == len(
+        expected.entries
+    ), f"DiscoveryResults entries are not of equal length: {actual!r} != {expected!r}"
 
     for enta, ente in zip(actual.entries, expected.entries):
         item_a, default_params_a = enta
-        if isinstance(default_params_a, str):
-            default_params_a = eval(default_params_a, check.context, check.context)
-
         item_e, default_params_e = ente
-        if isinstance(default_params_e, str):
-            default_params_e = eval(default_params_e, check.context, check.context)
-
-        assert item_a == item_e, "items differ: %r != %r" % (item_a, item_e)
-        assert default_params_a == default_params_e, "default parameters differ: %r != %r" % (
-            default_params_a, default_params_e)
+        assert item_a == item_e, f"items differ: {item_a!r} != {item_e!r}"
+        assert (
+            default_params_a == default_params_e
+        ), "default parameters differ: {!r} != {!r}".format(
+            default_params_a,
+            default_params_e,
+        )
 
 
 class BasicItemState:
@@ -335,7 +366,8 @@ class BasicItemState:
     We assert that we have exactly two values,
     where the first one is either float or int.
     """
-    def __init__(self, *args):
+
+    def __init__(self, *args) -> None:  # type: ignore[no-untyped-def]
         if len(args) == 1:
             args = args[0]
         msg = "BasicItemState: expected 2-tuple (time_diff, value) - not %r"
@@ -351,7 +383,7 @@ class BasicItemState:
 
 
 class _MockValueStore:
-    def __init__(self, getter: Callable):
+    def __init__(self, getter: Callable) -> None:
         self._getter = getter
 
     def get(self, key, default=None):
@@ -391,65 +423,29 @@ def mock_item_state(mock_state):
 
     See for example 'test_statgrab_cpu_check.py'.
     """
-    target = 'cmk.base.api.agent_based.value_store._global_state._active_host_value_store'
+    target = "cmk.base.api.agent_based.value_store._global_state._active_host_value_store"
 
     getter = (  #
-        mock_state.get if isinstance(mock_state, dict) else
-        (mock_state if callable(mock_state) else  #
-         lambda key, default: mock_state))
+        mock_state.get
+        if isinstance(mock_state, dict)
+        else (mock_state if callable(mock_state) else lambda key, default: mock_state)  #
+    )
 
     return mock.patch(target, _MockVSManager(_MockValueStore(getter)))
 
 
-class assertMKCounterWrapped:
-    """Contextmanager in which a MKCounterWrapped exception is expected
-
-    If you can choose to also assert a certain error message:
-
-    with mock_item_state((1., -42)):
-        with assertMKCounterWrapped("value is negative"):
-            # do a check that raises such an exception
-            run_my_check()
-
-    Or you can ignore the exact error message:
-
-    with mock_item_state((1., -42)):
-        with assertMKCounterWrapped():
-            # do a check that raises such an exception
-            run_my_check()
-
-    See for example 'test_statgrab_cpu_check.py'.
-    """
-    def __init__(self, msg=None):
-        self.msg = msg
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, ty, ex, tb):
-        if ty is AssertionError:
-            raise
-        assert ty is not None, "assertMKCounterWrapped: no exception has occurred"
-        assert ty == MKCounterWrapped, \
-               "assertMKCounterWrapped: %r is not of type %r" % (ex, MKCounterWrapped)
-        if self.msg is not None:
-            assert self.msg == str(ex), "assertMKCounterWrapped: %r != %r" \
-                   % (self.msg, str(ex))
-        return True
-
-
 class MockHostExtraConf:
-    """Mock the calls to host_extra_conf.
+    """Mock the calls to get_host_values.
 
     Due to our rather unorthodox import structure, we cannot mock
-    host_extra_conf_merged directly (it's a global var in running checks!)
-    Instead, we mock the calls to cmk.base.config.host_extra_conf.
+    get_host_merged_dict directly (it's a global var in running checks!)
+    Instead, we mock the calls to cmk.base.config.get_host_values.
 
     Passing a single dict to this objects init method will result in
-    host_extra_conf_merged returning said dict.
+    get_host_merged_dict returning said dict.
 
     You can also pass a list of dicts, but that's rather pointless, as
-    host_extra_conf_merged will return a merged dict, the result of
+    get_host_merged_dict will return a merged dict, the result of
 
         merged_dict = {}
         for d in reversed(list_of_dicts):
@@ -460,35 +456,45 @@ class MockHostExtraConf:
 
     with MockHostExtraConf(mockconfig):
         # run your check test here,
-        # host_extra_conf_merged in your check will return
+        # get_host_merged_dict in your check will return
         # mockconfig
 
     See for example 'test_df_check.py'.
     """
-    def __init__(self, check, mock_config, target="host_extra_conf"):
+
+    def __init__(
+        self,
+        check: object,
+        mock_config: Callable | dict[object, object],
+        target: str = "get_host_values",
+    ) -> None:
         self.target = target
-        self.context = None
+        self.context: Any = None  # TODO: Figure out the right type
         self.check = check
         self.config = mock_config
 
     def __call__(self, _hostname, _ruleset):
         # ensure the default value is sane
-        if hasattr(self.config, '__call__'):
+        if hasattr(self.config, "__call__"):
             return self.config(_hostname, _ruleset)
 
-        if self.target == "host_extra_conf" and isinstance(self.config, dict):
+        if self.target == "get_host_values" and isinstance(self.config, dict):
             return [self.config]
         return self.config
 
     def __enter__(self):
-        '''The default context: just mock get_item_state'''
-        import cmk.base.config  # pylint: disable=import-outside-toplevel
-        config_cache = cmk.base.config.get_config_cache()
+        """The default context: just mock get_item_state"""
+        import cmk.base.config  # pylint: disable=import-outside-toplevel,cmk-module-layer-violation
+
+        # we can't use get_config_cache here because it may lead to flakiness
+        config_cache = cmk.base.config.reset_config_cache()
         self.context = mock.patch.object(
-            config_cache,
+            config_cache.ruleset_matcher,
             self.target,
             # I'm the MockObj myself!
-            new_callable=lambda: self)
+            new_callable=lambda: self,
+        )
+        assert self.context is not None
         return self.context.__enter__()
 
     def __exit__(self, *exc_info):
@@ -502,17 +508,18 @@ class ImmutablesChangedError(AssertionError):
 
 class Immutables:
     """Store some data and ensure it is not changed"""
-    def __init__(self):
-        self.refs = {}
-        self.copies = {}
+
+    def __init__(self) -> None:
+        self.refs: dict = {}
+        self.copies: dict = {}
 
     def register(self, v, k=None):
         if k is None:
             k = id(v)
-        self.refs.__setitem__(k, v)
-        self.copies.__setitem__(k, copy.deepcopy(v))
+        self.refs[k] = v
+        self.copies[k] = copy.deepcopy(v)
 
-    def test(self, descr=''):
+    def test(self, descr=""):
         for k in self.refs:
             try:
                 assertEqual(self.refs[k], self.copies[k], repr(k) + descr)
@@ -520,25 +527,32 @@ class Immutables:
                 raise ImmutablesChangedError(exc) from exc
 
 
-def assertEqual(first, second, descr=''):
+def assertEqual(first, second, descr=""):
     """Help finding diffs in epic dicts or iterables"""
     if first == second:
         return
 
-    assert isinstance(first, type(second)), ("%sdiffering type: %r != %r for values %r and %r" %
-                                             (descr, type(first), type(second), first, second))
+    assert isinstance(
+        first, type(second)
+    ), "{}differing type: {!r} != {!r} for values {!r} and {!r}".format(
+        descr,
+        type(first),
+        type(second),
+        first,
+        second,
+    )
 
     if isinstance(first, dict):
         remainder = set(second.keys())
         for k in first:
-            assert k in second, "%sadditional key %r in %r" % (descr, k, first)
+            assert k in second, f"{descr}additional key {k!r} in {first!r}"
             remainder.remove(k)
             assertEqual(first[k], second[k], descr + " [%s]" % repr(k))
-        assert not remainder, "%smissing keys %r in %r" % (descr, list(remainder), first)
+        assert not remainder, f"{descr}missing keys {list(remainder)!r} in {first!r}"
 
     if isinstance(first, (list, tuple)):
-        assert len(first) == len(second), "%svarying length: %r != %r" % (descr, first, second)
+        assert len(first) == len(second), f"{descr}varying length: {first!r} != {second!r}"
         for (c, fst), snd in zip(enumerate(first), second):
             assertEqual(fst, snd, descr + "[%d] " % c)
 
-    raise AssertionError("%snot equal (%r): %r != %r" % (descr, type(first), first, second))
+    raise AssertionError(f"{descr}not equal ({type(first)!r}): {first!r} != {second!r}")

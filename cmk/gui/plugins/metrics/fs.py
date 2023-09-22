@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+from cmk.gui.graphing._utils import graph_info, metric_info
 from cmk.gui.i18n import _
 
-from cmk.gui.plugins.metrics import (
-    metric_info,
-    graph_info,
-)
-
-#.
+# .
 #   .--Metrics-------------------------------------------------------------.
 #   |                   __  __      _        _                             |
 #   |                  |  \/  | ___| |_ _ __(_) ___ ___                    |
@@ -27,54 +22,96 @@ from cmk.gui.plugins.metrics import (
 # Colors: See indexed_color() in cmk/gui/plugins/metrics/utils.py
 
 metric_info["fs_free"] = {
-    "title": _("Free filesystem space"),
+    "title": _("Free space"),
     "unit": "bytes",
     "color": "#e3fff9",
 }
 
 metric_info["reserved"] = {
-    "title": _("Reserved filesystem space"),
+    "title": _("Reserved space"),
     "unit": "bytes",
     "color": "#ffcce6",
 }
 
 metric_info["fs_used"] = {
-    "title": _("Used filesystem space"),
+    "title": _("Used space"),
     "unit": "bytes",
     "color": "#00ffc6",
 }
 
 metric_info["fs_used_percent"] = {
-    "title": _("Used filesystem space %"),
+    "title": _("Used space %"),
     "unit": "%",
     "color": "#00ffc6",
 }
 
 metric_info["fs_size"] = {
-    "title": _("Filesystem size"),
+    "title": _("Total size"),
     "unit": "bytes",
     "color": "#006040",
 }
 
 metric_info["fs_growth"] = {
-    "title": _("Filesystem growth"),
+    "title": _("Growth"),
     "unit": "bytes/d",
     "color": "#29cfaa",
 }
 
 metric_info["fs_trend"] = {
-    "title": _("Trend of filesystem growth"),
+    "title": _("Growth trend"),
     "unit": "bytes/d",
     "color": "#808080",
 }
 
 metric_info["fs_provisioning"] = {
-    "title": _("Provisioned filesystem space"),
+    "title": _("Provisioned space"),
     "unit": "bytes",
     "color": "#ff8000",
 }
 
-#.
+metric_info["data_reduction"] = {
+    "title": _("Data reduction ratio"),
+    "unit": "count",
+    "color": "11/a",
+}
+
+metric_info["unique_size"] = {
+    "title": _("Unique"),
+    "unit": "bytes",
+    "color": "14/a",
+}
+
+metric_info["snapshots_size"] = {
+    "title": _("Snapshots"),
+    "unit": "bytes",
+    "color": "21/a",
+}
+
+metric_info["shared_size"] = {
+    "title": _("Shared"),
+    "unit": "bytes",
+    "color": "24/a",
+}
+
+metric_info["system_size"] = {
+    "title": _("System"),
+    "unit": "bytes",
+    "color": "31/a",
+}
+
+metric_info["replication_size"] = {
+    "title": _("Replication"),
+    "unit": "bytes",
+    "color": "41/a",
+}
+
+metric_info["virtual_size"] = {
+    "title": _("Virtual"),
+    "unit": "bytes",
+    "color": "44/a",
+}
+
+# .
 #   .--Graphs--------------------------------------------------------------.
 #   |                    ____                 _                            |
 #   |                   / ___|_ __ __ _ _ __ | |__  ___                    |
@@ -87,10 +124,13 @@ metric_info["fs_provisioning"] = {
 #   '----------------------------------------------------------------------'
 
 graph_info["fs_used"] = {
-    "title": _("Filesystem size and used space"),
+    "title": _("Size and used space"),
     "metrics": [
+        # NOTE: in this scenario, fs_used includes reserved space
         ("fs_used", "area"),
-        ("fs_size,fs_used,-#e3fff9", "stack", _("Free space")),
+        ("fs_size,fs_used,-#e3fff9", "stack", _("Free space")),  # this has to
+        # remain a calculated value for compatibility reasons: fs_free has not
+        # always been available as a metric (see CMK-12488)
         ("fs_size", "line"),
     ],
     "scalars": [
@@ -98,17 +138,17 @@ graph_info["fs_used"] = {
         "fs_used:crit",
     ],
     "range": (0, "fs_used:max"),
-    "conflicting_metrics": ["fs_free"],
+    "conflicting_metrics": ["reserved"],
 }
 
 # draw a different graph if space reserved for root was excluded
 graph_info["fs_used_2"] = {
-    "title": _("Filesystem size and usage"),
+    "title": _("Size and used space"),
     "metrics": [
         ("fs_used", "area"),
         ("fs_free", "stack"),
         ("reserved", "stack"),
-        ("fs_size", "line"),
+        ("fs_used,fs_free,reserved,+,+#006040", "line", _("Filesystem size")),
     ],
     "scalars": [
         "fs_used:warn",
@@ -119,20 +159,47 @@ graph_info["fs_used_2"] = {
 
 graph_info["growing"] = {
     "title": _("Growing"),
-    "metrics": [(
-        "fs_growth.max,0,MAX",
-        "area",
-        _("Growth"),
-    ),],
+    "metrics": [
+        (
+            "fs_growth.max,0,MAX",
+            "area",
+            _("Growth"),
+        ),
+    ],
 }
 
 graph_info["shrinking"] = {
     "title": _("Shrinking"),
     "consolidation_function": "min",
-    "metrics": [("fs_growth.min,0,MIN,-1,*#299dcf", "-area", _("Shrinkage")),],
+    "metrics": [
+        ("fs_growth.min,0,MIN,-1,*#299dcf", "-area", _("Shrinkage")),
+    ],
 }
 
 graph_info["fs_trend"] = {
-    "title": _("Trend of filesystem growth"),
-    "metrics": [("fs_trend", "line"),],
+    "title": _("Growth trend"),
+    "metrics": [
+        ("fs_trend", "line"),
+    ],
+}
+
+graph_info["capacity_usage"] = {
+    "title": _("Capacity usage"),
+    "metrics": [
+        ("unique_size", "stack"),
+        ("snapshots_size", "stack"),
+        ("shared_size", "stack"),
+        ("system_size", "stack"),
+        ("replication_size", "stack"),
+    ],
+}
+
+graph_info["capacity_usage_2"] = {
+    "title": _("Capacity usage"),
+    "metrics": [
+        ("fs_size", "line"),
+        ("unique_size", "line"),
+        ("snapshots_size", "line"),
+        ("virtual_size", "line"),
+    ],
 }

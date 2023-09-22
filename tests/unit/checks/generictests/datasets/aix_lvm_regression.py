@@ -1,41 +1,37 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# yapf: disable
-# type: ignore
+# fmt: off
+# mypy: disable-error-code=var-annotated
 
 
+checkname = "aix_lvm"
 
-checkname = 'aix_lvm'
 
-
-info = [[u'rootvg:'],
-        [u'LV',
-         u'NAME',
-         u'TYPE',
-         u'LPs',
-         u'PPs',
-         u'PVs',
-         u'LV',
-         u'STATE',
-         u'MOUNT',
-         u'POINT'],
-        [u'hd5', u'boot', u'1', u'4', u'2', u'closed/syncd', u'N/A'],
-        [u'hd6', u'paging', u'119', u'238', u'2', u'open/syncd', u'N/A'],
-        [u'hd8', u'jfs2log', u'1', u'3', u'2', u'open/syncd', u'N/A'],
+info = [
+    ["rootvg:"],
+    ["LV", "NAME", "TYPE", "LPs", "PPs", "PVs", "LV", "STATE", "MOUNT", "POINT"],
+    ["hd5", "boot", "1", "4", "2", "closed/syncd", "N/A"],
+    ["hd6", "paging", "119", "238", "2", "open/syncd", "N/A"],
+    ["hd8", "jfs2log", "1", "3", "2", "open/syncd", "N/A"],
 ]
 
 
-discovery = {'': [(u'rootvg/hd5', None),
-                  (u'rootvg/hd6', None),
-                  (u'rootvg/hd8', None),
-                  ]}
+discovery = {
+    "": [
+        ("rootvg/hd5", None),
+        ("rootvg/hd6", None),
+        ("rootvg/hd8", None),
+    ]
+}
 
 
-checks = {'': [(u'rootvg/hd5', {}, [(1, 'LV Mirrors are misaligned between physical volumes(!)', [])]),
-               (u'rootvg/hd6', {}, [(0, 'LV is open/syncd', [])]),
-               (u'rootvg/hd8', {}, [(0, 'LV is open/syncd', [])]),
-               ]}
+checks = {
+    "": [
+        ("rootvg/hd5", {}, [(1, "LV Mirrors are misaligned between physical volumes(!)", [])]),
+        ("rootvg/hd6", {}, [(0, "LV is open/syncd", [])]),
+        ("rootvg/hd8", {}, [(0, "LV is open/syncd", [])]),
+    ]
+}

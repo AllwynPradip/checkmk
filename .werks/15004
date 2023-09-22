@@ -1,0 +1,18 @@
+Title: Improved notification processing performance
+Class: fix
+Compatible: compat
+Component: notifications
+Date: 1670842838
+Edition: cre
+Knowledge: doc
+Level: 1
+Version: 2.2.0b1
+
+In larger setups, notification processing could slow down as the configuration
+grew.
+
+The reason was in particular the determination of labels for a host or service,
+which needed the current configuration to be loaded.
+
+This configuration load is now no longer needed and the monitoring core creates
+the needed information on configuration generation.

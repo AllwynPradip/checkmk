@@ -1,20 +1,24 @@
 #!/bin/bash
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 set -e -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+# shellcheck source=buildscripts/infrastructure/build-nodes/scripts/build_lib.sh
 . "${SCRIPT_DIR}/build_lib.sh"
 
-OPENSSL_VERSION=1.1.1d
+OPENSSL_VERSION=1.1.1t
 DIR_NAME=openssl-${OPENSSL_VERSION}
 ARCHIVE_NAME=${DIR_NAME}.tar.gz
 TARGET_DIR=/opt
 
+# OpenSSL "config" seems to have problems with detecting 32bit architecture in some cases
+CONFIG_COMMAND=config
+[ "${ARCHITECTURE}" = i386 ] && CONFIG_COMMAND="Configure linux-x86"
 # Increase this to enforce a recreation of the build cache
-BUILD_ID=1
+BUILD_ID=4
 
 build_package() {
     mkdir -p /opt/src
@@ -26,7 +30,7 @@ build_package() {
     # Now build the package
     tar xf "${ARCHIVE_NAME}"
     cd "${DIR_NAME}"
-    ./config --prefix="${TARGET_DIR}/${DIR_NAME}" enable-md2 -Wl,-rpath,/opt/"${DIR_NAME}"/lib
+    ./"${CONFIG_COMMAND}" --prefix="${TARGET_DIR}/${DIR_NAME}" enable-md2 -Wl,-rpath,/opt/"${DIR_NAME}"/lib
     make -j6
     make install
 

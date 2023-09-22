@@ -1,36 +1,28 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# type: ignore[list-item,import,assignment,misc,operator]  # TODO: see which are needed in this file
 # For Hitachi Unified Storage (HUS) devices which support the USPMIB
 # This devices has two units: Disk Controller (DKC) and Disk Unit (DKC)
 
 # Example output from DKC:
-#.1.3.6.1.4.1.116.5.11.4.1.1.6.1.1 470849
-#.1.3.6.1.4.1.116.5.11.4.1.1.6.1.2 1
-#.1.3.6.1.4.1.116.5.11.4.1.1.6.1.3 1
-#.1.3.6.1.4.1.116.5.11.4.1.1.6.1.4 1
-#.1.3.6.1.4.1.116.5.11.4.1.1.6.1.5 1
-#.1.3.6.1.4.1.116.5.11.4.1.1.6.1.6 5
-#.1.3.6.1.4.1.116.5.11.4.1.1.6.1.7 1
-#.1.3.6.1.4.1.116.5.11.4.1.1.6.1.8 1
-#.1.3.6.1.4.1.116.5.11.4.1.1.6.1.9 1
+# .1.3.6.1.4.1.116.5.11.4.1.1.6.1.1 470849
+# .1.3.6.1.4.1.116.5.11.4.1.1.6.1.2 1
+# .1.3.6.1.4.1.116.5.11.4.1.1.6.1.3 1
+# .1.3.6.1.4.1.116.5.11.4.1.1.6.1.4 1
+# .1.3.6.1.4.1.116.5.11.4.1.1.6.1.5 1
+# .1.3.6.1.4.1.116.5.11.4.1.1.6.1.6 5
+# .1.3.6.1.4.1.116.5.11.4.1.1.6.1.7 1
+# .1.3.6.1.4.1.116.5.11.4.1.1.6.1.8 1
+# .1.3.6.1.4.1.116.5.11.4.1.1.6.1.9 1
 
 # Example output from DKU:
-#.1.3.6.1.4.1.116.5.11.4.1.1.7.1.1 470849
-#.1.3.6.1.4.1.116.5.11.4.1.1.7.1.2 1
-#.1.3.6.1.4.1.116.5.11.4.1.1.7.1.3 4
-#.1.3.6.1.4.1.116.5.11.4.1.1.7.1.4 3
-#.1.3.6.1.4.1.116.5.11.4.1.1.7.1.5 1
-
-
-def scan_hitachi_hus(oid):
-    return ("hm700" in oid(".1.3.6.1.2.1.1.1.0").lower() or
-            "hm800" in oid(".1.3.6.1.2.1.1.1.0").lower() or
-            "hm850" in oid(".1.3.6.1.2.1.1.1.0").lower())
+# .1.3.6.1.4.1.116.5.11.4.1.1.7.1.1 470849
+# .1.3.6.1.4.1.116.5.11.4.1.1.7.1.2 1
+# .1.3.6.1.4.1.116.5.11.4.1.1.7.1.3 4
+# .1.3.6.1.4.1.116.5.11.4.1.1.7.1.4 3
+# .1.3.6.1.4.1.116.5.11.4.1.1.7.1.5 1
 
 
 def inventory_hitachi_hus(info):
@@ -83,13 +75,13 @@ def check_hitachi_hus(item, _no_params, info):
         for what, device_state in zip(component, line[1:]):
             state, state_readable = hus_map_states[device_state]
             if state == 0:
-                ok_states.append("%s: %s" % (what, state_readable))
+                ok_states.append(f"{what}: {state_readable}")
             if state == 1:
-                warn_states.append("%s: %s" % (what, state_readable))
+                warn_states.append(f"{what}: {state_readable}")
             if state == 2:
-                crit_states.append("%s: %s" % (what, state_readable))
+                crit_states.append(f"{what}: {state_readable}")
             if state == 3:
-                unknown_states.append("%s: %s" % (what, state_readable))
+                unknown_states.append(f"{what}: {state_readable}")
 
         for state, states, text in [
             (0, ok_states, "OK"),
@@ -98,4 +90,4 @@ def check_hitachi_hus(item, _no_params, info):
             (2, crit_states, "CRIT"),
         ]:
             if states:
-                yield state, "%s: %s" % (text, ", ".join(states))
+                yield state, "{}: {}".format(text, ", ".join(states))

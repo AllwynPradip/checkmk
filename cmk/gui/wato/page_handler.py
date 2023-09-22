@@ -1,42 +1,37 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-import inspect
-from typing import List, Tuple, Type, Optional
-
-import cmk.utils.version as cmk_version
 import cmk.utils.store as store
+import cmk.utils.version as cmk_version
+from cmk.utils.exceptions import MKGeneralException
 
-import cmk.gui.pages
-import cmk.gui.config as config
-from cmk.gui.type_defs import PermissionName
-from cmk.gui.i18n import _
-from cmk.gui.globals import html, display_options, transactions, user_errors, request
-from cmk.gui.exceptions import (MKGeneralException, MKAuthException, MKUserError, FinalizeRequest)
-from cmk.gui.utils.flashed_messages import get_flashed_messages
-from cmk.gui.plugins.wato.utils.html_elements import (
-    wato_html_head,
-    wato_html_footer,
-    initialize_wato_html_head,
-)
-from cmk.gui.plugins.wato.utils import mode_registry
-from cmk.gui.wato.pages.not_implemented import ModeNotImplemented
-from cmk.gui.plugins.wato.utils.base_modes import WatoMode
-from cmk.gui.watolib.git import do_git_commit
-from cmk.gui.watolib.sidebar_reload import is_sidebar_reload_needed
-from cmk.gui.watolib.activate_changes import update_config_generation
-from cmk.gui.watolib import init_wato_datastructures
+import cmk.gui.watolib.read_only as read_only
 from cmk.gui.breadcrumb import make_main_menu_breadcrumb
+from cmk.gui.config import active_config
+from cmk.gui.display_options import display_options
+from cmk.gui.exceptions import FinalizeRequest, MKAuthException, MKUserError
+from cmk.gui.htmllib.html import html
+from cmk.gui.http import request
+from cmk.gui.i18n import _
+from cmk.gui.utils.flashed_messages import get_flashed_messages
+from cmk.gui.utils.transaction_manager import transactions
+from cmk.gui.utils.user_errors import user_errors
+from cmk.gui.wato.pages.not_implemented import ModeNotImplemented
+from cmk.gui.watolib.activate_changes import update_config_generation
+from cmk.gui.watolib.git import do_git_commit
+from cmk.gui.watolib.mode import mode_registry, WatoMode
+from cmk.gui.watolib.sidebar_reload import is_sidebar_reload_needed
 
-if cmk_version.is_managed_edition():
+from .pages._html_elements import initialize_wato_html_head, wato_html_footer, wato_html_head
+
+if cmk_version.edition() is cmk_version.Edition.CME:
     import cmk.gui.cme.managed as managed  # pylint: disable=no-name-in-module
 else:
     managed = None  # type: ignore[assignment]
 
-#.
+# .
 #   .--Main----------------------------------------------------------------.
 #   |                        __  __       _                                |
 #   |                       |  \/  | __ _(_)_ __                           |
@@ -61,79 +56,61 @@ else:
 #   `----------------------------------------------------------------------'
 
 
-@cmk.gui.pages.register("wato")
 def page_handler() -> None:
     initialize_wato_html_head()
 
-    if not config.wato_enabled:
+    if not active_config.wato_enabled:
         raise MKGeneralException(
-            _("WATO is disabled. Please set <tt>wato_enabled = True</tt>"
-              " in your <tt>multisite.mk</tt> if you want to use WATO."))
+            _(
+                "Setup is disabled. Please set <tt>wato_enabled = True</tt>"
+                " in your <tt>multisite.mk</tt> if you want to use Setup."
+            )
+        )
 
+    current_mode = request.get_str_input_mandatory("mode")
+    # Backup has to be accessible for remote sites, otherwise the user has no
+    # chance to configure a backup for remote sites.
     # config.current_customer can not be checked with CRE repos
-    if cmk_version.is_managed_edition() and not managed.is_provider(
-            config.current_customer):  # type: ignore[attr-defined]
-        raise MKGeneralException(
-            _("Check_MK can only be configured on "
-              "the managers central site."))
+    if (
+        cmk_version.edition() is cmk_version.Edition.CME
+        and not managed.is_provider(active_config.current_customer)
+        and not current_mode.startswith(("backup", "edit_backup"))
+    ):
+        raise MKGeneralException(_("Checkmk can only be configured on the managers central site."))
 
-    current_mode = request.var("mode") or "main"
-    mode_permissions, mode_class = _get_mode_permission_and_class(current_mode)
+    mode_instance = mode_registry.get(current_mode, ModeNotImplemented)()
+    mode_instance.ensure_permissions()
 
     display_options.load_from_html(request, html)
 
     if display_options.disabled(display_options.N):
         html.add_body_css_class("inline")
 
-    # If we do an action, we aquire an exclusive lock on the complete WATO.
+    # If we do an action, we acquire an exclusive lock on the complete Setup.
     if transactions.is_transaction():
         with store.lock_checkmk_configuration():
-            _wato_page_handler(current_mode, mode_permissions, mode_class)
+            _wato_page_handler(current_mode, mode_instance)
     else:
-        _wato_page_handler(current_mode, mode_permissions, mode_class)
+        _wato_page_handler(current_mode, mode_instance)
 
 
-def _wato_page_handler(current_mode: str, mode_permissions: Optional[List[PermissionName]],
-                       mode_class: Type[WatoMode]) -> None:
-    try:
-        init_wato_datastructures(with_wato_lock=not transactions.is_transaction())
-    except Exception:
-        # Snapshot must work in any case
-        if current_mode == 'snapshot':
-            pass
-        else:
-            raise
-
-    # Check general permission for this mode
-    if mode_permissions is not None and not config.user.may("wato.seeall"):
-        _ensure_mode_permissions(mode_permissions)
-
-    mode = mode_class()
-
+def _wato_page_handler(current_mode: str, mode: WatoMode) -> None:
     # Do actions (might switch mode)
     if transactions.is_transaction():
         try:
-            config.user.need_permission("wato.edit")
-
-            # Even if the user has seen this mode because auf "seeall",
-            # he needs an explicit access permission for doing changes:
-            if config.user.may("wato.seeall"):
-                if mode_permissions:
-                    _ensure_mode_permissions(mode_permissions)
-
-            if cmk.gui.watolib.read_only.is_enabled(
-            ) and not cmk.gui.watolib.read_only.may_override():
-                raise MKUserError(None, cmk.gui.watolib.read_only.message())
+            if read_only.is_enabled() and not read_only.may_override():
+                raise MKUserError(None, read_only.message())
 
             result = mode.action()
             if isinstance(result, (tuple, str, bool)):
                 raise MKGeneralException(
-                    f"WatoMode \"{current_mode}\" returns unsupported return value: {result!r}")
+                    f'WatoMode "{current_mode}" returns unsupported return value: {result!r}'
+                )
 
             # We assume something has been modified and increase the config generation ID by one.
             update_config_generation()
 
-            if config.wato_use_git:
+            if active_config.wato_use_git:
                 do_git_commit()
 
             # Handle two cases:
@@ -151,22 +128,23 @@ def _wato_page_handler(current_mode: str, mode_permissions: Optional[List[Permis
 
     breadcrumb = make_main_menu_breadcrumb(mode.main_menu()) + mode.breadcrumb()
     page_menu = mode.page_menu(breadcrumb)
-    wato_html_head(title=mode.title(),
-                   breadcrumb=breadcrumb,
-                   page_menu=page_menu,
-                   show_body_start=display_options.enabled(display_options.H),
-                   show_top_heading=display_options.enabled(display_options.T))
+    wato_html_head(
+        title=mode.title(),
+        breadcrumb=breadcrumb,
+        page_menu=page_menu,
+        show_body_start=display_options.enabled(display_options.H),
+        show_top_heading=display_options.enabled(display_options.T),
+    )
 
-    if not transactions.is_transaction() or (cmk.gui.watolib.read_only.is_enabled() and
-                                             cmk.gui.watolib.read_only.may_override()):
-        _show_read_only_warning()
+    if read_only.is_enabled() and (not transactions.is_transaction() or read_only.may_override()):
+        html.show_warning(read_only.message())
 
     # Show outcome of failed action on this page
     html.show_user_errors()
 
     # Show outcome of previous page (that redirected to this one)
-    for message in get_flashed_messages():
-        html.show_message(message)
+    for message in get_flashed_messages(with_categories=True):
+        html.show_message_by_msg_type(message.msg, message.msg_type)
 
     # Show content
     mode.handle_page()
@@ -175,34 +153,3 @@ def _wato_page_handler(current_mode: str, mode_permissions: Optional[List[Permis
         html.reload_whole_page()
 
     wato_html_footer(show_body_end=display_options.enabled(display_options.H))
-
-
-def _get_mode_permission_and_class(
-        mode_name: str) -> Tuple[Optional[List[PermissionName]], Type[WatoMode]]:
-    mode_class = mode_registry.get(mode_name, ModeNotImplemented)
-    mode_permissions = mode_class.permissions()
-
-    if mode_class is None:
-        raise MKGeneralException(_("No such WATO module '<tt>%s</tt>'") % mode_name)
-
-    if inspect.isfunction(mode_class):
-        raise MKGeneralException(
-            _("Deprecated WATO module: Implemented as function. "
-              "This needs to be refactored as WatoMode child class."))
-
-    if mode_permissions is not None and not config.user.may("wato.use"):
-        raise MKAuthException(_("You are not allowed to use WATO."))
-
-    return mode_permissions, mode_class
-
-
-def _ensure_mode_permissions(mode_permissions: List[PermissionName]) -> None:
-    for pname in mode_permissions:
-        if '.' not in pname:
-            pname = "wato." + pname
-        config.user.need_permission(pname)
-
-
-def _show_read_only_warning() -> None:
-    if cmk.gui.watolib.read_only.is_enabled():
-        html.show_warning(cmk.gui.watolib.read_only.message())

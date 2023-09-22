@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Sequence, TypedDict
+import json
+from collections.abc import Sequence
+
+from typing_extensions import TypedDict
+
 from .agent_based_api.v1 import register, TableRow
 from .agent_based_api.v1.type_defs import InventoryResult, StringTable
-import json
 
 
 class VM(TypedDict):
@@ -41,7 +43,7 @@ def inventory_esx_vsphere_virtual_machines(section: Section) -> InventoryResult:
                 "hostsystem": vm["hostsystem"],
                 "vm_name": vm["vm_name"],
                 "guest_os": vm["guest_os"],
-                "compatibility": vm["compatibility"]
+                "compatibility": vm["compatibility"],
             },
         )
 

@@ -1,29 +1,31 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 from cmk.gui.i18n import _
-from cmk.gui.valuespec import (
-    Dictionary,
-    Float,
-    TextInput,
-    Tuple,
-)
-
-from cmk.gui.plugins.wato import (
+from cmk.gui.plugins.wato.utils import (
     CheckParameterRulespecWithItem,
     rulespec_registry,
     RulespecGroupCheckParametersApplications,
 )
+from cmk.gui.valuespec import Dictionary, Filesize, Float, TextInput, Tuple
 
 
 def _parameter_valuespec_postgres_stat_database():
     return Dictionary(
-        help=_(
-            "This check monitors how often database objects in a PostgreSQL Database are accessed"),
+        help=_("This check monitors the size of and the accesses to a PostgreSQL database."),
         elements=[
+            (
+                "database_size",
+                Tuple(
+                    title=_("Database size"),
+                    elements=[
+                        Filesize(title=_("warning at")),
+                        Filesize(title=_("critical at")),
+                    ],
+                ),
+            ),
             (
                 "blocks_read",
                 Tuple(
@@ -96,4 +98,5 @@ rulespec_registry.register(
         match_type="dict",
         parameter_valuespec=_parameter_valuespec_postgres_stat_database,
         title=lambda: _("PostgreSQL Database Statistics"),
-    ))
+    )
+)

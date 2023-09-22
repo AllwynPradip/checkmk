@@ -70,9 +70,6 @@
     <ClCompile Include="test-player.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="test-player-cmdline.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="test-plugin.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -139,13 +136,7 @@
     <ClCompile Include="pch.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="..\extlibs\googletest\googletest\src\gtest-all.cc">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="test-wtools_service.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="test-common.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="test-modules.cpp">
@@ -154,7 +145,22 @@
     <ClCompile Include="test-zip.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="test-fmt_ext.cpp" />
+    <ClCompile Include="test-agent_controller.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="test-fmt_ext.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="test-section_agent_plugins.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="test-section_perf_cpuload.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\extlibs\$(GoogleTest)\googletest\src\gtest-all.cc" />
+    <ClCompile Include="test-extensions.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="pch.h">

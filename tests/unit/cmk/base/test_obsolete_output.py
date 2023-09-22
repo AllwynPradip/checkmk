@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,6 +8,8 @@
 import io
 
 import pytest
+from pytest import MonkeyPatch
+from pytest_mock import MockerFixture
 
 import cmk.base.obsolete_output as out
 
@@ -23,22 +24,24 @@ def read(stream):
     return stream.read()
 
 
-def test_output_without_args(stream):
+def test_output_without_args(stream: io.StringIO) -> None:
     out.output("hello", stream=stream)
     assert read(stream) == "hello"
 
 
-def test_output_with_args(stream):
+def test_output_with_args(stream: io.StringIO) -> None:
     out.output("hello %s %i", "bob", 42, stream=stream)
     assert read(stream) == "hello bob 42"
 
 
-def test_output_with_wrong_args(stream):
+def test_output_with_wrong_args(stream: io.StringIO) -> None:
     with pytest.raises(TypeError):
         out.output("hello %s %i", "wrong", "args", stream=stream)
 
 
-def test_output_ignores_stream_errors(stream, mocker, monkeypatch):
+def test_output_ignores_stream_errors(
+    stream: io.StringIO, mocker: MockerFixture, monkeypatch: MonkeyPatch
+) -> None:
     mock = mocker.Mock(side_effect=IOError("bad luck"))
     monkeypatch.setattr(stream, "flush", mock)
 

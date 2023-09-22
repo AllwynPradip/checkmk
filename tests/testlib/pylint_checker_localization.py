@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """Checker for incorrect string translation functions."""
 
 import re
+from collections.abc import Sequence
 
 import astroid  # type: ignore[import]
-
+from astroid import nodes
 from pylint.checkers import BaseChecker, utils  # type: ignore[import]
 from pylint.interfaces import IAstroidChecker  # type: ignore[import]
+from pylint.lint.pylinter import PyLinter  # type: ignore[import]
 
 
-def register(linter):
+def register(linter: PyLinter) -> None:
     """Register checkers."""
     linter.register_checker(TranslationStringConstantsChecker(linter))
     linter.register_checker(EscapingProtectionChecker(linter))
@@ -25,30 +26,34 @@ def register(linter):
 #
 
 
-def is_constant_string(first):
+def is_constant_string(first: object) -> bool:
     return isinstance(first, astroid.Const) and isinstance(first.value, str)
 
 
-def parent_is_HTML(node):
+def parent_is_HTML(node: nodes.Call) -> bool:
     if str(node.parent) == "Call()":
         # Case HTML(_("sth"))
         return isinstance(node.parent.func, astroid.Name) and node.parent.func.name == "HTML"
     if str(node.parent) == "BinOp()" and str(node.parent.parent) == "Call()":
         # Case HTML(_("sth %s usw") % "etc")
-        return isinstance(node.parent.parent.func,
-                          astroid.Name) and node.parent.parent.func.name == "HTML"
+        return (
+            isinstance(node.parent.parent.func, astroid.Name)
+            and node.parent.parent.func.name == "HTML"
+        )
     return False
 
 
-def all_tags_are_unescapable(first):
+def all_tags_are_unescapable(first: nodes.NodeNG) -> tuple[bool, Sequence[str]]:
     escapable_tags = "h1|h2|b|tt|i|u|br|nobr|pre|a|sup|p|li|ul|ol".split("|") + ["a href"]
     tags = re.findall("<[^/][^>]*>", first.value)
     tags = [tag.lstrip("<").rstrip(">").split(" ")[0] for tag in tags]
     escapable = [tag in escapable_tags for tag in tags]
     if not tags:
         return True, []
-    return (all(tag in escapable_tags for tag in tags),
-            [tag for tag, able in zip(tags, escapable) if not able])
+    return (
+        all(tag in escapable_tags for tag in tags),
+        [tag for tag, able in zip(tags, escapable) if not able],
+    )
 
 
 #
@@ -64,26 +69,28 @@ class TranslationBaseChecker(BaseChecker):
 
     __implements__ = (IAstroidChecker,)
     TRANSLATION_FUNCTIONS = {
-        '_',
-        'gettext',
-        'ngettext',
-        'ngettext_lazy',
-        'npgettext',
-        'npgettext_lazy',
-        'pgettext',
-        'pgettext_lazy',
-        'ugettext',
-        'ugettext_lazy',
-        'ugettext_noop',
-        'ungettext',
-        'ungettext_lazy',
+        "_",
+        "_l",
+        "gettext",
+        "ngettext",
+        "ngettext_lazy",
+        "npgettext",
+        "npgettext_lazy",
+        "pgettext",
+        "pgettext_lazy",
+        "ugettext",
+        "ugettext_lazy",
+        "ugettext_noop",
+        "ungettext",
+        "ungettext_lazy",
     }
 
-    name = 'translation-base-checker'
+    name = "translation-base-checker"
     BASE_ID = 76
-    MESSAGE_ID = 'translation-base'
+    MESSAGE_ID = "translation-base"
     msgs = {
-        'E%d10' % BASE_ID: (
+        "E%d10"
+        % BASE_ID: (
             " %s",
             MESSAGE_ID,
             "YO!",
@@ -91,11 +98,12 @@ class TranslationBaseChecker(BaseChecker):
     }
 
     # return true if check worked, else add message and return false
-    def check(self, node):
+    def check(self, node: nodes.Call) -> bool:
         raise NotImplementedError()
 
-    @utils.check_messages(MESSAGE_ID)
-    def visit_callfunc(self, node):
+    # pylint is mostly? untyped, therefore mypy warns about that decorator
+    @utils.check_messages(MESSAGE_ID)  # type: ignore[misc]
+    def visit_call(self, node: nodes.Call) -> None:
         """Called for every function call in the source code."""
 
         if not self.linter.is_message_enabled(self.MESSAGE_ID, line=node.fromlineno):
@@ -130,18 +138,19 @@ class TranslationStringConstantsChecker(TranslationBaseChecker):
 
     """
 
-    name = 'translation-string-checker'
+    name = "translation-string-checker"
     BASE_ID = 77
-    MESSAGE_ID = 'translation-of-non-string'
+    MESSAGE_ID = "translation-of-non-string"
     msgs = {
-        'E%d10' % BASE_ID: (
+        "E%d10"
+        % BASE_ID: (
             "i18n function %s() must be called with a literal string",
             MESSAGE_ID,
             "i18n functions must be called with a literal string",
         ),
     }
 
-    def check(self, node):
+    def check(self, node: nodes.Call) -> bool:
         first = node.args[0]
         if is_constant_string(first):
             # The first argument is a constant string! This is good!
@@ -165,18 +174,20 @@ class EscapingProtectionChecker(TranslationBaseChecker):
     The message id is `protection-of-html-tags`.
 
     """
+
     name = "escaping-protection-checker"
     BASE_ID = 78
-    MESSAGE_ID = 'protection-of-html-tags'
+    MESSAGE_ID = "protection-of-html-tags"
     msgs = {
-        'E%d10' % BASE_ID: (
+        "E%d10"
+        % BASE_ID: (
             "%s",
             MESSAGE_ID,
             "YO!",
         ),
     }
 
-    def check(self, node):
+    def check(self, node: nodes.Call) -> bool:
         first = node.args[0]
         if is_constant_string(first):
             all_unescapable, tags = all_tags_are_unescapable(first)
@@ -190,7 +201,7 @@ class EscapingProtectionChecker(TranslationBaseChecker):
             if not all_unescapable and parent_is_HTML(node):
                 if [x for x in tags if x != "img"]:
                     message = "OK! Is protected by HTML(...)!\n"
-                    message += "'''%s'''\n----> %s" % (first.value, ", ".join(tags))
+                    message += "'''{}'''\n----> {}".format(first.value, ", ".join(tags))
                     self.add_message(self.MESSAGE_ID, args=message, node=node)
                     return False
         return True
@@ -210,21 +221,23 @@ class EscapingChecker(TranslationBaseChecker):
         _("hello <tt> World </tt>")
         _("This is a &lt;HOST&gt;.")
 
-    The message id is `protection-of-html-tags`.
+    The message id is `escaping-of-html-tags`.
 
     """
+
     name = "escaping-checker"
     BASE_ID = 79
-    MESSAGE_ID = 'escaping-of-html-tags'
+    MESSAGE_ID = "escaping-of-html-tags"
     msgs = {
-        'E%d10' % BASE_ID: (
+        "E%d10"
+        % BASE_ID: (
             "%s",
             MESSAGE_ID,
             "YO!",
         ),
     }
 
-    def check(self, node):
+    def check(self, node: nodes.Call) -> bool:
         first = node.args[0]
         # The first argument is a constant string! All is well!
         if is_constant_string(first):
@@ -232,7 +245,7 @@ class EscapingChecker(TranslationBaseChecker):
             # Case 3
             if not all_unescapable and not parent_is_HTML(node):
                 message = "String contains unprotected tags! Protect them using HTML(...), escape them or replace them!\n"
-                message += "'''%s'''\n----> %s" % (first.value, ", ".join(tags))
+                message += "'''{}'''\n----> {}".format(first.value, ", ".join(tags))
                 self.add_message(self.MESSAGE_ID, args=message, node=node)
                 return False
         return True

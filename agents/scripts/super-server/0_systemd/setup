@@ -1,0 +1,266 @@
+#!/bin/sh
+# Copyright (C) 2022 Checkmk GmbH - License: GNU General Public License v2
+# This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
+# conditions defined in the file COPYING, which is part of this source code package.
+
+RESOURCES="$(dirname "$(realpath -- "$0" || printf "%s" "$0")")"
+CONTROLLER_TARGET="${BIN_DIR:-/usr/bin}/cmk-agent-ctl"
+
+_usage() {
+    cat >&2 <<HERE
+$0 deploy|cleanup|purge|trigger|isdeployed
+
+Manage the systemd units required for Checkmk agent setup.
+
+Commands:
+  deploy      Deploy the unit files found in ${RESOURCES} to the
+              "most suitable" of: $(_destination --all)
+  cleanup     Disable and remove the deployed systemd units
+  purge       cleanup and additionally remove leftover CRE systemd units
+  trigger     Enable or disable systemd units
+  isdeployed  Exit successfully if and only if files are deployed
+
+HERE
+    exit 1
+}
+
+_destination() {
+    # Figure out where to put the unit files.
+    # It seems to vary from system to system, and some other
+    # applications get it wrong.
+    # Follow the mainstream, and pick the most populated one.
+    most_populated="$(for d in "/usr/lib/systemd/system" "/lib/systemd/system"; do
+        [ -d "${ROOT}${d}" ] && printf "%s %s\n" "$(find "${ROOT}${d}" -type f | wc -l)" "${d}"
+    done | sort -rn)"
+
+    if [ -z "${most_populated}" ]; then
+        cat >&2 <<HERE
+Unable to figure out where to put the systemd units.
+This package knows about /usr/lib/systemd/system and
+/lib/systemd/system, but none of these are present.
+HERE
+        return 1
+    fi
+
+    if [ -z "${1}" ]; then
+        echo "${most_populated}" | head -n1 | cut -d' ' -f2
+    else
+        echo "${most_populated}" | cut -d' ' -f2
+    fi
+}
+
+ROOT=""
+
+_systemd_present() {
+    command -v systemctl >/dev/null && return
+    printf "systemd not found on this system\n" >&2
+    return 1
+}
+
+_systemd_version() {
+    systemctl --version | sed -n "s/systemd \\([0-9][0-9]*\\).*/\\1/p"
+}
+
+_need_ip_access_list() {
+    grep -q '^IPAddressAllow=' "${ROOT}${RESOURCES}/check-mk-agent.socket.fallback"
+}
+
+_deploy_controller() {
+    printf "Deploying agent controller: %s\n" "${CONTROLLER_TARGET}"
+    gunzip --force --quiet -c "/var/lib/cmk-agent/cmk-agent-ctl.gz" >"/var/lib/cmk-agent/cmk-agent-ctl" || {
+        printf "%s\n" "...Failed to unpack with gzip."
+        return 1
+    }
+    install -m 755 "/var/lib/cmk-agent/cmk-agent-ctl" "${CONTROLLER_TARGET}" || {
+        printf "%s\n" "...Failed to move to target location."
+        return 1
+    }
+    rm -f "/var/lib/cmk-agent/cmk-agent-ctl"
+    # Test rightaway. It might be dysfunctional (e.g., wrong architecture)
+    "${CONTROLLER_TARGET}" --version >/dev/null 2>&1 || {
+        printf "%s\n" "...Not running on this system. Falling back to legacy systemd setup."
+        rm -f "${CONTROLLER_TARGET}"
+        return 1
+    }
+    return 0
+}
+
+_systemd_sufficient() {
+    _systemd_present || return 1
+    _destination >/dev/null || return 1
+
+    # version 219 is used on RHEL7 -- if we use the controller, that's sufficient.
+    if [ "$(_systemd_version)" -lt 219 ]; then
+        cat >&2 <<HERE
+The Checkmk agent may require features that are either buggy,
+or not even supported in systemd versions prior to 219.
+We recommend using xinetd on such old systems.
+HERE
+        return 1
+    fi
+
+    return 0
+}
+
+_legacy_setup_supported() {
+    # TCP socket fallback situation.
+
+    # We need version 220 (REMOTE_ADDR is only available from 220 onwards)
+    if [ "$(_systemd_version)" -lt 220 ]; then
+        cat >&2 <<HERE
+The Checkmk agent may need to know the IP address of the querying site.
+The 'REMOTE_ADDR' environment variable is only available in systemd versions from 220 onwards.
+We recommend using xinetd on such old systems.
+HERE
+        return 1
+    fi
+
+    # If we need "only from", make sure we have at least version 235.
+    if _need_ip_access_list && [ "$(_systemd_version)" -lt 235 ]; then
+        cat <<HERE
+This package has an activated IP access limitation, that isn't applicable
+because your systemd version (< 235) does not support IP access lists.
+HERE
+        return 1
+    fi
+
+    return 0
+}
+
+_unit_files() {
+    find "${ROOT}${RESOURCES}" -name '*.socket' -o -name '*.service' -o -name '*.timer' | sed 's|.*/||'
+}
+
+_deploy_systemd_units() {
+    fallback_suffix="${1}"
+
+    dest="${ROOT}$(_destination)"
+    printf "Deploying systemd units:"
+
+    for unit in $(_unit_files); do
+
+        [ -n "${fallback_suffix}" ] && [ -z "${unit##*cmk-agent-ctl*}" ] && continue
+
+        src="${ROOT}${RESOURCES}/${unit}"
+
+        if [ -e "${src}${fallback_suffix}" ]; then
+            printf " %s" "${unit}${fallback_suffix}"
+            install -m 644 "${src}${fallback_suffix}" "${dest}/${unit}"
+        else
+            printf " %s" "${unit}"
+            install -m 644 "${src}" "${dest}/${unit}"
+        fi
+
+    done
+    printf "\n"
+}
+
+deploy() {
+    _systemd_sufficient || return 1
+    _deploy_controller && _deploy_systemd_units "" && return 0
+    _legacy_setup_supported && _deploy_systemd_units ".fallback" && return 0
+    return 1
+}
+
+cleanup() {
+    [ -e "${CONTROLLER_TARGET}" ] && {
+        printf "Removing agent controller: %s\n" "${CONTROLLER_TARGET}"
+        rm -f "${CONTROLLER_TARGET}"
+    }
+
+    prefix="Removing deployed systemd units:"
+    _destination --all | while read -r dest; do
+        for unit in $(_unit_files); do
+            [ -e "${ROOT}${dest}/${unit}" ] || continue
+            printf "%s %s" "${prefix}" "${unit}"
+            prefix=","
+            rm -f "${ROOT}${dest}/${unit}"
+        done
+    done
+    printf "\n"
+}
+
+purge() {
+    _systemd_present && {
+        # We forgot to stop/disable the units in the prerm scripts in 1.6
+        systemctl stop "check_mk.socket" 2>/dev/null
+        systemctl stop "check-mk-agent.socket" 2>/dev/null
+        systemctl disable "check_mk.socket" 2>/dev/null
+        systemctl disable "check-mk-agent.socket" 2>/dev/null
+    }
+
+    prefix="Removing leftover systemd units:"
+    suffix=
+    units='check_mk.socket check_mk@.service check_mk-async.service check-mk-agent.socket check-mk-agent@.service check-mk-agent-async.service'
+    for unit in ${units}; do
+        path="/etc/systemd/system/${unit}"
+        [ -e "${path}" ] || continue
+        printf "%s %s" "${prefix}" "${path}"
+        prefix=","
+        suffix="\n"
+        rm -f "${path}"
+    done
+    printf "%s" "${suffix}"
+
+    cleanup
+}
+
+trigger() {
+    _systemd_present || return 0
+
+    systemctl daemon-reload
+
+    for unit in $(_unit_files); do
+
+        # skip unit templates + timer activated units
+        grep -q '\[Install\]' "${ROOT}${RESOURCES}/${unit}" || continue
+
+        if _unit_deployed "${unit}"; then
+            printf "Activating systemd unit '%s'...\n" "${unit}"
+            systemctl enable "${unit}"
+            systemctl restart "${unit}"
+        else
+            printf "Deactivating systemd unit '%s' (if active)...\n" "${unit}"
+            systemctl stop "${unit}" 2>/dev/null
+            systemctl disable "${unit}" 2>/dev/null
+        fi
+    done
+}
+
+_unit_deployed() {
+    _destination --all | while read -r dest; do
+        [ -e "${ROOT}${dest}/${1}" ] && break
+    done
+}
+
+isdeployed() {
+    for unit in $(_unit_files); do
+        _unit_deployed "${unit}" && return 0
+    done
+    return 1
+}
+
+main() {
+    case "$1" in
+        deploy)
+            deploy "$@"
+            ;;
+        cleanup)
+            cleanup "$@"
+            ;;
+        purge)
+            purge
+            ;;
+        trigger)
+            trigger
+            ;;
+        isdeployed)
+            isdeployed
+            ;;
+        *)
+            _usage
+            ;;
+    esac
+}
+
+[ -z "${MK_SOURCE_ONLY}" ] && main "$@"

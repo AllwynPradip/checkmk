@@ -1,11 +1,29 @@
-// Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+// Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 // This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 // conditions defined in the file COPYING, which is part of this source code package.
 
 const path = require("path");
-const FixStyleOnlyEntriesPlugin = require("webpack-fix-style-only-entries");
+const RemoveEmptyScriptsPlugin = require("webpack-remove-empty-scripts");
 const TerserPlugin = require("terser-webpack-plugin");
 const webpack = require("webpack");
+
+class WarningsToErrors {
+    apply(compiler) {
+        compiler.hooks.shouldEmit.tap("WarningsToErrors", compilation => {
+            if (compilation.warnings.length > 0) {
+                compilation.errors = compilation.errors.concat(compilation.warnings);
+                compilation.warnings = [];
+            }
+
+            compilation.children.forEach(child => {
+                if (child.warnings.length > 0) {
+                    child.errors = child.errors.concat(child.warnings);
+                    child.warnings = [];
+                }
+            });
+        });
+    }
+}
 
 module.exports = {
     mode: "production",
@@ -23,9 +41,9 @@ module.exports = {
         ],
     },
     entry: {
-        main: "./web/htdocs/js/index.js",
-        mobile: "./web/htdocs/js/mobile.js",
-        side: "./web/htdocs/js/side_index.js",
+        main: "./web/htdocs/js/index.ts",
+        mobile: "./web/htdocs/js/mobile.ts",
+        side: "./web/htdocs/js/side_index.ts",
         facelift: "./web/htdocs/themes/facelift/theme.scss",
         modern_dark: "./web/htdocs/themes/modern-dark/theme.scss",
         cma: "./web/htdocs/themes/facelift/cma_facelift.scss",
@@ -40,21 +58,19 @@ module.exports = {
         libraryTarget: "window",
         libraryExport: "cmk_export",
     },
-    externals: {
-        // canvas-5-polyfill for IE11: tell webpack that canvas is provided by the browser
-        canvas: 'canvas',
-    },
     resolve: {
         modules: [
             "node_modules",
             path.resolve(__dirname, "web/htdocs/js/modules"),
             path.resolve(__dirname, "web/htdocs/js/modules/figures"),
-            path.resolve(__dirname, "web/htdocs/js/modules/node_visualization"),
+            path.resolve(__dirname, "web/htdocs/js/modules/nodevis"),
             path.resolve(__dirname, "enterprise/web/htdocs/js/modules"),
             path.resolve(__dirname, "enterprise/web/htdocs/js/modules/figures"),
             path.resolve(__dirname, "enterprise/web/htdocs/js/modules/ntop"),
             path.resolve(__dirname, "enterprise/web/htdocs/js/modules/license_usage"),
         ],
+        // added this because otherwise it won't find any imported ts files inside of a js file
+        extensions: [".ts", ".js"],
     },
     module: {
         rules: [
@@ -116,51 +132,53 @@ module.exports = {
         ],
     },
     plugins: [
-        new FixStyleOnlyEntriesPlugin(),
+        new RemoveEmptyScriptsPlugin(),
         new webpack.EnvironmentPlugin(["ENTERPRISE", "MANAGED"]),
+        new WarningsToErrors(),
     ],
 };
 
-if (process.env.WEBPACK_MODE === "quick") {
-    console.log(
-        "not using Babel in Webpack mode '" +
-            process.env.WEBPACK_MODE +
-            "', let's hope you know what your're doing..."
-    );
-} else {
-    console.log("using Babel in Webpack mode '" + process.env.WEBPACK_MODE + "'");
-    let babel_loader = {
-        test: /\.js$/,
-        // Do not try to execute babel on all node_modules. But some d3 stuff seems to need it's help.
-        include: [
-            path.resolve(__dirname, "web/htdocs/js"),
-            path.resolve(__dirname, "enterprise/web/htdocs/js/modules"),
-            path.resolve(__dirname, "node_modules/d3"),
-            path.resolve(__dirname, "node_modules/d3-flextree"),
-            path.resolve(__dirname, "node_modules/d3-sankey"),
-            path.resolve(__dirname, "node_modules/crossfilter2"),
-            // Additional packages needed for D3js v6:
-            path.resolve(__dirname, "node_modules/internmap"),
-            path.resolve(__dirname, "node_modules/delaunator"),
-        ],
-        use: {
-            loader: "babel-loader",
-            options: {
-                presets: [
-                    [
-                        "@babel/preset-env",
-                        {
-                            //debug: true,
-                            // This adds polyfills when needed. Requires core-js dependency.
-                            // See https://babeljs.io/docs/en/babel-preset-env#usebuiltins
-                            useBuiltIns: "usage",
-                            corejs: 3,
-                        },
-                    ],
-                ],
-                plugins: ["@babel/plugin-transform-parameters"],
-            },
+let babel_loader = {
+    // Do not try to execute babel on all node_modules. But some d3 stuff seems to need it's help.
+    exclude: /node_modules/,
+    include: [
+        path.resolve(__dirname, "web/htdocs/js"),
+        path.resolve(__dirname, "enterprise/web/htdocs/js"),
+        path.resolve(__dirname, "node_modules/d3"),
+        path.resolve(__dirname, "node_modules/d3-flextree"),
+        path.resolve(__dirname, "node_modules/d3-sankey"),
+        path.resolve(__dirname, "node_modules/crossfilter2"),
+        // Additional packages needed for D3js v6:
+        path.resolve(__dirname, "node_modules/internmap"),
+        path.resolve(__dirname, "node_modules/delaunator"),
+    ],
+    use: {
+        loader: "babel-loader",
+        options: {
+            presets: ["@babel/typescript"],
+            plugins: [
+                "@babel/plugin-transform-parameters",
+                "@babel/proposal-class-properties",
+                "@babel/proposal-object-rest-spread",
+            ],
         },
-    };
-    module.exports.module.rules.unshift(babel_loader);
+    },
+};
+
+if (process.env.WEBPACK_MODE === "quick") {
+    babel_loader["test"] = /\.ts?$/;
+} else {
+    babel_loader["test"] = /\.(ts|js)?$/;
+    babel_loader["use"]["options"]["presets"].unshift([
+        "@babel/preset-env",
+        {
+            //debug: true,
+            // This adds polyfills when needed. Requires core-js dependency.
+            // See https://babeljs.io/docs/en/babel-preset-env#usebuiltins
+            useBuiltIns: "usage",
+            corejs: 3,
+        },
+    ]);
 }
+
+module.exports.module.rules.unshift(babel_loader);

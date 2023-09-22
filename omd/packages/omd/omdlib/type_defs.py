@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- encoding: utf-8; py-indent-offset: 4 -*-
 #
 #       U  ___ u  __  __   ____
 #        \/"_ \/U|' \/ '|u|  _"\
@@ -23,8 +22,16 @@
 # to the Free Software Foundation, Inc., 51 Franklin St,  Fifth Floor,
 # Boston, MA 02110-1301 USA.
 
-from typing import Dict, Optional
+from abc import ABC, abstractmethod
 
-Config = Dict[str, str]
-Replacements = Dict[str, str]
-CommandOptions = Dict[str, Optional[str]]
+import cmk.utils.resulttype as result
+
+Config = dict[str, str]
+Replacements = dict[str, str]
+CommandOptions = dict[str, str | None]
+
+
+class ConfigChoiceHasError(ABC):
+    @abstractmethod
+    def __call__(self, value: str) -> result.Result[None, str]:
+        raise NotImplementedError

@@ -1,25 +1,34 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2021 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2021 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import (
-    Any,
-    Dict,
-    Literal,
+from collections.abc import (
+    Collection,
     Iterable,
+    Iterator,
+    KeysView,
     Mapping,
-    Optional,
+    MutableMapping,
     Sequence,
-    Tuple,
-    TypedDict,
-    Union,
 )
+from re import Pattern
+from typing import Any, Literal
 
-from cmk.utils.type_defs import Seconds
+from typing_extensions import TypedDict
 
-################################################################################
+from cmk.utils.exceptions import MKException
+from cmk.utils.translations import TranslationOptions
+
+TextPattern = str | Pattern[str]
+TextMatchResult = Literal[False] | Sequence[str]
+
+
+class MatchGroups(TypedDict, total=False):
+    match_groups_message: TextMatchResult
+    match_groups_message_ok: TextMatchResult
+    match_groups_syslog_application: TextMatchResult
+    match_groups_syslog_application_ok: TextMatchResult
 
 
 # Horrible ValueSpec...
@@ -27,9 +36,7 @@ class UseSNMPTrapTranslation(TypedDict, total=False):
     add_description: Literal[True]
 
 
-SNMPTrapTranslation = Union[Literal[False], Tuple[Literal[True], UseSNMPTrapTranslation]]
-
-################################################################################
+SNMPTrapTranslation = Literal[False] | tuple[Literal[True], UseSNMPTrapTranslation]
 
 
 class EMailActionConfig(TypedDict):
@@ -43,7 +50,7 @@ class EMailAction(TypedDict):
     title: str
     hidden: bool
     disabled: bool
-    action: Tuple[Literal['email'], EMailActionConfig]
+    action: tuple[Literal["email"], EMailActionConfig]
 
 
 class ScriptActionConfig(TypedDict):
@@ -55,12 +62,10 @@ class ScriptAction(TypedDict):
     title: str
     hidden: bool
     disabled: bool
-    action: Tuple[Literal['script'], ScriptActionConfig]
+    action: tuple[Literal["script"], ScriptActionConfig]
 
 
-Action = Union[EMailAction, ScriptAction]
-
-################################################################################
+Action = EMailAction | ScriptAction
 
 
 class EventLimit(TypedDict):
@@ -74,62 +79,73 @@ class EventLimits(TypedDict):
     overall: EventLimit
 
 
-class HostnameTranslation(TypedDict, total=False):
-    case: Union[Literal['lower'], Literal['upper']]
-    drop_domain: bool
-    mapping: Iterable[Tuple[str, str]]
-    regex: Iterable[Tuple[str, str]]
-
-
 LogLevel = int
 
 LogConfig = TypedDict(
-    'LogConfig', {
-        'cmk.mkeventd': LogLevel,
-        'cmk.mkeventd.EventServer': LogLevel,
-        'cmk.mkeventd.EventServer.snmp': LogLevel,
-        'cmk.mkeventd.EventStatus': LogLevel,
-        'cmk.mkeventd.StatusServer': LogLevel,
-        'cmk.mkeventd.lock': LogLevel,
-    })
+    "LogConfig",
+    {
+        "cmk.mkeventd": LogLevel,
+        "cmk.mkeventd.EventServer": LogLevel,
+        "cmk.mkeventd.EventServer.snmp": LogLevel,
+        "cmk.mkeventd.EventStatus": LogLevel,
+        "cmk.mkeventd.StatusServer": LogLevel,
+        "cmk.mkeventd.lock": LogLevel,
+    },
+)
 
 
 class ReplicationBase(TypedDict):
     connect_timeout: int
     interval: int
-    master: Tuple[str, int]
+    master: tuple[str, int]
 
 
 class Replication(ReplicationBase, total=False):
     fallback: int
-    disabled: Literal['true']
-    logging: Literal['true']
+    disabled: Literal["true"]
+    logging: Literal["true"]
     takeover: int
 
 
 class ContactGroups(TypedDict):
     groups: Iterable[str]
     notify: bool
-    precedence: Union[Literal['host'], Literal['rule']]
+    precedence: Literal["host", "rule"]
 
 
 class Expect(TypedDict):
-    merge: Union[Literal['open'], Literal['acked'], Literal['never']]
+    interval: int  # seconds
+    count: int
+    merge: Literal["open", "acked", "never"]
 
 
 class ServiceLevel(TypedDict):
     value: int
-    precedence: Union[Literal['message'], Literal['rule']]
+    precedence: Literal["message", "rule"]
 
 
-StatePatterns = TypedDict('StatePatterns', {
-    '0': str,
-    '1': str,
-    '2': str,
-}, total=False)
+StatePatterns = TypedDict(
+    "StatePatterns",
+    {
+        "0": TextPattern,
+        "1": TextPattern,
+        "2": TextPattern,
+    },
+    total=False,
+)
 
-State = Union[Literal[-1], Literal[0], Literal[1], Literal[2], Literal[3],
-              Tuple[Literal['text_pattern'], StatePatterns]]
+State = Literal[-1, 0, 1, 2, 3] | tuple[Literal["text_pattern"], StatePatterns]
+
+
+class Count(TypedDict):
+    count: int
+    period: int  # seconds
+    algorithm: Literal["interval", "tokenbucket", "dynabucket"]
+    count_duration: int | None  # seconds
+    count_ack: bool
+    separate_host: bool
+    separate_application: bool
+    separate_match_groups: bool
 
 
 # TODO: This is only a rough approximation.
@@ -137,22 +153,31 @@ class Rule(TypedDict, total=False):
     actions: Iterable[str]
     actions_in_downtime: bool
     autodelete: bool
-    cancel_application: str
-    cancel_priority: Tuple[int, int]
+    cancel_actions: Iterable[str]
+    cancel_action_phases: str
+    cancel_application: TextPattern
+    cancel_priority: tuple[int, int]
+    comment: str
     contact_groups: ContactGroups
+    count: Count
+    description: str
+    docu_url: str
+    disabled: bool
     expect: Expect
+    event_limit: EventLimit
+    hits: int
     id: str
     invert_matching: bool
-    livetime: Tuple[Seconds, Iterable[Union[Literal['open'], Literal['ack']]]]
-    match: str
-    match_application: str
+    livetime: tuple[int, Iterable[Literal["open", "ack"]]]
+    match: TextPattern
+    match_application: TextPattern
     match_facility: int
-    match_host: str
+    match_host: TextPattern
     match_ipaddress: str
-    match_ok: str
-    match_priority: Tuple[int, int]
+    match_ok: TextPattern
+    match_priority: tuple[int, int]
     match_site: Iterable[str]
-    match_sl: Tuple[int, int]
+    match_sl: tuple[int, int]
     match_timeperiod: str
     pack: str
     set_application: str
@@ -164,20 +189,122 @@ class Rule(TypedDict, total=False):
     state: State
 
 
-AuthenticationProtocol = Union[Literal['md5'], Literal['sha'], Literal['SHA-224'],
-                               Literal['SHA-256'], Literal['SHA-384'], Literal['SHA-512']]
+class ECRulePackSpec(TypedDict, total=False):
+    id: str
+    title: str
+    disabled: bool
+    rules: Collection[Rule]
+    customer: str  # TODO: This is a GUI-only feature, which doesn't belong here at all.
 
-PrivacyProtocol = Union[Literal['DES'], Literal['AES'], Literal['3DES-EDE'], Literal['AES-192'],
-                        Literal['AES-256'], Literal['AES-192-Blumenthal'],
-                        Literal['AES-256-Blumenthal']]
+
+class MkpRulePackBindingError(MKException):
+    """Base class for exceptions related to rule pack binding"""
+
+
+class MkpRulePackProxy(MutableMapping[str, Any]):  # pylint: disable=too-many-ancestors
+    """
+    An object of this class represents an entry (i.e. a rule pack) in
+    mkp_rule_packs. It is used as a reference to an EC rule pack
+    that either can be exported or is already exported in a MKP.
+
+    A newly created instance is not yet connected to a specific rule pack.
+    This is achieved via the method bind_to.
+    """
+
+    def __init__(self, rule_pack_id: str) -> None:
+        super().__init__()
+        # Ideally the 'id_' would not be necessary and the proxy object would
+        # be bound to it's referenced object upon initialization. Unfortunately,
+        # this is not possible because the mknotifyd.mk could specify referenced
+        # objects as well.
+        self.id_ = rule_pack_id
+        self.rule_pack: ECRulePackSpec | None = None
+
+    def __getitem__(self, key: str) -> Any:
+        if self.rule_pack is None:
+            raise MkpRulePackBindingError("Proxy is not bound")
+        return self.rule_pack[key]  # type: ignore[literal-required] # TODO: Nuke this!
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        if self.rule_pack is None:
+            raise MkpRulePackBindingError("Proxy is not bound")
+        self.rule_pack[key] = value  # type: ignore[literal-required] # TODO: Nuke this!
+
+    def __delitem__(self, key: str) -> None:
+        if self.rule_pack is None:
+            raise MkpRulePackBindingError("Proxy is not bound")
+        del self.rule_pack[key]  # type: ignore[misc] # TODO: Nuke this!
+
+    def __repr__(self) -> str:
+        return f'{self.__class__.__name__}("{self.id_}")'
+
+    # __iter__ and __len__ are only defined as a workaround for a buggy entry
+    # in the typeshed
+    def __iter__(self) -> Iterator[str]:
+        yield from self.keys()
+
+    def __len__(self) -> int:
+        return len(self.keys())
+
+    def keys(self) -> KeysView[str]:
+        """List of keys of this rule pack"""
+        if self.rule_pack is None:
+            raise MkpRulePackBindingError("Proxy is not bound")
+        return self.rule_pack.keys()
+
+    def bind_to(self, mkp_rule_pack: ECRulePackSpec) -> None:
+        """Binds this rule pack to the given MKP rule pack"""
+        if self.id_ != mkp_rule_pack["id"]:
+            raise MkpRulePackBindingError(
+                f"The IDs of {self} and {mkp_rule_pack} cannot be different."
+            )
+
+        self.rule_pack = mkp_rule_pack
+
+    def get_rule_pack_spec(self) -> ECRulePackSpec:
+        if self.rule_pack is None:
+            raise MkpRulePackBindingError("Proxy is not bound")
+        return self.rule_pack
+
+    @property
+    def is_bound(self) -> bool:
+        """Has this rule pack been bound via bind_to()?"""
+        return self.rule_pack is not None
+
+
+ECRulePack = ECRulePackSpec | MkpRulePackProxy
+
+AuthenticationProtocol = Literal[
+    "md5",
+    "sha",
+    "SHA-224",
+    "SHA-256",
+    "SHA-384",
+    "SHA-512",
+]
+
+PrivacyProtocol = Literal[
+    "DES",
+    "AES",
+    "3DES-EDE",
+    "AES-192",
+    "AES-256",
+    "AES-192-Blumenthal",
+    "AES-256-Blumenthal",
+]
 
 SNMPV1V2Credentials = str
-SNMPV3NoAuthNoPrivCredentials = Tuple[Literal['noAuthNoPriv'], str]
-SNMPV3AuthNoPrivCredentials = Tuple[Literal['authNoPriv'], AuthenticationProtocol, str, str]
-SNMPV3AuthPrivCredentials = Tuple[Literal['authPriv'], AuthenticationProtocol, str, str,
-                                  PrivacyProtocol, str]
-SNMPCredentials = Union[SNMPV1V2Credentials, SNMPV3NoAuthNoPrivCredentials,
-                        SNMPV3AuthNoPrivCredentials, SNMPV3AuthPrivCredentials]
+SNMPV3NoAuthNoPrivCredentials = tuple[Literal["noAuthNoPriv"], str]
+SNMPV3AuthNoPrivCredentials = tuple[Literal["authNoPriv"], AuthenticationProtocol, str, str]
+SNMPV3AuthPrivCredentials = tuple[
+    Literal["authPriv"], AuthenticationProtocol, str, str, PrivacyProtocol, str
+]
+SNMPCredentials = (
+    SNMPV1V2Credentials
+    | SNMPV3NoAuthNoPrivCredentials
+    | SNMPV3AuthNoPrivCredentials
+    | SNMPV3AuthPrivCredentials
+)
 
 
 class SNMPCredentialBase(TypedDict):
@@ -192,33 +319,35 @@ class SNMPCredential(SNMPCredentialBase, total=False):
 # This is what we get from the outside.
 class ConfigFromWATO(TypedDict):
     actions: Sequence[Action]
-    archive_mode: Union[Literal['file'], Literal['mongodb']]
+    archive_mode: Literal["file", "mongodb"]
     archive_orphans: bool
     debug_rules: bool
     event_limit: EventLimits
     eventsocket_queue_len: int
     history_lifetime: int
-    history_rotation: Union[Literal['daily'], Literal['weekly']]
-    hostname_translation: HostnameTranslation  # TODO: Mutable???
+    history_rotation: Literal["daily", "weekly"]
+    hostname_translation: TranslationOptions  # TODO: Mutable???
     housekeeping_interval: int
     log_level: LogConfig  # TODO: Mutable???
     log_messages: bool
     log_rulehits: bool
-    mkp_rule_packs: Mapping[Any, Any]  # TODO: Move to Config (not from WATO!). TypedDict
-    remote_status: Optional[Tuple[int, bool, Optional[Sequence[str]]]]
-    replication: Optional[Replication]
+    remote_status: tuple[int, bool, Sequence[str] | None] | None
+    replication: Replication | None
     retention_interval: int
     rule_optimizer: bool
-    rule_packs: Sequence[Dict[str, Any]]  # TODO: Mutable??? TypedDict
-    rules: Iterable[Rule]
+    rule_packs: Sequence[ECRulePack]
+    rules: Collection[Rule]
     snmp_credentials: Iterable[SNMPCredential]
     socket_queue_len: int
     statistics_interval: int
     translate_snmptraps: SNMPTrapTranslation
 
 
-# After loading, we add two fields: 'action' for more efficient access to actions plus a timestamp
-# used for replication.
 class Config(ConfigFromWATO):
+    """
+    After loading, we add two fields: 'action' for more efficient access to actions plus a timestamp
+    used for replication.
+    """
+
     action: Mapping[str, Action]
     last_reload: int

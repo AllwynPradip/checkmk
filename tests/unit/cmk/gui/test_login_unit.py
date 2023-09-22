@@ -1,123 +1,308 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
+from __future__ import annotations
 
+from base64 import b64encode
+from collections.abc import Generator, Iterator
+from http.cookies import SimpleCookie
+
+import flask
 import pytest
 from werkzeug.test import create_environ
 
-from cmk.utils.type_defs import UserId
+from tests.testlib.users import create_and_destroy_user
 
-import cmk.gui.login as login
-import cmk.gui.userdb as userdb
+from tests.unit.cmk.gui.conftest import WebTestAppForCMK
+
+from cmk.utils.livestatus_helpers.testing import MockLiveStatusConnection
+from cmk.utils.user import UserId
+
+import cmk.gui.session  # pylint: disable=unused-import  # this is here for it's side effects...
+from cmk.gui import auth, http, login
+from cmk.gui.config import load_config
+from cmk.gui.http import request
+from cmk.gui.logged_in import LoggedInNobody, LoggedInUser, user
+from cmk.gui.session import session
+from cmk.gui.type_defs import UserSpec, WebAuthnCredential
+from cmk.gui.userdb.session import auth_cookie_name, auth_cookie_value, generate_auth_hash
 from cmk.gui.utils.script_helpers import application_and_request_context
-from cmk.gui.globals import user, request, session
-from cmk.gui.exceptions import MKAuthException
+from cmk.gui.utils.transaction_manager import transactions
 
 
 @pytest.fixture(name="user_id")
-def fixture_user_id(with_user):
-    return UserId(with_user[0])
+def fixture_user_id(with_user: tuple[UserId, str]) -> UserId:
+    return with_user[0]
 
 
-def test_authenticate_success(module_wide_request_context, monkeypatch, user_id):
-    monkeypatch.setattr(login, "_check_auth", lambda r: user_id)
+def test_login_two_factor_redirect(wsgi_app: WebTestAppForCMK) -> None:
+    auth_struct: WebAuthnCredential = {
+        "credential_id": "Yaddayadda!",
+        "registered_at": 0,
+        "alias": "Yaddayadda!",
+        "credential_data": b"",
+    }
+    custom_attrs: UserSpec = {
+        "two_factor_credentials": {
+            "webauthn_credentials": {"foo": auth_struct},
+            "backup_codes": [],
+            "totp_credentials": {},
+        },
+    }
+    with create_and_destroy_user(custom_attrs=custom_attrs) as user_tuple:
+        resp = wsgi_app.login(user_tuple[0], user_tuple[1])
+        assert resp.status_code == 302
+        assert resp.location.startswith("user_login_two_factor.py")
+
+
+def test_login_forced_password_change(wsgi_app: WebTestAppForCMK) -> None:
+    custom_attrs: UserSpec = {
+        "enforce_pw_change": True,
+    }
+    with create_and_destroy_user(custom_attrs=custom_attrs) as user_tuple:
+        resp = wsgi_app.login(user_tuple[0], user_tuple[1])
+        assert resp.status_code == 302
+        assert resp.location.startswith("user_change_pw.py")
+
+
+def test_login_two_factor_has_precedence_over_password_change(wsgi_app: WebTestAppForCMK) -> None:
+    auth_struct: WebAuthnCredential = {
+        "credential_id": "Yaddayadda!",
+        "registered_at": 0,
+        "alias": "Yaddayadda!",
+        "credential_data": b"",
+    }
+    custom_attrs: UserSpec = {
+        "enforce_pw_change": True,
+        "two_factor_credentials": {
+            "webauthn_credentials": {"foo": auth_struct},
+            "backup_codes": [],
+            "totp_credentials": {},
+        },
+    }
+    with create_and_destroy_user(custom_attrs=custom_attrs) as user_tuple:
+        resp = wsgi_app.login(user_tuple[0], user_tuple[1])
+        assert resp.status_code == 302
+        assert resp.location.startswith("user_login_two_factor.py")
+
+
+def test_login_with_cookies(
+    with_user: tuple[UserId, str],
+    flask_app: flask.Flask,
+    mock_livestatus: MockLiveStatusConnection,
+) -> None:
+    with flask_app.app_context():
+        client = flask_app.test_client(use_cookies=True)
+        # We will be redirected to the login page
+        response = client.get("/NO_SITE/check_mk/")
+        login_page_url = response.location
+        assert login_page_url.startswith("/NO_SITE/check_mk/login.py")
+
+        # We see if we can access the login page.
+        response = client.get(login_page_url)
+        assert response.status_code == 200
+
+        # We try to log in
+        response = client.post(
+            login_page_url,
+            data={"_username": with_user[0], "_password": with_user[1], "_login": "Login"},
+        )
+        index_page = response.location
+        assert index_page.endswith("index.py")  # Relative redirect to "index.py" :-( !!!
+        response = client.get("/NO_SITE/check_mk/index.py")
+        assert response.status_code == 200
+
+        if client.cookie_jar is None:
+            assert False, "Cookie Jar is surprisingly empty."
+
+        test_environ = create_environ("/", method="GET")
+        client.cookie_jar.inject_wsgi(test_environ)
+
+        # request context with cookie yields a user
+        with flask_app.request_context(test_environ):
+            assert session.user.id == with_user[0]
+
+        # request context without this cookie yields nobody
+        with flask_app.test_request_context("/"):
+            assert isinstance(session.user, LoggedInNobody)
+            assert session.user.id != with_user[0]
+
+
+# TODO: to be moved out of REST API blueprint to global in a later commit.
+def test_login_with_bearer_token(with_user: tuple[UserId, str], flask_app: flask.Flask) -> None:
+    with flask_app.test_request_context(
+        "/", method="GET", headers={"Authorization": f"Bearer {with_user[0]} {with_user[1]}"}
+    ):
+        assert type(session.user) == LoggedInUser  # pylint: disable=unidiomatic-typecheck
+        assert session.user.id == with_user[0]
+
+
+def test_login_with_basic_auth(with_user: tuple[UserId, str], flask_app: flask.Flask) -> None:
+    token = b64encode(f"{with_user[0]}:{with_user[1]}".encode()).decode()
+    with flask_app.test_request_context(
+        "/", method="GET", headers={"Authorization": f"Basic {token}"}
+    ):
+        assert type(session.user) == LoggedInUser  # pylint: disable=unidiomatic-typecheck
+        assert session.user.id == with_user[0]
+
+
+def test_login_with_webserver(with_user: tuple[UserId, str], flask_app: flask.Flask) -> None:
+    with flask_app.test_request_context(
+        "/",
+        method="GET",
+        environ_overrides={"REMOTE_USER": with_user[0]},
+    ):
+        assert type(session.user) == LoggedInUser  # pylint: disable=unidiomatic-typecheck
+        assert session.user.id == with_user[0]
+
+
+def test_authenticate_success(flask_app: flask.Flask, user_id: UserId) -> None:
     assert user.id is None
-    with login.authenticate(request) as authenticated:
-        assert authenticated is True
-        assert user.id == user_id
+
+    with flask_app.test_request_context(
+        environ_overrides={"REMOTE_USER": user_id},
+    ):
+        flask_app.preprocess_request()
+        with login.authenticate() as authenticated:
+            assert authenticated is True
+            assert user.id == user_id
+
     assert user.id is None
 
 
-def test_authenticate_fails(module_wide_request_context, monkeypatch, user_id):
-    monkeypatch.setattr(login, "_check_auth", lambda r: None)
+def test_authenticate_fails(flask_app: flask.Flask, with_user: UserId) -> None:
     assert user.id is None
-    with login.authenticate(request) as authenticated:
-        assert authenticated is False
-        assert user.id is None
+
+    with flask_app.test_request_context():
+        with login.authenticate() as authenticated:
+            assert authenticated is False
+            assert user.id is None
+
     assert user.id is None
 
 
 @pytest.fixture(name="pre_16_cookie")
-def fixture_pre_16_cookie():
+def fixture_pre_16_cookie() -> Iterator[str]:
     environ = dict(
         create_environ(),
-        HTTP_COOKIE=
-        u"xyz=123; auth_stable=lärs:1534272374.61:1f59cac3fcd5bcc389e4f8397bed315b; abc=123".encode(
-            "utf-8"))
+        HTTP_COOKIE="xyz=123; auth_stable=lärs:1534272374.61:1f59cac3fcd5bcc389e4f8397bed315b; abc=123".encode(),
+    )
 
     with application_and_request_context(environ):
         yield "auth_stable"
 
 
 @pytest.fixture(name="pre_20_cookie")
-def fixture_pre_20_cookie():
+def fixture_pre_20_cookie() -> Iterator[str]:
     environ = dict(
         create_environ(),
-        HTTP_COOKIE=
-        u"xyz=123; auth_stable=lärs:1534272374.61:1f59cac3fcd5bcc389e4f8397bed315b; abc=123".encode(
-            "utf-8"))
+        HTTP_COOKIE="xyz=123; auth_stable=lärs:1534272374.61:1f59cac3fcd5bcc389e4f8397bed315b; abc=123".encode(),
+    )
 
     with application_and_request_context(environ):
         yield "auth_stable"
 
 
 @pytest.fixture(name="session_id")
-def fixture_session_id(with_user):
-    user_id = with_user[0]
-    return userdb._initialize_session(user_id)
+def fixture_session_id(
+    flask_app: flask.Flask, with_user: tuple[UserId, str]
+) -> Generator[str, None, None]:
+    with flask_app.test_request_context(
+        environ_overrides={"REMOTE_USER": with_user[0]},
+    ):
+        flask_app.preprocess_request()
+        assert session.user.id == with_user[0]
+        session_id = session.session_info.session_id
+        # Finalize the response to allow the session to be persisted and the cookie to be set.
+        response = flask_app.process_response(http.Response())
+
+    # Extract the cookie and prepare a request header
+    cookie: SimpleCookie = SimpleCookie(response.headers["Set-Cookie"])
+    cookie_headers = [cookie.output(header="Cookie").split(" ", 1)]
+
+    with flask_app.test_request_context(headers=cookie_headers):
+        flask_app.preprocess_request()
+        # We ensure that the cookie has been sent along.
+        cookie_name = list(cookie.keys())[0]
+        assert request.cookies[cookie_name] == list(cookie.values())[0].value
+
+        yield session_id
 
 
 @pytest.fixture(name="current_cookie")
-def fixture_current_cookie(with_user, session_id):
+def fixture_current_cookie(with_user: tuple[UserId, str], session_id: str) -> Iterator[str]:
     user_id = with_user[0]
-    cookie_name = login.auth_cookie_name()
-    cookie_value = login._auth_cookie_value(user_id, session_id)
+    cookie_name = auth_cookie_name()
+    cookie_value = auth_cookie_value(user_id, session_id)
 
-    environ = dict(create_environ(), HTTP_COOKIE=f"{cookie_name}={cookie_value}".encode("utf-8"))
+    environ = dict(create_environ(), HTTP_COOKIE=f"{cookie_name}={cookie_value}".encode())
 
     with application_and_request_context(environ):
+        load_config()
         yield cookie_name
 
 
-def test_parse_auth_cookie_refuse_pre_16(pre_16_cookie):
-    with pytest.raises(MKAuthException, match="Refusing pre 2.0"):
-        login.user_from_cookie(login._fetch_cookie(pre_16_cookie))
+def test_parse_auth_cookie_allow_current(
+    current_cookie: str, with_user: tuple[UserId, str], session_id: str
+) -> None:
+    assert (cookie := request.cookies.get(current_cookie, type=str))
+    assert auth.parse_and_check_cookie(cookie) == (
+        with_user[0],
+        session_id,
+        generate_auth_hash(with_user[0], session_id),
+    )
 
 
-def test_parse_auth_cookie_refuse_pre_20(pre_20_cookie):
-    with pytest.raises(MKAuthException, match="Refusing pre 2.0"):
-        login.user_from_cookie(login._fetch_cookie(pre_20_cookie))
-
-
-def test_parse_auth_cookie_allow_current(current_cookie, with_user, session_id):
-    assert login.user_from_cookie(login._fetch_cookie(current_cookie)) == (UserId(
-        with_user[0]), session_id, login._generate_auth_hash(with_user[0], session_id))
-
-
-def test_auth_cookie_is_valid_refuse_pre_16(pre_16_cookie):
-    cookie = login._fetch_cookie(pre_16_cookie)
-    assert login.auth_cookie_is_valid(cookie) is False
-
-
-def test_auth_cookie_is_valid_refuse_pre_20(pre_20_cookie):
-    cookie = login._fetch_cookie(pre_20_cookie)
-    assert login.auth_cookie_is_valid(cookie) is False
-
-
-def test_auth_cookie_is_valid_allow_current(current_cookie):
-    cookie = login._fetch_cookie(current_cookie)
-    assert login.auth_cookie_is_valid(cookie) is True
-
-
-def test_web_server_auth_session(user_id):
+def test_web_server_auth_session(flask_app: flask.Flask, user_id: UserId) -> None:
     environ = dict(create_environ(), REMOTE_USER=str(user_id))
 
-    with application_and_request_context(environ):
-        assert user.id is None
-        with login.authenticate(request) as authenticated:
-            assert authenticated is True
-            assert user.id == user_id
-            assert session.user_id == user.id
-        assert user.id is None
+    with flask_app.app_context():
+        with flask_app.request_context(create_environ()):
+            flask_app.preprocess_request()
+            assert user.id is None
+
+        with flask_app.request_context(environ):
+            flask_app.preprocess_request()
+            with login.authenticate() as authenticated:
+                assert authenticated is True
+                assert user.id == user_id
+                assert session.user.id == user.id
+
+        with flask_app.request_context(create_environ()):
+            flask_app.preprocess_request()
+            assert user.id is None
+
+
+def test_auth_session_times(flask_app: flask.Flask, auth_request: http.Request) -> None:
+    with flask_app.test_client(use_cookies=True) as client:
+        client.get(auth_request)
+        assert session.session_info.started_at is not None
+        assert session.user.id == auth_request.environ["REMOTE_USER"]
+        session_id = session.session_info.session_id
+        started_at = session.session_info.started_at
+        last_activity = session.session_info.last_activity
+
+        client.get(auth_request)
+        assert session.session_info.session_id == session_id
+        assert session.session_info.started_at == started_at
+        # tried it with time.sleep and ">".
+        assert session.session_info.last_activity >= last_activity
+
+
+def test_ignore_transaction_ids(
+    request_context: Iterator[None],
+    with_automation_user: tuple[UserId, str],
+    flask_app: flask.Flask,
+) -> None:
+    user_id, password = with_automation_user
+    env = create_environ(
+        path="/NO_SITE/check_mk/index.py",
+        query_string={"_username": user_id, "_secret": password},
+        method="GET",
+    )
+    with flask_app.request_context(env):
+        flask_app.preprocess_request()
+        with login.authenticate():
+            assert transactions._ignore_transids
+        assert transactions._ignore_transids is False

@@ -1,23 +1,44 @@
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 include ../defines.make
+include ../artifacts.make
 
+AGENTS_DIR := $(REPO_PATH)/agents
+SPECIAL_AGENTS_DIR := $(REPO_PATH)/cmk/special_agents
 RPM_VERSION := $(subst -,_,$(VERSION))
 NEW_VERSION_MAJOR := $(shell echo $(NEW_VERSION) | sed 's/\([0-9]*\.[0-9]*\)\.\(.*\)/\1/g')
 NAME := check-mk-agent
 DISTNAME := $(NAME)-$(VERSION)
-RPM_TOPDIR := $$(pwd)/.rpm.topdir
-RPM_BUILDROOT := $$(pwd)/.rpm.buildroot
-RPM_PACKAGE := $(DISTNAME)-1.noarch.rpm
-DEB_PACKAGE := check-mk-agent_$(VERSION)-1_all.deb
+BUILDROOT := $(AGENTS_DIR)/.buildroot
+BUILDROOT_STAMP := $(AGENTS_DIR)/.buildroot.stamp
+RPM_TOPDIR := $(AGENTS_DIR)/.rpm.topdir
+RPM_BUILDDIR := $(AGENTS_DIR)/.rpm.builddir
+RPM_PACKAGE := $(AGENTS_DIR)/$(DISTNAME)-1.noarch.rpm
+DEB_PACKAGE := $(AGENTS_DIR)/check-mk-agent_$(VERSION)-1_all.deb
+DEB_TOPDIR := $(AGENTS_DIR)/debian
+DEB_BUILDDIR := $(AGENTS_DIR)/debian/.build
+
+AGENT_CTL := $(AGENTS_DIR)/linux/cmk-agent-ctl
+AGENT_CTL_GZ := $(AGENT_CTL).gz
+AGENT_CTL_DIR := $(REPO_PATH)/packages/cmk-agent-ctl
+
+BUILDROOT_DEPS := \
+	conffiles/super-server.cfg \
+	check_mk_agent.linux \
+	check_mk_caching_agent.linux \
+	$(AGENT_CTL_GZ) \
+	mk-job \
+	waitmax \
+	$(shell find scripts/ -type f)
+
 usage:
-	@echo "make waitmax  -- compile waitmax.c"
-	@echo "make build    -- create all files needed for \"make dist\" of Check_MK"
-	@echo "make rpm      -- create RPM package of Linux agent"
-	@echo "make deb      -- create DEB package of Linux agent"
-	@echo "make packages -- create RPM and DEB package of Linux agent"
+	@echo "make waitmax       -- compile waitmax.c"
+	@echo "make build         -- create all files needed for \"make dist\" of Check_MK"
+	@echo "make rpm           -- create RPM package of Linux agent"
+	@echo "make deb           -- create DEB package of Linux agent"
+	@echo "make packages      -- create RPM and DEB package of Linux agent"
 
 waitmax: waitmax.c
 	@if type diet >/dev/null ; then \
@@ -42,75 +63,97 @@ setversion:
 	-e 's/^__version__ = ".*/__version__ = "$(NEW_VERSION)"/' \
 	-e 's/^$$CMK_VERSION=".*/$$CMK_VERSION="$(NEW_VERSION)"/' \
 	-e 's/^$$CMK_VERSION = ".*/$$CMK_VERSION = "$(NEW_VERSION)"/' \
-	$(shell find plugins/ -maxdepth 1 -type f) ; \
+	$(shell find plugins/ -maxdepth 1 -type f ! -name \*_2.py ! -name \*.checksum) ; \
 	sed -i 's/say "Version: .*"/say "Version: $(NEW_VERSION)"/' check_mk_agent.openvms
-	sed -i 's/echo "Version: [0-9.a-z-]*"/echo "Version: $(NEW_VERSION)"/g' check_mk_agent.*
-	sed -i "s/^#define CMK_WIN_AGENT_VERSION .*/#define CMK_WIN_AGENT_VERSION \"$(NEW_VERSION)\"/" wnx/src/common/wnx_version.h
+	sed -i 's/^Version: .*/Version: $(NEW_VERSION)/' check_mk_agent.linux
+	sed -i 's/echo "Version: [0-9.a-z-]*"/echo "Version: $(NEW_VERSION)"/g' \
+	    check_mk_agent.aix \
+	    check_mk_agent.freebsd \
+	    check_mk_agent.hpux \
+	    check_mk_agent.macosx \
+	    check_mk_agent.netbsd \
+	    check_mk_agent.openbsd \
+	    check_mk_agent.openwrt \
+	    check_mk_agent.solaris
+	sed -i 's/__version__ = \"[0-9.a-z-]*\"/__version__ = \"$(NEW_VERSION)\"/g' \
+		$(SPECIAL_AGENTS_DIR)/agent_splunk.py \
+		$(SPECIAL_AGENTS_DIR)/agent_vsphere.py \
+		$(SPECIAL_AGENTS_DIR)/agent_netapp.py \
+		$(SPECIAL_AGENTS_DIR)/agent_jolokia.py
+	sed -i "s/^#define CMK_WIN_AGENT_VERSION .*/#define CMK_WIN_AGENT_VERSION \"$(NEW_VERSION)\"/" wnx/include/common/wnx_version.h
+	sed -i 's/std::wstring_view kAgentProductName.*;/std::wstring_view kAgentProductName{L"Checkmk Agent $(NEW_VERSION_MAJOR)"};/' wnx/include/wnx/install_api.h
+	sed -i 's/define ProductName = "Checkmk Agent [^"]*"/define ProductName = "Checkmk Agent $(NEW_VERSION_MAJOR)"/' wnx/install/version.wxi
+	sed -i 's/define ServiceDescription = "Checkmk monitoring agent service - [^"]*"/define ServiceDescription = "Checkmk monitoring agent service - $(NEW_VERSION_MAJOR)"/' wnx/install/Product.wxs
+	sed -i 's/pub const VERSION: &str = "[^"]*";/pub const VERSION: \&str = "$(NEW_VERSION)";/' $(AGENT_CTL_DIR)/src/constants.rs
 
-build: $(DEB_PACKAGE) $(RPM_PACKAGE) $(WIN_PACKAGE)
+build: $(DEB_PACKAGE) $(RPM_PACKAGE) $(WIN_PACKAGE) $(AGENT_CTL)
+
+$(AGENT_CTL):
+	$(AGENT_CTL_DIR)/run --setup-environment --build
+	mkdir -p linux
+	install -m 755 $(AGENT_CTL_DIR)/target/x86_64-unknown-linux-musl/release/cmk-agent-ctl $(AGENT_CTL)
+	strip $(AGENT_CTL)
+
+$(AGENT_CTL_GZ): $(AGENT_CTL)
+	gzip --best --keep --force $(AGENT_CTL)
 
 packages: $(DEB_PACKAGE) $(RPM_PACKAGE)
-
 deb: $(DEB_PACKAGE)
-
 rpm: $(RPM_PACKAGE)
 
-$(RPM_PACKAGE): waitmax
-	rm -rf $(RPM_TOPDIR)
-	mkdir -p $(RPM_TOPDIR)/RPMS
-	mkdir -p $(RPM_TOPDIR)/SRPMS
-	mkdir -p $(RPM_TOPDIR)/SOURCES
-	mkdir -p $(RPM_TOPDIR)/BUILD
-	mkdir -p $(RPM_TOPDIR)/SPECS
-	tar czf \
-	    $(RPM_TOPDIR)/SOURCES/$(NAME)-$(VERSION).tar.gz \
-	    --transform='s@^@$(DISTNAME)/@' \
-	    cfg_examples \
-	    check_mk_agent.linux \
-	    check_mk_caching_agent.linux \
-	    waitmax \
-	    mk-job
-	sed "s/^Version:.*/Version: $(RPM_VERSION)/" $(NAME).spec > $(NAME)-$(VERSION).spec
+$(RPM_PACKAGE): $(BUILDROOT_STAMP)
 	rm -f *.rpm
-	rpmbuild -ba --buildroot "$(RPM_BUILDROOT)" \
+	rm -rf "$(RPM_TOPDIR)"
+	cp -pr $(BUILDROOT) $(RPM_BUILDDIR)
+	rpmbuild -bb --buildroot "$(RPM_BUILDDIR)" \
 	    --define "_topdir $(RPM_TOPDIR)" \
 	    --define "_version $(VERSION)" \
-	    $(DISTNAME).spec
-	rm -f $(DISTNAME).spec
+	    --define "_rpm_version $(RPM_VERSION)" \
+	    $(NAME).spec
 	mv -v $(RPM_TOPDIR)/RPMS/*/* $(RPM_PACKAGE)
-	rm -rf $(RPM_TOPDIR) $(RPM_BUILDROOT)
+	rm -rf $(RPM_TOPDIR) $(RPM_BUILDDIR)
 
+$(DEB_PACKAGE): $(BUILDROOT_STAMP)
+	rm "$(DEB_BUILDDIR)" -rf
+	mkdir -p "$(DEB_BUILDDIR)/control"
+	install -m 644 "$(DEB_TOPDIR)/control/conffiles" "$(DEB_BUILDDIR)/control"
+	install -m 644 "$(DEB_TOPDIR)/control/control" "$(DEB_BUILDDIR)/control"
+	install -m 644 "$(DEB_TOPDIR)/control/debian-binary" "$(DEB_BUILDDIR)/control"
+	install -m 755 "$(DEB_TOPDIR)/control/postinst" "$(DEB_BUILDDIR)/control"
+	install -m 755 "$(DEB_TOPDIR)/control/preinst" "$(DEB_BUILDDIR)/control"
+	install -m 755 "$(DEB_TOPDIR)/control/prerm" "$(DEB_BUILDDIR)/control"
+	install -m 644 /dev/null "$(DEB_BUILDDIR)/control/md5sum"
+	cd $(BUILDROOT); find . -type f | while read -r filename; do \
+	    md5sum "$${filename}" | sed 's|./||' >> "$(DEB_BUILDDIR)/control/md5sum"; \
+	done
+	sed \
+	    -e 's|\(Version:\).*|\1 $(VERSION)-1|' \
+	    -e 's|\(Installed-Size:\).*|\1 '"$$(du $(BUILDROOT) -s -B1024 | cut -f1)"'|' \
+	    "$(DEB_TOPDIR)/control/control" > "$(DEB_BUILDDIR)/control/control"
+	# gnu formatted tar
+	cd "$(BUILDROOT)"; tar -cz --group=0 --owner=0 -f "$(DEB_BUILDDIR)/data.tar.gz" .
+	cd "$(DEB_BUILDDIR)/control"; tar -cz --group=0 --owner=0 -f "$(DEB_BUILDDIR)/control.tar.gz" .
+	cd "$(DEB_TOPDIR)"; ar cr "$(DEB_PACKAGE)" "control/debian-binary" "$(DEB_BUILDDIR)/control.tar.gz" "$(DEB_BUILDDIR)/data.tar.gz"
+	rm $(DEB_BUILDDIR) -rf
 
-# TODO: Replace alien usage. Debian packages should be created just like the bakery does
-#       Keep in mind that we still need to use gz compression by default for the agent
-#       packages.
-$(DEB_PACKAGE): $(RPM_PACKAGE)
-	@echo "Sorry. Debian packages currently via alien"
-	rm -f *.deb
-	set -e ; \
-	if [ -z "$$FAKEROOTKEY" ]; then \
-	    FAKEROOT=fakeroot ; \
-	else \
-	    FAKEROOT= ; \
-	fi ; \
-	$$FAKEROOT alien --scripts -k --to-deb $(RPM_PACKAGE)
-	DEB_PKG=$$(ls *.deb) ; \
-	echo "Repackaging $$DEB_PKG" ; \
-	rm -rf deb-unpack ; \
-	mkdir -p deb-unpack ; \
-	cd deb-unpack && \
-	ar x ../$$DEB_PKG && \
-	rm ../$$DEB_PKG && \
-	mkdir ctrl && \
-	tar xf control.tar.* -C ctrl && \
-	sed -i -e '/^Depends:/d' \
-	       -e 's/^Version:.*/Version: $(VERSION)-1/' \
-	       -e 's/^Maintainer:.*/Maintainer: feedback@checkmk.com/' ctrl/control && \
-	tar czf control.tar.gz $(TAROPTS) -C ctrl . && \
-	xz --decompress data.tar.xz && \
-	gzip data.tar && \
-	ar r ../$(DEB_PACKAGE) debian-binary control.tar.gz data.tar.gz
-	rm -rf deb-unpack
+$(BUILDROOT_STAMP): $(BUILDROOT_DEPS)
+	mkdir -p "$(BUILDROOT)/etc/check_mk"
+	install -m 644 "conffiles/super-server.cfg" "$(BUILDROOT)/etc/check_mk/super-server.cfg"
+	mkdir -p "$(BUILDROOT)/usr/bin"
+	mkdir -p "$(BUILDROOT)/var/lib/cmk-agent"
+	install -m 755 check_mk_agent.linux "$(BUILDROOT)/usr/bin/check_mk_agent"
+	install -m 755 check_mk_caching_agent.linux "$(BUILDROOT)/usr/bin/check_mk_caching_agent"
+	install -m 640 $(AGENT_CTL_GZ) "$(BUILDROOT)/var/lib/cmk-agent/cmk-agent-ctl.gz"
+	install -m 755 mk-job "$(BUILDROOT)/usr/bin/mk-job"
+	install -m 755 waitmax "$(BUILDROOT)/usr/bin/waitmax"
+	mkdir -p "$(BUILDROOT)/usr/lib/check_mk_agent/local"
+	mkdir -p "$(BUILDROOT)/usr/lib/check_mk_agent/plugins"
+	mkdir -p "$(BUILDROOT)/var/lib/check_mk_agent/cache"
+	mkdir -p "$(BUILDROOT)/var/lib/check_mk_agent/job"
+	mkdir -p "$(BUILDROOT)/var/lib/check_mk_agent/spool"
+	cp -r scripts "$(BUILDROOT)/var/lib/cmk-agent"
+	mv "$(BUILDROOT)/var/lib/cmk-agent/scripts/super-server/1_xinetd/check-mk-agent" "$(BUILDROOT)/etc/check_mk/xinetd-service-template.cfg"
+	touch $@
 
 clean:
-	rm -rf *~ waitmax *.rpm *.deb
+	rm -rf *~ waitmax *.rpm *.deb $(AGENT_CTL) $(AGENT_CTL_GZ) "$(BUILDROOT)" "$(BUILDROOT_STAMP)" "$(DEB_BUILDDIR)" "$(RPM_BUILDDIR)" "$(RPM_TOPDIR)"

@@ -1,0 +1,1 @@
+FROM artifacts.lan.tribe29.com:4000/hadolint@sha256:c5ef4209a717b9824108c248a4a1ff09ff2d6b6d69aa96abb6285693867793d2

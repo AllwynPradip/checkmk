@@ -1,41 +1,42 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from cmk.gui.i18n import _
-from cmk.gui.valuespec import (
-    Integer,
-    Tuple,
-)
 
-from cmk.gui.plugins.wato import (
+from cmk.gui.i18n import _
+from cmk.gui.plugins.wato.utils import (
     CheckParameterRulespecWithoutItem,
     rulespec_registry,
     RulespecGroupCheckParametersEnvironment,
+    simple_levels,
 )
+from cmk.gui.valuespec import Age, Dictionary, Migrate
+
+
+def _migrate(
+    params: tuple[int, int] | dict[str, tuple[int, int] | None]
+) -> dict[str, tuple[int, int] | None]:
+    if isinstance(params, dict):
+        return params
+    w, c = params
+    return {"levels_elapsed_time": None if (w, c) == (0, 0) else (w * 86400, c * 86400)}
 
 
 def _parameter_valuespec_ups_test():
-    return Tuple(
-        title=_("Time since last UPS selftest"),
-        elements=[
-            Integer(
-                title=_("Warning Level for time since last self test"),
-                help=_("Warning Level for time since last diagnostic test of the device. "
-                       "For a value of 0 the warning level will not be used"),
-                unit=_("days"),
-                default_value=0,
-            ),
-            Integer(
-                title=_("Critical Level for time since last self test"),
-                help=_("Critical Level for time since last diagnostic test of the device. "
-                       "For a value of 0 the critical level will not be used"),
-                unit=_("days"),
-                default_value=0,
-            ),
-        ],
+    return Migrate(
+        Dictionary(
+            elements=[
+                (
+                    "levels_elapsed_time",
+                    simple_levels.SimpleLevels(
+                        spec=Age,
+                        title=_("Time since last UPS selftest"),
+                    ),
+                ),
+            ],
+        ),
+        migrate=_migrate,
     )
 
 
@@ -44,5 +45,6 @@ rulespec_registry.register(
         check_group_name="ups_test",
         group=RulespecGroupCheckParametersEnvironment,
         parameter_valuespec=_parameter_valuespec_ups_test,
-        title=lambda: _("Time since last UPS selftest"),
-    ))
+        title=lambda: _("UPS selftest"),
+    )
+)

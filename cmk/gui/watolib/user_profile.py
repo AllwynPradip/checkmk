@@ -1,45 +1,44 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import ast
 import time
-from multiprocessing.pool import ThreadPool
+from datetime import datetime
 from multiprocessing import TimeoutError as mp_TimeoutError
+from multiprocessing.pool import ThreadPool
+from typing import Any, NamedTuple
 
-from typing import NamedTuple
+from flask import current_app
+from flask.ctx import RequestContext
 
-import cmk.gui.sites as sites
+from livestatus import SiteConfiguration, SiteId
+
+from cmk.utils.exceptions import MKGeneralException
+from cmk.utils.user import UserId
+
 import cmk.gui.hooks as hooks
-import cmk.gui.config as config
+import cmk.gui.sites as sites
 import cmk.gui.userdb as userdb
+from cmk.gui.config import active_config, load_config
+from cmk.gui.exceptions import RequestTimeout
+from cmk.gui.http import request
+from cmk.gui.i18n import _, _l
+from cmk.gui.site_config import get_login_slave_sites, get_site_config, is_wato_slave_site
+from cmk.gui.utils.script_helpers import make_request_context
 from cmk.gui.utils.urls import urlencode_vars
-from cmk.gui.i18n import _
-from cmk.gui.exceptions import MKGeneralException, RequestTimeout
-from cmk.gui.globals import request
+from cmk.gui.watolib.automation_commands import automation_command_registry, AutomationCommand
+from cmk.gui.watolib.automations import do_remote_automation, get_url, MKAutomationException
 from cmk.gui.watolib.changes import add_change
-from cmk.gui.watolib.automation_commands import (
-    AutomationCommand,
-    automation_command_registry,
-)
-from cmk.gui.watolib.automations import (
-    MKAutomationException,
-    do_remote_automation,
-    get_url,
-)
-from cmk.gui.watolib.utils import (
-    mk_eval,
-    mk_repr,
-)
+from cmk.gui.watolib.utils import mk_eval, mk_repr
 
 # In case the sync is done on the master of a distributed setup the auth serial
 # is increased on the master, but not on the slaves. The user can not access the
 # slave sites anymore with the master sites cookie since the serials differ. In
 # case the slave sites sync with LDAP on their own this issue will be repaired after
 # the next LDAP sync on the slave, but in case the slaves do not sync, this problem
-# will be repaired automagically once an admin performs the next WATO sync for
+# will be repaired automagically once an admin performs the next Setup sync for
 # another reason.
 # Now, to solve this issue, we issue a user profile sync in case the password has
 # been changed. We do this only when only the password has changed.
@@ -50,7 +49,9 @@ from cmk.gui.watolib.utils import (
 
 
 class SynchronizationResult:
-    def __init__(self, site_id, error_text=None, disabled=False, succeeded=False, failed=False):
+    def __init__(  # type: ignore[no-untyped-def]
+        self, site_id, error_text=None, disabled=False, succeeded=False, failed=False
+    ) -> None:
         self.site_id = site_id
         self.error_text = error_text
         self.failed = failed
@@ -62,19 +63,29 @@ def _synchronize_profiles_to_sites(logger, profiles_to_synchronize):
     if not profiles_to_synchronize:
         return
 
-    remote_sites = [(site_id, config.site(site_id)) for site_id in config.get_login_slave_sites()]
+    remote_sites = [(site_id, get_site_config(site_id)) for site_id in get_login_slave_sites()]
 
-    logger.info('Credentials changed for %s. Trying to sync to %d sites' %
-                (", ".join(profiles_to_synchronize.keys()), len(remote_sites)))
+    logger.info(
+        "Credentials changed for %s. Trying to sync to %d sites"
+        % (", ".join(profiles_to_synchronize.keys()), len(remote_sites))
+    )
 
     states = sites.states()
+
+    with (
+        request_context := make_request_context(current_app)
+    ):  # pylint: disable=superfluous-parens
+        load_config()
 
     pool = ThreadPool()
     jobs = []
     for site_id, site in remote_sites:
         jobs.append(
-            pool.apply_async(_sychronize_profile_worker,
-                             (states, site_id, site, profiles_to_synchronize)))
+            pool.apply_async(
+                _sychronize_profile_worker,
+                (request_context, states, site_id, site, profiles_to_synchronize),
+            )
+        )
 
     results = []
     start_time = time.time()
@@ -92,31 +103,41 @@ def _synchronize_profiles_to_sites(logger, profiles_to_synchronize):
     working_sites = {result.site_id for result in results}
     for site_id in contacted_sites - working_sites:
         results.append(
-            SynchronizationResult(site_id,
-                                  error_text=_("No response from update thread"),
-                                  failed=True))
+            SynchronizationResult(
+                site_id, error_text=_("No response from update thread"), failed=True
+            )
+        )
 
     for result in results:
         if result.error_text:
-            logger.info('  FAILED [%s]: %s' % (result.site_id, result.error_text))
-            if config.wato_enabled:
-                add_change("edit-users",
-                           _('Password changed (sync failed: %s)') % result.error_text,
-                           add_user=False,
-                           sites=[result.site_id],
-                           need_restart=False)
+            logger.info(f"  FAILED [{result.site_id}]: {result.error_text}")
+            if active_config.wato_enabled:
+                add_change(
+                    "edit-users",
+                    _l("Password changed (sync failed: %s)") % result.error_text,
+                    add_user=False,
+                    sites=[result.site_id],
+                    need_restart=False,
+                )
 
     pool.terminate()
     pool.join()
 
-    num_failed = sum([1 for result in results if result.failed])
-    num_disabled = sum([1 for result in results if result.disabled])
-    num_succeeded = sum([1 for result in results if result.succeeded])
-    logger.info('  Disabled: %d, Succeeded: %d, Failed: %d' %
-                (num_disabled, num_succeeded, num_failed))
+    num_failed = sum(1 for result in results if result.failed)
+    num_disabled = sum(1 for result in results if result.disabled)
+    num_succeeded = sum(1 for result in results if result.succeeded)
+    logger.info(
+        "  Disabled: %d, Succeeded: %d, Failed: %d" % (num_disabled, num_succeeded, num_failed)
+    )
 
 
-def _sychronize_profile_worker(states, site_id, site, profiles_to_synchronize):
+def _sychronize_profile_worker(
+    request_context: RequestContext,
+    states: sites.SiteStates,
+    site_id: SiteId,
+    site: SiteConfiguration,
+    profiles_to_synchronize: dict[UserId, Any],
+) -> SynchronizationResult:
     if not site.get("replication"):
         return SynchronizationResult(site_id, disabled=True)
 
@@ -125,12 +146,13 @@ def _sychronize_profile_worker(states, site_id, site, profiles_to_synchronize):
 
     status = states.get(site_id, {}).get("state", "unknown")
     if status == "dead":
-        return SynchronizationResult(site_id,
-                                     error_text=_("Site %s is dead") % site_id,
-                                     failed=True)
+        return SynchronizationResult(
+            site_id, error_text=_("Site %s is dead") % site_id, failed=True
+        )
 
     try:
-        result = push_user_profiles_to_site_transitional_wrapper(site, profiles_to_synchronize)
+        with request_context:
+            result = push_user_profiles_to_site_transitional_wrapper(site, profiles_to_synchronize)
         if result is not True:
             return SynchronizationResult(site_id, error_text=result, failed=True)
         return SynchronizationResult(site_id, succeeded=True)
@@ -146,7 +168,7 @@ def _sychronize_profile_worker(states, site_id, site, profiles_to_synchronize):
 def _handle_ldap_sync_finished(logger, profiles_to_synchronize, changes):
     _synchronize_profiles_to_sites(logger, profiles_to_synchronize)
 
-    if changes and config.wato_enabled and not config.is_wato_slave_site():
+    if changes and active_config.wato_enabled and not is_wato_slave_site():
         add_change("edit-users", "<br>".join(changes), add_user=False)
 
 
@@ -171,20 +193,28 @@ def push_user_profiles_to_site_transitional_wrapper(site, user_profiles):
 
 
 def _legacy_push_user_profile_to_site(site, user_id, profile):
-    url = site["multisiteurl"] + "automation.py?" + urlencode_vars([
-        ("command", "push-profile"),
-        ("secret", site["secret"]),
-        ("siteid", site['id']),
-        ("debug", config.debug and "1" or ""),
-    ])
+    url = (
+        site["multisiteurl"]
+        + "automation.py?"
+        + urlencode_vars(
+            [
+                ("command", "push-profile"),
+                ("secret", site["secret"]),
+                ("siteid", site["id"]),
+                ("debug", active_config.debug and "1" or ""),
+            ]
+        )
+    )
 
-    response = get_url(url,
-                       site.get('insecure', False),
-                       data={
-                           'user_id': user_id,
-                           'profile': mk_repr(profile),
-                       },
-                       timeout=60)
+    response = get_url(
+        url,
+        site.get("insecure", False),
+        data={
+            "user_id": user_id,
+            "profile": mk_repr(profile).decode("ascii"),
+        },
+        timeout=60,
+    )
 
     if not response:
         raise MKAutomationException(_("Empty output from remote site."))
@@ -193,7 +223,7 @@ def _legacy_push_user_profile_to_site(site, user_id, profile):
         response = mk_eval(response)
     except Exception:
         # The remote site will send non-Python data in case of an error.
-        raise MKAutomationException("%s: <pre>%s</pre>" % (_("Got invalid data"), response))
+        raise MKAutomationException("{}: <pre>{}</pre>".format(_("Got invalid data"), response))
     return response
 
 
@@ -201,16 +231,17 @@ def push_user_profiles_to_site(site, user_profiles):
     def _serialize(user_profiles):
         """Do not synchronize user session information"""
         return {
-            user_id: {k: v for k, v in profile.items() if k != "session_info"
-                     } for user_id, profile in user_profiles.items()
+            user_id: {k: v for k, v in profile.items() if k != "session_info"}
+            for user_id, profile in user_profiles.items()
         }
 
-    return do_remote_automation(site,
-                                "push-profiles", [("profiles", repr(_serialize(user_profiles)))],
-                                timeout=60)
+    return do_remote_automation(
+        site, "push-profiles", [("profiles", repr(_serialize(user_profiles)))], timeout=60
+    )
 
 
-PushUserProfilesRequest = NamedTuple("PushUserProfilesRequest", [("user_profiles", dict)])
+class PushUserProfilesRequest(NamedTuple):
+    user_profiles: dict
 
 
 @automation_command_registry.register
@@ -219,17 +250,18 @@ class PushUserProfilesToSite(AutomationCommand):
         return "push-profiles"
 
     def get_request(self):
-        return PushUserProfilesRequest(ast.literal_eval(
-            request.get_str_input_mandatory("profiles")))
+        return PushUserProfilesRequest(
+            ast.literal_eval(request.get_str_input_mandatory("profiles"))
+        )
 
     def execute(self, api_request):
         user_profiles = api_request.user_profiles
 
         if not user_profiles:
-            raise MKGeneralException(_('Invalid call: No profiles set.'))
+            raise MKGeneralException(_("Invalid call: No profiles set."))
 
         users = userdb.load_users(lock=True)
         for user_id, profile in user_profiles.items():
             users[user_id] = profile
-        userdb.save_users(users)
+        userdb.save_users(users, datetime.now())
         return True

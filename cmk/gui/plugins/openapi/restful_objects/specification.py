@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2020 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2020 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """
@@ -37,7 +36,7 @@ JSON and encoded in UTF-8.
 
 ## JSON envelope attributes for objects
 
-All objects are wrapped in a JSON structure called an "Domain Object" which take the following
+All objects are wrapped in a JSON structure called a "Domain Object" which take the following
 form:
 
     {
@@ -71,6 +70,8 @@ used. All relations to other objects will be listed in the `links` attribute.
 
 ## JSON envelope for collections
 
+For collections, the JSON envelope looks slightly different.
+
     {
         "domainType": <domain type>,
         "instanceId": <string to uniquely identify domain object>,
@@ -80,10 +81,7 @@ used. All relations to other objects will be listed in the `links` attribute.
             <attribute name>: <attribute value>,
             ...
         },
-        "members": {
-            <member name>: <member definition>,
-            ...
-        }
+        "value": [<domain object 1>, <domain object 2>, ...],
     }
 
 ## Link relations
@@ -145,7 +143,6 @@ be found on the documentation of each affected endpoint.
 The endpoints in the category "Monitoring" support arbitrary Livestatus expressions (including And,
 Or combinators) and all columns of some specific tables can be queried.
 
-
 ### Note
 
 You can find an introduction to basic monitoring principles including host and service status in the
@@ -171,15 +168,6 @@ Livestatus column name, `right` is always a value.
 A list of all list of all possible
 [Livestatus filter operators](https://docs.checkmk.com/latest/en/livestatus_references.html#heading_filter),
 can be found in the Checkmk documentation.
-
-### Table definitions
-
-To check what columns are available and what kind of value each column can have, please consult
-these definition files on GitHub.
-
- * [downtimes table](https://github.com/tribe29/checkmk/blob/master/cmk/gui/plugins/openapi/livestatus_helpers/tables/downtimes.py)
- * [hosts table](https://github.com/tribe29/checkmk/blob/master/cmk/gui/plugins/openapi/livestatus_helpers/tables/hosts.py)
- * [services table](https://github.com/tribe29/checkmk/blob/master/cmk/gui/plugins/openapi/livestatus_helpers/tables/services.py)
 
 ### Example
 
@@ -235,7 +223,14 @@ This example filters for the host "example.com" only when the `state` column is 
 means the state is OK.
 
     {'op': 'and', 'expr': [{'op': '=', 'left': 'host_name', 'right': 'example.com'},
-                            {'op': '=', 'left': 'state', 'right': 0}}
+                            {'op': '=', 'left': 'state', 'right': 0}]}
+
+# Table definitions
+
+The following Livestatus tables can be queried through the REST-API. Which table is being used
+in a particular endpoint can be seen in the endpoint documentation.
+
+$TABLE_DEFINITIONS
 
 # Authentication
 
@@ -245,13 +240,15 @@ some users are already created. You can configure them in Checkmk at *Setup* > *
 
 For the various authentication methods that can be used please consult the following descriptions,
 which occur in the order of precedence. This means that on a request which receives multiple
-authentication methods, the one with the hightes priority "wins" and is used. This is especially
+authentication methods, the one with the highest priority "wins" and is used. This is especially
 convenient when developing automation scripts, as these can directly be used with either the
 currently logged in GUI user, or the "Bearer" authentication method which takes precedence over the
 GUI authentication method. The result is that the user doesn't have to log out to check that the
 scripts works with the other method.
 
 <SecurityDefinitions />
+
+
 
 # Compatibility
 
@@ -264,11 +261,11 @@ such a method. In these cases the HTTP method to use has to be POST. You cannot 
 ## Compatibility policy
 
 It is our policy to keep all documented parts backwards compatible, as long as there is no
-compelling reason (like security, etc) to break compatibility.
+compelling reason (like security, etc.) to break compatibility.
 
 In the event of a break in backwards compatibility, these changes are documented and, if possible,
 announced by deprecating the field or endpoint in question beforehand. Please understand that this
-can't be promised for all cases (security, etc) though.
+can't be promised for all cases (security, etc.) though.
 
 ## Versioning
 
@@ -311,124 +308,112 @@ We cannot guarantee bug-for-bug backwards compatibility. If a behaviour of an en
 documented we may change it without incrementing the API version.
 
 """
-from typing import Dict, List, Literal, TypedDict
+from typing import Literal
 
-import apispec.ext.marshmallow as marshmallow  # type: ignore[import]
-import apispec.utils  # type: ignore[import]
+import apispec.ext.marshmallow as marshmallow
+import apispec.utils
 import apispec_oneofschema  # type: ignore[import]
+from typing_extensions import TypedDict
 
-from cmk.gui.plugins.openapi import plugins
+from cmk.gui.fields.openapi import CheckmkMarshmallowPlugin
+from cmk.gui.plugins.openapi.restful_objects.documentation import table_definitions
 from cmk.gui.plugins.openapi.restful_objects.parameters import ACCEPT_HEADER
 from cmk.gui.plugins.openapi.restful_objects.params import to_openapi
 
 SECURITY_SCHEMES = {
-    'headerAuth': {
-        'type': 'http',
-        'scheme': 'bearer',
-        'description': 'Use user credentials in the `Authorization` HTTP header. '
-                       'The format of the header value is `$user $password`. This method has the '
-                       'highest precedence. If it succeeds, all other authentication methods are '
-                       'skipped.',
-        'bearerFormat': 'username password',
+    "headerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Use user credentials in the `Authorization` HTTP header. "
+        "The format of the header value is `$user $password`. This method has the "
+        "highest precedence. If authentication succeeds, `cookieAuth` will be skipped.",
+        "bearerFormat": "username password",
     },
-    'webserverAuth': {
-        'type': 'http',
-        'scheme': 'basic',
-        'description': "Use the authentication method of the webserver ('basic' or 'digest'). To "
-                       "use this, you'll either have to re-configure the site's Apache instance "
-                       "yourself, or disable multi-site logins via `omd config`. This method "
-                       "takes precedence over the `cookieAuth` method."
-    }
+    "webserverAuth": {
+        "type": "http",
+        "scheme": "basic",
+        "description": "Use the authentication method of the webserver ('basic' or 'digest'). To "
+        "use this, you'll either have to re-configure the site's Apache instance by yourself. "
+        "If authentication succeeds, `cookieAuth` will be skipped.",
+    },
 }
 
 DEFAULT_HEADERS = [
-    ('Accept', 'Media type(s) that is/are acceptable for the response.', 'application/json'),
+    ("Accept", "Media type(s) that is/are acceptable for the response.", "application/json"),
 ]
 
-OpenAPIInfoDict = TypedDict(
-    'OpenAPIInfoDict',
-    {
-        'description': str,
-        'license': Dict[str, str],
-        'contact': Dict[str, str],
-    },
-    total=True,
-)
 
-TagGroup = TypedDict(
-    'TagGroup',
-    {
-        'name': str,
-        'tags': List[str],
-    },
-    total=True,
-)
+class OpenAPIInfoDict(TypedDict, total=True):
+    description: str
+    license: dict[str, str]
+    contact: dict[str, str]
+
+
+class TagGroup(TypedDict, total=True):
+    name: str
+    tags: list[str]
+
 
 ReDocSpec = TypedDict(
     "ReDocSpec",
     {
-        'info': OpenAPIInfoDict,
-        'externalDocs': Dict[str, str],
-        'security': List[Dict[str, List[str]]],
-        'x-logo': Dict[str, str],
-        'x-tagGroups': List[TagGroup],
-        'x-ignoredHeaderParameters': List[str],
+        "info": OpenAPIInfoDict,
+        "externalDocs": dict[str, str],
+        "security": list[dict[str, list[str]]],
+        "x-logo": dict[str, str],
+        "x-tagGroups": list[TagGroup],
+        "x-ignoredHeaderParameters": list[str],
     },
     total=True,
 )
 
 OPTIONS: ReDocSpec = {
-    'info': {
-        'description': apispec.utils.dedent(__doc__).strip(),
-        'license': {
-            'name': 'GNU General Public License version 2',
-            'url': 'https://checkmk.com/gpl.html',
+    "info": {
+        "description": apispec.utils.dedent(__doc__)
+        .strip()
+        .replace("$TABLE_DEFINITIONS", "\n".join(table_definitions())),
+        "license": {
+            "name": "GNU General Public License version 2",
+            "url": "https://checkmk.com/legal/gpl",
         },
-        'contact': {
-            'name': 'Contact the Checkmk Team',
-            'url': 'https://checkmk.com/contact.php',
-            'email': 'feedback@checkmk.com'
+        "contact": {
+            "name": "Contact the Checkmk Team",
+            "url": "https://checkmk.com/contact",
+            "email": "feedback@checkmk.com",
         },
     },
-    'externalDocs': {
-        'description': 'User guide',
-        'url': 'https://docs.checkmk.com/master',
+    "externalDocs": {
+        "description": "The official Checkmk user guide",
+        "url": "https://docs.checkmk.com/",
     },
-    'x-logo': {
-        'url': 'https://checkmk.com/bilder/brand-assets/checkmk_logo_main.png',
-        'altText': 'Checkmk',
+    "x-logo": {
+        "url": "https://checkmk.com/bilder/brand-assets/checkmk_logo_main.png",
+        "altText": "Checkmk",
     },
-    'x-tagGroups': [
-        {
-            'name': 'Monitoring',
-            'tags': []
-        },
-        {
-            'name': 'Setup',
-            'tags': []
-        },
+    "x-tagGroups": [
+        {"name": "Monitoring", "tags": []},
+        {"name": "Setup", "tags": []},
+        {"name": "Checkmk Internal", "tags": []},
     ],
-    'x-ignoredHeaderParameters': [
-        'User-Agent',
-        'X-Test-Header',
+    "x-ignoredHeaderParameters": [
+        "User-Agent",
+        "X-Test-Header",
     ],
-    'security': [{
-        sec_scheme_name: []
-    } for sec_scheme_name in SECURITY_SCHEMES]
+    "security": [{sec_scheme_name: []} for sec_scheme_name in SECURITY_SCHEMES],
 }
 
 __version__ = "1.0"
 
 
-def make_spec(options: ReDocSpec):
+def make_spec(options: ReDocSpec):  # type: ignore[no-untyped-def]
     return apispec.APISpec(
         "Checkmk REST-API",
         __version__,
         apispec.utils.OpenAPIVersion("3.0.2"),
         plugins=[
             marshmallow.MarshmallowPlugin(),
-            plugins.ValueTypedDictMarshmallowPlugin(),
             apispec_oneofschema.MarshmallowPlugin(),
+            CheckmkMarshmallowPlugin(),
         ],
         **options,
     )
@@ -450,10 +435,8 @@ for sec_scheme_name, sec_scheme_spec in SECURITY_SCHEMES.items():
 for header_name, field in ACCEPT_HEADER.items():
     SPEC.components.parameter(
         header_name,
-        'header',
-        to_openapi([{
-            header_name: field
-        }], 'header')[0],
+        "header",
+        to_openapi([{header_name: field}], "header")[0],
     )
 
-ErrorType = Literal['ignore', 'raise']
+ErrorType = Literal["ignore", "raise"]

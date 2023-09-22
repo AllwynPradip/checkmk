@@ -1,20 +1,13 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import (
-    Any,
-    Dict,
-    List,
-    Mapping,
-    Optional,
-    Sequence,
-    Tuple,
-    TypedDict,
-    Union,
-)
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+from typing_extensions import TypedDict
+
 from .agent_based_api.v1 import (
     get_value_store,
     Metric,
@@ -23,14 +16,11 @@ from .agent_based_api.v1 import (
     Result,
     Service,
     SNMPTree,
-    startswith,
-    State as state,
+    State,
     type_defs,
 )
-from .utils import (
-    interfaces,
-    temperature,
-)
+from .utils import interfaces, temperature
+from .utils.brocade import DETECT_MLX
 
 # .1.3.6.1.4.1.1991.1.1.3.3.6.1.1.1  41.4960 C: Normal
 # .1.3.6.1.4.1.1991.1.1.3.3.6.1.1.2  50.9531 C: Normal
@@ -98,18 +88,18 @@ from .utils import (
 # .1.3.6.1.4.1.1991.1.1.3.3.10.1.4.65.4  -021.8045 dBm: Low-Alarm
 
 OPER_STATUS_MAP = {
-    '1': 'up',
-    '2': 'down',
-    '3': 'testing',
-    '4': 'unknown',
-    '5': 'dormant',
-    '6': 'not present',
-    '7': 'lower layer down',
-    '8': 'degraded',
-    '9': 'admin down',
+    "1": "up",
+    "2": "down",
+    "3": "testing",
+    "4": "unknown",
+    "5": "dormant",
+    "6": "not present",
+    "7": "lower layer down",
+    "8": "degraded",
+    "9": "admin down",
 }
 
-ValueAndStatus = Union[Tuple[float, str], Tuple[None, None]]
+ValueAndStatus = tuple[float, str] | tuple[None, None]
 Lane = Mapping[str, ValueAndStatus]
 
 
@@ -123,14 +113,14 @@ class Port(TypedDict, total=False):
     type: str
     part: str
     serial: str
-    lanes: Dict[int, Lane]
+    lanes: dict[int, Lane]
 
 
-Section = Dict[str, Port]
+Section = dict[str, Port]
 
 
 def _parse_value(value_string: str) -> ValueAndStatus:
-    if value_string == 'N/A' or value_string.lower() == "not supported":
+    if value_string == "N/A" or value_string.lower() == "not supported":
         return None, None
     try:
         val, _unit, status = value_string.split()
@@ -139,7 +129,7 @@ def _parse_value(value_string: str) -> ValueAndStatus:
         return None, None
 
 
-def parse_brocade_optical(string_table: List[type_defs.StringTable]) -> Section:
+def parse_brocade_optical(string_table: list[type_defs.StringTable]) -> Section:
     """
     >>> from pprint import pprint
     >>> pprint(parse_brocade_optical([
@@ -199,35 +189,35 @@ def parse_brocade_optical(string_table: List[type_defs.StringTable]) -> Section:
 
     for temp, tx_light, rx_light, if_id in if_data:
         parsed.setdefault(
-            if_id, {
-                'temp': _parse_value(temp),
-                'tx_light': _parse_value(tx_light),
-                'rx_light': _parse_value(rx_light),
-            })
+            if_id,
+            {
+                "temp": _parse_value(temp),
+                "tx_light": _parse_value(tx_light),
+                "rx_light": _parse_value(rx_light),
+            },
+        )
 
     for if_id, if_descr, if_type, if_operstatus in if_info:
         if if_id in parsed:
-            parsed[if_id].update({
-                'port_type': if_type,
-                'description': if_descr,
-                'operational_status': if_operstatus
-            })
+            parsed[if_id].update(
+                {"port_type": if_type, "description": if_descr, "operational_status": if_operstatus}
+            )
 
     # add informational values
     for media_type, part, serial, if_id in if_ids:
         if if_id in parsed:
-            parsed[if_id].update({'type': media_type, 'part': part, 'serial': serial})
+            parsed[if_id].update({"type": media_type, "part": part, "serial": serial})
 
     # add per-lane data
     for temp, tx_light, rx_light, lane in lanes:
-        if_id, lane = lane.split('.')
+        if_id, lane = lane.split(".")
         if if_id in parsed:
-            parsed[if_id].setdefault('lanes', {}).setdefault(
+            parsed[if_id].setdefault("lanes", {}).setdefault(
                 int(lane),
                 {
-                    'temp': _parse_value(temp),
-                    'tx_light': _parse_value(tx_light),
-                    'rx_light': _parse_value(rx_light),
+                    "temp": _parse_value(temp),
+                    "tx_light": _parse_value(tx_light),
+                    "rx_light": _parse_value(rx_light),
                 },
             )
     return parsed
@@ -274,7 +264,7 @@ register.snmp_section(
             ],
         ),
     ],
-    detect=startswith(".1.3.6.1.2.1.1.2.0", ".1.3.6.1.4.1.1991.1."),
+    detect=DETECT_MLX,
 )
 
 
@@ -282,14 +272,16 @@ def _check_matching_conditions(
     port: Port,
     matching_conditions: interfaces.MatchingConditions,
 ) -> bool:
-    port_types = matching_conditions.get('porttypes')
-    port_states = matching_conditions.get('portstates')
-    return ((port_types is None or port['port_type'] in port_types) and
-            (port_states is None or port['operational_status'] in port_states) and
-            interfaces.check_regex_match_conditions(
-                port['description'],
-                matching_conditions.get('match_desc'),
-            ))
+    port_types = matching_conditions.get("porttypes")
+    port_states = matching_conditions.get("portstates")
+    return (
+        (port_types is None or port["port_type"] in port_types)
+        and (port_states is None or port["operational_status"] in port_states)
+        and interfaces.check_regex_match_conditions(
+            port["description"],
+            matching_conditions.get("match_desc"),
+        )
+    )
 
 
 def discover_brocade_optical(
@@ -305,11 +297,11 @@ def discover_brocade_optical(
         # find the most specific rule which applies to this interface and which has single-interface
         # discovery settings
         for rule in params:
-            if 'discovery_single' in rule and _check_matching_conditions(
-                    entry,
-                    rule['matching_conditions'][1],
+            if "discovery_single" in rule and _check_matching_conditions(
+                entry,
+                rule["matching_conditions"][1],
             ):
-                if rule['discovery_single'][0]:
+                if rule["discovery_single"][0]:
                     # if pad_width == 0 then "0" * -X == ""
                     yield Service(item="0" * (pad_width - len(key)) + key)
                 break
@@ -340,27 +332,28 @@ def _infotext(
     if reading[0] < -214748.0:
         reading_text = "off"
     else:
-        reading_text = "%.1f %s" % (reading[0], unit)
-    return "%s %s (%s)" % (title, reading_text, reading[1])
+        reading_text = f"{reading[0]:.1f} {unit}"
+    return f"{title} {reading_text} ({reading[1]})"
 
 
 def _check_light(
     reading: ValueAndStatus,
     metric_name: str,
     params: Mapping[str, Any],
-    lane_num: Optional[int] = None,
+    lane_num: int | None = None,
 ) -> type_defs.CheckResult:
     if any(x is None for x in reading):
         return
     txt = _infotext(
         reading,
-        "%s Light%s" % (
-            metric_name.split('_')[0].upper(),
-            lane_num is not None and ' (Lane %d)' % lane_num or '',
+        "%s Light%s"
+        % (
+            metric_name.split("_")[0].upper(),
+            lane_num is not None and " (Lane %d)" % lane_num or "",
         ),
         "dBm",
     )
-    mon_state = state(_monitoring_state(reading, params.get(metric_name, False)))
+    mon_state = State(_monitoring_state(reading, params.get(metric_name, False)))
     if lane_num is None:
         yield Result(
             state=mon_state,
@@ -372,7 +365,7 @@ def _check_light(
             notice=txt,
         )
     yield Metric(
-        metric_name + (lane_num is not None and '_%d' % lane_num or ''),
+        metric_name + (lane_num is not None and "_%d" % lane_num or ""),
         reading[0],  # type: ignore[arg-type]
     )
 
@@ -382,32 +375,32 @@ def check_brocade_optical(
     params: Mapping[str, Any],
     section: Section,
 ) -> type_defs.CheckResult:
-    item = item.lstrip('0')
+    item = item.lstrip("0")
     if item not in section:
         return
     iface = section[item]
 
     add_info = []
-    if 'serial' in iface:
-        add_info.append('S/N %s' % iface['serial'])
-    if 'part' in iface:
-        add_info.append('P/N %s' % iface['part'])
+    if "serial" in iface:
+        add_info.append("S/N %s" % iface["serial"])
+    if "part" in iface:
+        add_info.append("P/N %s" % iface["part"])
 
-    oper_status = iface['operational_status']
-    oper_status_readable = OPER_STATUS_MAP.get(oper_status, 'unknown[%s]' % oper_status)
+    oper_status = iface["operational_status"]
+    oper_status_readable = OPER_STATUS_MAP.get(oper_status, "unknown[%s]" % oper_status)
     if add_info:
         yield Result(
-            state=state.OK,
-            summary='[%s] Operational %s' % (", ".join(add_info), oper_status_readable),
+            state=State.OK,
+            summary="[{}] Operational {}".format(", ".join(add_info), oper_status_readable),
         )
     else:
         yield Result(
-            state=state.OK,
-            summary='Operational %s' % oper_status_readable,
+            state=State.OK,
+            summary="Operational %s" % oper_status_readable,
         )
 
     try:
-        temp = iface['temp'][0]
+        temp = iface["temp"][0]
     except KeyError:
         temp = None
     if temp is not None:
@@ -416,22 +409,22 @@ def check_brocade_optical(
             None,
             unique_name="brocade_optical_%s" % item,
             value_store=get_value_store(),
-            dev_status=_monitoring_state(iface['temp'], params.get('temp', False)),
+            dev_status=_monitoring_state(iface["temp"], params.get("temp", False)),
         )
     yield from _check_light(
-        iface['tx_light'],
-        'tx_light',
+        iface["tx_light"],
+        "tx_light",
         params,
     )
     yield from _check_light(
-        iface['rx_light'],
-        'rx_light',
+        iface["rx_light"],
+        "rx_light",
         params,
     )
 
-    if 'lanes' in iface and params.get('lanes'):
-        for num, lane in iface['lanes'].items():
-            temp = lane['temp'][0]
+    if "lanes" in iface and params.get("lanes"):
+        for num, lane in iface["lanes"].items():
+            temp = lane["temp"][0]
             assert temp is not None
             lane_temp_output = list(
                 temperature.check_temperature(
@@ -439,26 +432,29 @@ def check_brocade_optical(
                     None,
                     unique_name="brocade_optical_lane%d_%s" % (num, item),
                     value_store=get_value_store(),
-                    dev_status=_monitoring_state(lane['temp'], params.get('temp', False)),
-                ))
+                    dev_status=_monitoring_state(lane["temp"], params.get("temp", False)),
+                )
+            )
             lane_temp_result = [res for res in lane_temp_output if isinstance(res, Result)][0]
             lane_temp_metric = [res for res in lane_temp_output if isinstance(res, Metric)][0]
-            yield Result(state=lane_temp_result.state,
-                         notice="Temperature (Lane %d) %s" % (num, lane_temp_result.summary))
+            yield Result(
+                state=lane_temp_result.state,
+                notice="Temperature (Lane %d) %s" % (num, lane_temp_result.summary),
+            )
             yield Metric(
                 "port_%s_%d" % (lane_temp_metric.name, num),
                 lane_temp_metric.value,
             )
 
             yield from _check_light(
-                lane['tx_light'],
-                'tx_light',
+                lane["tx_light"],
+                "tx_light",
                 params,
                 lane_num=num,
             )
             yield from _check_light(
-                lane['rx_light'],
-                'rx_light',
+                lane["rx_light"],
+                "rx_light",
                 params,
                 lane_num=num,
             )

@@ -1,34 +1,36 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import json
-from typing import Mapping
-from .agent_based_api.v1 import (
-    Metric,
-    Result,
-    Service,
-    register,
-)
-from .agent_based_api.v1.type_defs import (
-    CheckResult,
-    DiscoveryResult,
-    StringTable,
-)
-from .utils.interfaces import (
-    Interface,
-    check_single_interface,
-)
+import time
+from collections.abc import Mapping
+
+from .agent_based_api.v1 import get_value_store, Metric, register, Result, Service
+from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult, StringTable
+from .utils import interfaces
 
 Section = Mapping[str, float]
 
 _RESULTS_TO_ABANDON = {
-    "Multicast in", "Broadcast in", "Unicast in", "Non-unicast in", "Multicast out",
-    "Broadcast out", "Unicast out", "Non-unicast out"
+    "Multicast in",
+    "Broadcast in",
+    "Unicast in",
+    "Non-unicast in",
+    "Multicast out",
+    "Broadcast out",
+    "Unicast out",
+    "Non-unicast out",
 }
-_METRICS_TO_KEEP = {"in", "indisc", "inerr", "out", "outdisc", "outerr"}
+_METRICS_TO_KEEP = {
+    "in",
+    "indisc",
+    "inerr",
+    "out",
+    "outdisc",
+    "outerr",
+}
 
 
 def parse_cadvisor_if(string_table: StringTable) -> Section:
@@ -60,27 +62,39 @@ def discover_cadvisor_if(section: Section) -> DiscoveryResult:
 
 
 def check_cadvisor_if(item: str, section: Section) -> CheckResult:
-    for output in check_single_interface(
-            item,
+    for output in interfaces.check_single_interface(
+        item,
         {},
-            Interface(
-                index="0",
-                descr=item,
-                alias=item,
-                type="1",
-                oper_status="1",
-                in_octets=section["if_in_total"],
-                in_discards=section["if_in_discards"],
-                in_errors=section["if_in_errors"],
-                out_octets=section["if_out_total"],
-                out_discards=section["if_out_discards"],
-                out_errors=section["if_out_errors"],
+        interfaces.InterfaceWithRatesAndAverages.from_interface_with_counters_or_rates(
+            interfaces.InterfaceWithCounters(
+                attributes=interfaces.Attributes(
+                    index="0",
+                    descr=item,
+                    alias=item,
+                    type="1",
+                    oper_status="1",
+                ),
+                counters=interfaces.Counters(
+                    in_octets=section["if_in_total"],
+                    in_disc=section["if_in_discards"],
+                    in_err=section["if_in_errors"],
+                    out_octets=section["if_out_total"],
+                    out_disc=section["if_out_discards"],
+                    out_err=section["if_out_errors"],
+                ),
             ),
+            timestamp=time.time(),
+            value_store=get_value_store(),
+            params={},
+        ),
     ):
-        if ((isinstance(output, Result) and
-             ("Speed: unknown" in output.summary or any(name in output.details
-                                                        for name in _RESULTS_TO_ABANDON))) or
-            (isinstance(output, Metric) and output.name not in _METRICS_TO_KEEP)):
+        if (
+            isinstance(output, Result)
+            and (
+                "Speed: unknown" in output.summary
+                or any(name in output.details for name in _RESULTS_TO_ABANDON)
+            )
+        ) or (isinstance(output, Metric) and output.name not in _METRICS_TO_KEEP):
             continue
         yield output
 

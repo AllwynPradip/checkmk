@@ -1,8 +1,8 @@
 title: DOCSIS Cable Modem Status
 agents: snmp
 catalog: hw/network/docsis
-license: GPL
-distribution:
+license: GPLv2
+distribution: check_mk
 description:
  This check monitors a number of status objects for Cable Modems.
  Currently this are the Status Value ( operational,  notReady etc.) and the transmit power
@@ -11,6 +11,5 @@ description:
 item:
  ID like reported in SNMP Output. Based on the Maclayer
 
-inventory:
+discovery:
  One service is created for each ID.
-

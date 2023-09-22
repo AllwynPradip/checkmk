@@ -15,9 +15,15 @@ _artifact_name() {
 _download_from_mirror() {
     local TARGET_PATH=$1
     local MIRROR_URL=$2
+    local MIRROR_CREDENTIALS=$3
+
+    if [ -z "${MIRROR_CREDENTIALS}" ]; then
+        log "No credentials given, not downloading, continuing with build ..."
+        return
+    fi
 
     log "Downloading ${MIRROR_URL}"
-    curl -1 -sSf -o "${TARGET_PATH}" "${MIRROR_URL}" || return
+    curl -u "${MIRROR_CREDENTIALS}" -1 -sSf -o "${TARGET_PATH}" "${MIRROR_URL}" || return
     log "Got ${TARGET_PATH} file from ${MIRROR_URL}"
 }
 
@@ -71,7 +77,7 @@ mirrored_download() {
     local MIRROR_URL=${MIRROR_BASE_URL}$FILE_NAME
     local MIRROR_CREDENTIALS="${NEXUS_USERNAME}:${NEXUS_PASSWORD}"
 
-    if ! _download_from_mirror "${TARGET_PATH}" "${MIRROR_URL}"; then
+    if ! _download_from_mirror "${TARGET_PATH}" "${MIRROR_URL}" "${MIRROR_CREDENTIALS}"; then
         log "File not available from ${MIRROR_URL}, downloading from ${UPSTREAM_URL}"
 
         _download_from_upstream "${TARGET_PATH}" "${UPSTREAM_URL}"
@@ -125,7 +131,8 @@ cached_build() {
         exit 1
     fi
 
-    local FILE_NAME="$(_artifact_name "${DIR_NAME}" "${DISTRO}" "${BRANCH_VERSION}" "${BUILD_ID}")"
+    local FILE_NAME
+    FILE_NAME="$(_artifact_name "${DIR_NAME}" "${DISTRO}" "${BRANCH_VERSION}" "${BUILD_ID}")"
     local ARCHIVE_PATH="${TARGET_DIR}/${FILE_NAME}"
     log "Artifact: ${FILE_NAME}"
 
@@ -146,7 +153,7 @@ cached_build() {
     local MIRROR_URL=${MIRROR_BASE_URL}$FILE_NAME
     local MIRROR_CREDENTIALS="${NEXUS_USERNAME}:${NEXUS_PASSWORD}"
 
-    if _download_from_mirror "${ARCHIVE_PATH}" "${MIRROR_URL}"; then
+    if _download_from_mirror "${ARCHIVE_PATH}" "${MIRROR_URL}" "${MIRROR_CREDENTIALS}"; then
         _unpack_package "${ARCHIVE_PATH}" "${TARGET_DIR}"
     else
         build_package
@@ -155,4 +162,36 @@ cached_build() {
     fi
 
     _cleanup_package "${ARCHIVE_PATH}"
+}
+
+set_bin_symlinks() {
+    local TARGET_DIR="$1"
+    local DIR_NAME="$2"
+
+    log "Make binaries from ${TARGET_DIR}/${DIR_NAME}/bin available via ${TARGET_DIR}/bin"
+    mkdir -p "${TARGET_DIR}/bin"
+    ln -sf "${TARGET_DIR}/${DIR_NAME}/bin/"* "${TARGET_DIR}/bin"
+}
+
+# When building our build containers we don't have the whole repo available,
+# but we copy defines.make to scripts (see build-build-containers.jenkins).
+# However, in other situations we have the git available and need to find
+# defines.make in the repo base directory.
+find_defines_make() {
+    local SEARCH_PATH="$1"
+    cd "$SEARCH_PATH" || true
+    while [ ! -e defines.make ]; do
+        if [ "$PWD" = / ]; then
+            failure "could not find defines.make"
+            break
+        fi
+        cd ..
+    done
+    echo "$PWD/defines.make"
+}
+
+get_version() {
+    local SEARCH_PATH="$1"
+    local NAME="$2"
+    make --no-print-directory --file="$(find_defines_make "$SEARCH_PATH")" print-"$NAME"
 }

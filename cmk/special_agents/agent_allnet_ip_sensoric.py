@@ -1,152 +1,91 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 # This agent uses UPNP API calls to the Fritz!Box to gather information
 # about connection configuration and status.
-
+"""
+Special Agent for Allnet IP-Sensoric monitoring
+"""
+import argparse
 import re
 import sys
-import getopt
-import pprint
-import socket
-import urllib.request
-import traceback
+from collections.abc import Mapping, Sequence
 
-from cmk.utils.exceptions import MKException
+import requests
 
+from cmk.special_agents.utils.agent_common import special_agent_main
+from cmk.special_agents.utils.argument_parsing import Args, create_default_argument_parser
 
-def usage():
-    sys.stderr.write("""Check_MK ALLNET IP-Sensoric Agent
-
-USAGE: agent_allnet_ip_sensoric [OPTIONS] HOST
-       agent_allnet_ip_sensoric -h
-
-ARGUMENTS:
-  HOST                          Host name or IP address of your ALLNET IP-Sensoric
-
-OPTIONS:
-  -h, --help                    Show this help message and exit
-  -t, --timeout SEC             Set the network timeout to <SEC> seconds.
-                                Default is 10 seconds. Note: the timeout is not
-                                applied to the whole check, instead it is used for
-                                the http query only.
-  --debug                       Debug mode: let Python exceptions come through
-""")
+_DEFAULT_TIMEOUT = 10
 
 
-class RequestError(MKException):
-    pass
-
-
-def get_allnet_ip_sensoric_info(host_address, opt_debug):
-    url = 'http://%s/xml/sensordata.xml' % host_address
-
-    headers = {
-        'User-agent': 'Check_MK agent_allnet_ip_sensoric',
-    }
-
-    if opt_debug:
-        sys.stdout.write('============================\n')
-        sys.stdout.write('URL: %s\n' % url)
-
-    try:
-        req = urllib.request.Request(url, None, headers)
-        handle = urllib.request.urlopen(req)
-    except Exception:
-        if opt_debug:
-            sys.stdout.write('----------------------------\n')
-            sys.stdout.write(traceback.format_exc())
-            sys.stdout.write('============================\n')
-        raise RequestError('Error during http call')
-
-    infos = handle.info()
-    contents = handle.read().decode('utf-8')
-
-    if opt_debug:
-        sys.stdout.write('----------------------------\n')
-        sys.stdout.write('Server: %s\n' % infos['SERVER'])
-        sys.stdout.write('----------------------------\n')
-        sys.stdout.write(contents + '\n')
-        sys.stdout.write('============================\n')
-
-    attrs = {}
-
+def parse_response_data(contents: str) -> Mapping[str, Mapping[str, str]]:
+    parsed: dict[str, dict[str, str]] = {}
     context = None
     for line in contents.splitlines():
-
-        match = re.search('<(sensor[0-9]+|system)>', line)
+        match = re.search("<(sensor[0-9]+|system)>", line)
         if match:
             context = match.group(1)
             continue
 
-        match = re.search('</(sensor[0-9]+|system)>', line)
+        match = re.search("</(sensor[0-9]+|system)>", line)
         if match:
             context = None
             continue
 
-        match = re.search(r'<(\w+)>(.+)</\w+>', line)
+        match = re.search(r"<(\w+)>(.+)</\w+>", line)
         if match and context:
-            attrs["%s.%s" % (context, match.group(1))] = match.group(2)
+            parsed.setdefault(context, {})[match.group(1)] = match.group(2)
 
-    if opt_debug:
-        sys.stdout.write('Parsed: %s\n' % pprint.pformat(attrs))
-
-    return attrs
+    return parsed
 
 
-def main(sys_argv=None):
-    if sys_argv is None:
-        sys_argv = sys.argv[1:]
+def parse_arguments(argv: Sequence[str] | None) -> argparse.Namespace:
+    parser = create_default_argument_parser(__doc__)
+    parser.add_argument(
+        "--timeout",
+        "-t",
+        type=int,
+        metavar="SEC",
+        default=_DEFAULT_TIMEOUT,
+        help=(
+            f"Set the network timeout to <SEC> seconds (default: {_DEFAULT_TIMEOUT}."
+            "Note:"
+            " The timeout is not applied to the whole check, it is used for the http query only."
+        ),
+    )
+    parser.add_argument("host", help="Host name or IP address of your ALLNET IP-Sensoric")
+    return parser.parse_args(argv if argv is not None else sys.argv[1:])
 
-    short_options = 'h:t:d'
-    long_options = ['help', 'timeout=', 'debug']
 
-    host_address = None
-    opt_debug = False
-    opt_timeout = 10
-
+def _fetch_and_output_data(args: Args) -> int:
+    url = f"http://{args.host}/xml/sensordata.xml"
     try:
-        opts, args = getopt.getopt(sys_argv, short_options, long_options)
-    except getopt.GetoptError as err:
-        sys.stderr.write("%s\n" % err)
+        response = requests.get(
+            url,
+            headers={"User-agent": "Checkmk Special Agent Allnet IP Sensoric"},
+            timeout=args.timeout,
+        )
+    except requests.ConnectionError:
+        sys.stderr.write(f"Could not connect to host: {args.host}\n")
+        return 1
+    except requests.Timeout:
+        sys.stderr.write("Connection timed out")
         return 1
 
-    for o, a in opts:
-        if o in ['--debug']:
-            opt_debug = True
-        elif o in ['-t', '--timeout']:
-            opt_timeout = int(a)
-        elif o in ['-h', '--help']:
-            usage()
-            sys.exit(0)
-
-    if len(args) == 1:
-        host_address = args[0]
-    elif not args:
-        sys.stderr.write("ERROR: No host given.\n")
-        return 1
-    else:
-        sys.stderr.write("ERROR: Please specify exactly one host.\n")
+    if response.status_code != 200:
+        sys.stderr.write(f"{url}: {response.reason}")
         return 1
 
-    socket.setdefaulttimeout(opt_timeout)
+    sys.stdout.write("<<<allnet_ip_sensoric:sep(59)>>>\n")
+    for sensor, readings in parse_response_data(response.text).items():
+        for key, value in readings.items():
+            sys.stdout.write(f"{sensor}.{key};{value}\n")
 
-    try:
-        status = {}
-        try:
-            status.update(get_allnet_ip_sensoric_info(host_address, opt_debug))
-        except Exception:
-            if opt_debug:
-                raise
+    return 0
 
-        sys.stdout.write('<<<allnet_ip_sensoric:sep(59)>>>\n')
-        for key, value in sorted(status.items()):
-            sys.stdout.write('%s;%s\n' % (key, value))
 
-    except Exception:
-        if opt_debug:
-            raise
-        sys.stderr.write('Unhandled error: %s' % traceback.format_exc())
+def main() -> int:
+    return special_agent_main(parse_arguments, _fetch_and_output_data)

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# type: ignore[list-item,import,assignment,misc,operator]  # TODO: see which are needed in this file
-from cmk.base.check_api import get_percent_human_readable
 from cmk.base.check_api import check_levels
+from cmk.base.plugins.agent_based.agent_based_api.v1 import render, startswith
+
+DETECT = startswith(".1.3.6.1.2.1.1.2.0", ".1.3.6.1.4.1.318.1.3")
 
 
 # ==================================================================================================
@@ -17,8 +17,9 @@ from cmk.base.check_api import check_levels
 # ==================================================================================================
 def check_humidity(humidity, params):
     if isinstance(params, dict):
-        levels = ((params.get("levels") or (None, None)) + (params.get("levels_lower") or
-                                                            (None, None)))
+        levels = (params.get("levels") or (None, None)) + (
+            params.get("levels_lower") or (None, None)
+        )
     elif isinstance(params, (list, tuple)):
         # old params = (crit_low , warn_low, warn, crit)
         levels = (params[2], params[3], params[1], params[0])
@@ -29,6 +30,6 @@ def check_humidity(humidity, params):
         humidity,
         "humidity",
         levels,
-        human_readable_func=get_percent_human_readable,
+        human_readable_func=render.percent,
         boundaries=(0, 100),
     )

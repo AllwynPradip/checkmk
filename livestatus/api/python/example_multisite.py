@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import os
 import sys
+
 import livestatus
 
 try:
@@ -33,9 +33,7 @@ sites = {
         "alias": "Berlin",
         "socket": "tcp:siteb:6557",
         "nagios_url": "/nagios/",
-        "tls": ("encrypted", {
-            "verify": True
-        }),
+        "tls": ("encrypted", {"verify": True}),
         "timeout": 10,
     },
 }
@@ -65,9 +63,7 @@ sites = {
         "alias": "Berlin",
         "socket": "tcp:siteb:6557",
         "nagios_url": "/nagios/",
-        "tls": ("encrypted", {
-            "verify": True
-        }),
+        "tls": ("encrypted", {"verify": True}),
         "timeout": 10,
     },
 }
@@ -77,4 +73,4 @@ for name, state in c.query("GET hosts\nColumns: name state\n"):
     print("%-15s: %d" % (name, state))
 print("Dead sites:")
 for sitename, info in c.dead_sites().items():
-    print("%s: %s" % (sitename, info["exception"]))
+    print("{}: {}".format(sitename, info["exception"]))

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: Checkmk Enterprise License
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -9,34 +8,68 @@
 # left and top, then a larger top is nearer to the top of the
 # page.
 
-import os
+# All dimensions that the user (caller) uses are in mm. All our internal
+# state variables are in the native PDF dimension, which is convered by
+# reportlab.lib.units.mm. The function from_mm convert from user-style into
+# internal-style. In a later version we could have the user himself decide
+# about the unit he wants to use.
+
+from __future__ import annotations
+
 import io
+import os
 import subprocess
 import tempfile
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from textwrap import wrap
-from typing import Any, List, Union, Tuple, Optional
+from typing import Literal, NewType, overload, Protocol
 
-from six import ensure_str
-from PIL import PngImagePlugin  # type: ignore[import]
+from PIL import PngImagePlugin
+from PIL.Image import Image
 from reportlab.lib.units import mm  # type: ignore[import]
 from reportlab.lib.utils import ImageReader  # type: ignore[import]
+
 # Import software from reportlab (thanks to them!)
 from reportlab.pdfgen import canvas  # type: ignore[import]
+from six import ensure_str
+from typing_extensions import TypedDict
 
 import cmk.utils.paths
-import cmk.utils.version as cmk_version
+
 from cmk.gui.exceptions import MKInternalError
-from cmk.gui.globals import response
+from cmk.gui.http import ContentDispositionType, response
 from cmk.gui.i18n import _
+from cmk.gui.type_defs import RGBColor, RowShading, SizeMM, SizePT
 
-RawIconColumn = Tuple[str, Optional[str]]
-# TODO: ("object", ...) missing
-RawTableColumn = Tuple[str, Union[str, RawIconColumn]]
-RawTableRow = List[RawTableColumn]
-RawTableRows = List[RawTableRow]
+RawIconColumn = tuple[Literal["icon"], str]
+RawRendererColumn = tuple[Literal["object"], "CellRenderer"]
+RawTableColumn = tuple[Sequence[str], str | RawIconColumn | RawRendererColumn]
+RawTableRow = list[RawTableColumn]
+RawTableRows = list[RawTableRow]
+SizeInternal = float
+SizeDPI = NewType("SizeDPI", int)
+Align = Literal["left", "right", "center"]
+VerticalAlign = Literal["bottom", "middle"]
+OddEven = Literal["even", "odd", "heading"]
+Position = (
+    tuple[Literal["n", "s", "w", "e"], SizeMM]
+    | tuple[Literal["nw", "ne", "sw", "se"], tuple[SizeMM, SizeMM]]
+    | Literal["c"]
+)
 
 
-def from_mm(dim):
+@overload
+def from_mm(dim: float) -> float:
+    ...
+
+
+@overload
+def from_mm(dim: Sequence[float]) -> Sequence[float]:
+    ...
+
+
+def from_mm(dim: float | Sequence[float]) -> float | Sequence[float]:
     if isinstance(dim, (int, float)):
         return dim * mm
     return [x * mm for x in dim]
@@ -83,43 +116,59 @@ css_class_colors = {
 
 
 # Make a color darker. v ranges from 0 (not darker) to 1 (black)
-def darken_color(rgb, v):
-    def darken(x, v):
+def darken_color(rgb: RGBColor, v: float) -> RGBColor:
+    def darken(x: float, v: float) -> float:
         return x * (1.0 - v)
 
-    return tuple(darken(x, v) for x in rgb)
+    return (darken(rgb[0], v), darken(rgb[1], v), darken(rgb[2], v))
 
 
 # Make a color lighter. v ranges from 0 (not lighter) to 1 (white)
-def lighten_color(rgb, v):
-    def lighten(x, v):
+def lighten_color(rgb: RGBColor, v: float) -> RGBColor:
+    def lighten(x: float, v: float) -> float:
         return 1.0 - ((1.0 - x) * (1.0 - v))
 
-    return tuple(lighten(x, v) for x in rgb)
+    return (lighten(rgb[0], v), lighten(rgb[1], v), lighten(rgb[2], v))
 
 
-# All dimensions that the user (caller) uses are in mm. All our internal
-# state variables are in the native PDF dimension, which is convered by
-# reportlab.lib.units.mm. The function from_mm convert from user-style into
-# internal-style. In a later version we could have the user himself decide
-# about the unit he wants to use.
+class GFXState(TypedDict):
+    font_family: str
+    font_size: SizePT
+    font_zoom_factor: float
+    line_width: SizeInternal
+    line_height: float  # in relation to font_size
+    fill_color: RGBColor
+    dashes: Sequence[SizeInternal]
+    line_color: RGBColor
+    bold: bool
+    tt: bool
+    heading_offset: int
 
 
 class Document:
-    def __init__(self, **args):
+    def __init__(
+        self,
+        font_family: str,
+        font_size: SizePT,
+        lineheight: float,
+        pagesize: tuple[SizeMM, SizeMM],
+        margins: tuple[SizeMM, SizeMM, SizeMM, SizeMM],
+        mirror_margins: bool = False,
+        pagebreak_function: Callable | None = None,
+        pagebreak_arguments: tuple | None = None,
+    ) -> None:
         # Static paper settings for this document
-        self._pagesize = from_mm(args["pagesize"])
-        self._margins = from_mm(args["margins"])
-        self._mirror_margins = args["margins"]
-        self._pagebreak_function = args.get("pagebreak_function")
-        self._pagebreak_arguments = args.get("pagebreak_arguments", [])
+        self._pagesize = from_mm(pagesize)
+        self._margins = from_mm(margins)
+        self._mirror_margins = mirror_margins
+        self._pagebreak_function = pagebreak_function
+        self._pagebreak_arguments = pagebreak_arguments or tuple()
 
         # set derived helper variables (all in pt)
         self._width, self._height = self._pagesize
         self._height = self._pagesize[1]
 
-        self._margin_top, self._margin_right, \
-            self._margin_bottom, self._margin_left = self._margins
+        self._margin_top, self._margin_right, self._margin_bottom, self._margin_left = self._margins
 
         self._inner_width = self._width - self._margin_left - self._margin_right
         self._inner_height = self._height - self._margin_top - self._margin_bottom
@@ -131,12 +180,12 @@ class Document:
         # create PDF document
         self._output_buffer = io.BytesIO()
         self._canvas = canvas.Canvas(self._output_buffer, pagesize=self._pagesize)
-        self._heading_entries = []
+        self._heading_entries: list[tuple[str, int]] = []
 
         # initialize our page state
         self._page_number = 1
-        self._tabstops = []
-        self._heading_numbers = {}
+        self._tabstops: list[tuple[str, SizeInternal]] = []
+        self._heading_numbers: dict[int, int] = {}
         # The level number of the last added heading
         self._heading_level = 0
         # Increase all future added headings by this level offset
@@ -146,12 +195,12 @@ class Document:
         # Create initial graphics state, i.e. all style settings,
         # that can change while the document is being rendered. We keep a stack
         # a graphics states to that can be pushed and from that can be pulled.
-        self._gfx_state = {
-            "font_family": args["font_family"],
-            "font_size": args["font_size"],  # pt
+        self._gfx_state: GFXState = {
+            "font_family": font_family,
+            "font_size": font_size,  # pt
             "font_zoom_factor": 1.0,
             "line_width": 0.05 * mm,
-            "line_height": args["lineheight"],  # in relation to font_size
+            "line_height": lineheight,  # in relation to font_size
             "fill_color": black,
             "dashes": [],
             "line_color": black,
@@ -159,33 +208,38 @@ class Document:
             "tt": False,
             "heading_offset": 0,
         }
-        self._gfx_state_stack = []
+        self._gfx_state_stack: list[GFXState] = []
         self.set_gfx_state()
 
-    def end(self, sendas=None, do_send=True):
+    def end(self, sendas: str | None = None, do_send: bool = True) -> bytes | None:
         self._canvas.showPage()
         self._canvas.save()
         pdf_source = self._output_buffer.getvalue()
         self._output_buffer.close()
 
-        if do_send:
+        if do_send and sendas:
             Document.send(pdf_source, sendas)
         else:
             return pdf_source
+        return None
 
     @classmethod
-    def send(cls, pdf_source, sendas):
+    def send(cls, pdf_source: bytes, sendas: str) -> None:
+        # ? sendas seems to be used with type str
         response.set_content_type("application/pdf")
-        response.headers["Content-Disposition"] = "inline; filename=" + ensure_str(sendas)
+        response.set_content_disposition(
+            ContentDispositionType.INLINE,
+            ensure_str(sendas),  # pylint: disable= six-ensure-str-bin-call
+        )
         response.set_data(pdf_source)
 
     # Methods dealing with manipulating the graphics state (font size, etc.)
 
-    def save_state(self):
+    def save_state(self) -> None:
         self._gfx_state_stack.append(self._gfx_state.copy())
         self._canvas.saveState()  # needed for clip rect
 
-    def restore_state(self):
+    def restore_state(self) -> None:
         # Problem here: After a page break the internal state stack
         # of the canvas object is cleared. But page breaks can happen
         # at many places implicitely! Calling restoreState() with a
@@ -200,7 +254,7 @@ class Document:
     # Private function for making all graphics settings active. We could
     # optimizie this by only changing the attributes actually being modified,
     # but the use of that is probably neglectable.
-    def set_gfx_state(self):
+    def set_gfx_state(self) -> None:
         s = self._gfx_state
         self._canvas.setFillColorRGB(*s["fill_color"])
         self._canvas.setStrokeColorRGB(*s["line_color"])
@@ -219,58 +273,58 @@ class Document:
             family += "-Roman"
         self._canvas.setFont(family, s["font_size"] * s["font_zoom_factor"])
 
-    def set_font_bold(self, b=True):
+    def set_font_bold(self, b: bool = True) -> None:
         self._gfx_state["bold"] = b
         self.set_gfx_state()
 
-    def set_font_tt(self, tt=True):
+    def set_font_tt(self, tt: bool = True) -> None:
         self._gfx_state["tt"] = tt
         self.set_gfx_state()
 
-    def set_font_zoom(self, zoom):
+    def set_font_zoom(self, zoom: float) -> None:
         self._gfx_state["font_zoom_factor"] = zoom
         self.set_gfx_state()
 
-    def set_font_size(self, s):
+    def set_font_size(self, s: SizePT) -> None:
         self._gfx_state["font_size"] = s
         self.set_gfx_state()
 
-    def get_font_size(self):
+    def get_font_size(self) -> SizePT:
         return self._gfx_state["font_size"]
 
-    def set_line_width(self, w):
+    def set_line_width(self, w: SizeInternal) -> None:
         self._gfx_state["line_width"] = w * mm
         self.set_gfx_state()
 
-    def set_dashes(self, dashes):
+    def set_dashes(self, dashes: Sequence[SizeMM]) -> None:
         self._gfx_state["dashes"] = [d * mm for d in dashes]
         self.set_gfx_state()
 
-    def set_fill_color(self, color):
+    def set_fill_color(self, color: RGBColor) -> None:
         self._gfx_state["fill_color"] = color
         self.set_gfx_state()
 
-    def set_line_color(self, color):
+    def set_line_color(self, color: RGBColor) -> None:
         self._gfx_state["line_color"] = color
         self.set_gfx_state()
 
-    def set_font_color(self, color):
+    def set_font_color(self, color: RGBColor) -> None:
         self._gfx_state["fill_color"] = color
         self._gfx_state["line_color"] = color
         self.set_gfx_state()
 
-    def get_heading_level(self):
+    def get_heading_level(self) -> int:
         return self._heading_level
 
-    def set_heading_level_offset(self, level):
+    def set_heading_level_offset(self, level: int) -> None:
         self._gfx_state["heading_offset"] = level
         self.set_gfx_state()
 
     # Page handling
-    def page_number(self):
+    def page_number(self) -> int:
         return self._page_number
 
-    def next_page(self):
+    def next_page(self) -> None:
         self._canvas.showPage()
         self._linepos = self._top
         self._page_number += 1
@@ -279,7 +333,7 @@ class Document:
             self._left = self._margin_left
             self._right = self._width - self._margin_right
 
-    def need_pagebreak(self, needed_space=0.0):
+    def need_pagebreak(self, needed_space: float = 0.0) -> bool:
         """Whether or not a page break would help to make the element be rendered as a whole
         on the next page. In case the break would not solve the situation (e.g. when the
         element is higher than the available space on a single page, then let it be."""
@@ -288,19 +342,19 @@ class Document:
 
         return not self.fits_on_remaining_page(needed_space)
 
-    def fits_on_remaining_page(self, needed_space: float) -> bool:
+    def fits_on_remaining_page(self, needed_space: SizeMM) -> bool:
         """Is the needed_space left free on the current page?"""
         return self._linepos - needed_space * mm > self._bottom
 
-    def fits_on_empty_page(self, needed_space: float) -> bool:
+    def fits_on_empty_page(self, needed_space: SizeMM) -> bool:
         """Is the needed_space sufficient on an empty page?"""
         return needed_space * mm <= self._inner_height
 
-    def check_pagebreak(self, needed_space=0.0):
+    def check_pagebreak(self, needed_space: SizeMM = 0.0) -> None:
         if self.need_pagebreak(needed_space):
             self.do_pagebreak()
 
-    def do_pagebreak(self):
+    def do_pagebreak(self) -> None:
         self.next_page()
         if self._pagebreak_function:
             self._pagebreak_function(*self._pagebreak_arguments)
@@ -313,15 +367,18 @@ class Document:
     # ( "s", 10.0 )     10 mm from bottom, horizontally centered
     # ( "ne", (5, 7) )  5 mm from top, 7 mm from right
     # "c"               At the center
-    # Returns the choords of the top left corner of the element (left, top)
-    def convert_position(self, position, el_width, el_height):
+    # Returns the coords of the top left corner of the element (left, top)
+    def convert_position(
+        self, position: Position, el_width: SizeInternal, el_height: SizeInternal
+    ) -> tuple[SizeInternal, SizeInternal]:
         h_center = self._left + (self._right - self._left) / 2.0 - el_width / 2.0
         v_center = self._bottom + (self._top - self._bottom) / 2.0 - el_height / 2.0
 
         if position == "c":
             return h_center, v_center
+
         anchor = position[0]
-        if len(anchor) == 1:  # s, n, w, e
+        if anchor in ("s", "n", "w", "e"):
             offset = position[1] * mm
             if anchor == "n":
                 return h_center, self._top - offset
@@ -332,7 +389,8 @@ class Document:
             if anchor == "e":
                 return self._right - offset - el_width, v_center
 
-        else:  # nw, sw, ne, se
+        if anchor in ("nw", "sw", "ne", "se"):
+            assert isinstance(position[1], tuple)
             h_offset = position[1][0] * mm
             v_offset = position[1][1] * mm
             if anchor[0] == "n":
@@ -345,7 +403,11 @@ class Document:
                 x = self._right - h_offset - el_width
             return x, y
 
-    def place_hrule(self, position, width=0.05, color=None):
+        raise ValueError(f"Invalid position: {position}")
+
+    def place_hrule(
+        self, position: Position, width: SizeMM = 0.05, color: RGBColor | None = None
+    ) -> None:
         el_width = self._right - self._left
         el_height = width * mm
         l, t = self.convert_position(position, el_width, el_height)
@@ -355,7 +417,7 @@ class Document:
         self._canvas.rect(l, t, el_width, el_height, fill=1, stroke=0)
         self.restore_state()
 
-    def place_text(self, position, text):
+    def place_text(self, position: Position, text: str) -> None:
         el_height = self._gfx_state["font_size"] * self._gfx_state["font_zoom_factor"]
         el_width = self._canvas.stringWidth(text)
         l, t = self.convert_position(position, el_width, el_height)
@@ -363,7 +425,7 @@ class Document:
         # Debug the text bounding box
         # self._canvas.rect(l, t, el_width, el_height, fill=0)
 
-    def place_text_lines(self, position, lines):
+    def place_text_lines(self, position: Position, lines: Sequence[str]) -> None:
         el_height = self._gfx_state["font_size"] * self._gfx_state["font_zoom_factor"] * len(lines)
         el_width = max(self._canvas.stringWidth(l) for l in lines) if lines else 0
 
@@ -373,33 +435,40 @@ class Document:
             # Try to move to correct Y position
             self._canvas.drawString(l, (t + el_height * 0.66) - (el_height * 0.5 * num), line)
             # Debug the text bounding box
-            #self._canvas.rect(l, t - el_height * 0.5 * num, el_width, el_height, fill=0)
+            # self._canvas.rect(l, t - el_height * 0.5 * num, el_width, el_height, fill=0)
 
-    def place_page_box(self):
+    def place_page_box(self) -> None:
         self.save_state()
         self.set_line_width(0.1)
         self.set_line_color(black)
         self._canvas.rect(self._left, self._bottom, self._inner_width, self._inner_height, fill=0)
         self.restore_state()
 
-    def place_pil_image(self, position, pil, width_mm, height_mm, resolution):
+    def place_pil_image(
+        self,
+        position: Position,
+        pil: Image,
+        width_mm: SizeMM | None,
+        height_mm: SizeMM | None,
+        resolution: SizeDPI | None,
+    ) -> None:
         width, height = self.get_image_dimensions(pil, width_mm, height_mm, resolution)
         x, y = self.convert_position(position, width, height)
         ir = ImageReader(pil)
-        self._canvas.drawImage(ir, x, y - height, width, height, mask='auto')
+        self._canvas.drawImage(ir, x, y - height, width, height, mask="auto")
 
     # Functions for adding floating text
 
-    def add_paragraph(self, txt):
-        lines = self.wrap_text(txt, width=(self._right - self._left))
+    def add_paragraph(self, txt: str) -> None:
+        lines = self.wrap_text(txt, width=self._right - self._left)
         for line in lines:
             self.add_text_line(line)
 
-    def debug(self, *args):
+    def debug(self, *args: object) -> None:
         for arg in args:
             self.add_paragraph(repr(arg))
 
-    def add_heading(self, level, text, numbers):
+    def add_heading(self, level: int, text: str, numbers: bool) -> None:
         level = self._gfx_state["heading_offset"] + level
 
         next_number = self._heading_numbers.get(level, 0) + 1
@@ -438,9 +507,12 @@ class Document:
         self.advance(self.lineskip() / 2.0)
         self.restore_state()
 
+    def headings(self) -> Sequence[tuple[str, int]]:
+        return self._heading_entries
+
     # Add vertical white space, skip. If that does not fit onto the current
     # page, then make a page break and *do not* skip!
-    def add_margin(self, height=None, force=False):
+    def add_margin(self, height: SizeMM | None = None, force: bool = False) -> None:
         if height is not None:
             marg = height * mm
         else:
@@ -451,7 +523,9 @@ class Document:
         else:
             self.margin(marg, force)
 
-    def add_hrule(self, margin=0.1, width=0.05, color=None):
+    def add_hrule(
+        self, margin: SizeMM = 0.1, width: SizeMM = 0.05, color: RGBColor | None = None
+    ) -> None:
         self._linepos -= margin * mm
         self.save_state()
         self.set_line_width(width)
@@ -463,14 +537,21 @@ class Document:
         self._linepos -= margin * mm
         self.restore_state()
 
-    def add_pil_image(self, pil, width, height, resolution=None, border=True):
+    def add_pil_image(
+        self,
+        pil: Image,
+        width: SizeMM | None,
+        height: SizeMM | None,
+        resolution: SizeDPI | None = None,
+        border: bool = True,
+    ) -> None:
         width, height = self.get_image_dimensions(pil, width, height, resolution)
 
         self.advance(height)
         x = self._left + (self._inner_width - width) / 2.0  # center
         y = self._linepos
         ir = ImageReader(pil)
-        self._canvas.drawImage(ir, x, y, width, height, mask='auto')
+        self._canvas.drawImage(ir, x, y, width, height, mask="auto")
         if border:
             self._canvas.rect(x, y, width, height, fill=0)
 
@@ -479,7 +560,13 @@ class Document:
     # is completely contained on one page. Skips to the next page if
     # the current page is too full. Returns left, top, width and height
     # of the actually allocated canvas in mm.
-    def add_canvas(self, width_mm, height_mm, border_width=0, left_mm=None):
+    def add_canvas(
+        self,
+        width_mm: SizeMM,
+        height_mm: SizeMM,
+        border_width: SizeMM = 0,
+        left_mm: SizeMM | None = None,
+    ) -> tuple[SizeMM, SizeMM, SizeMM, SizeMM]:
         self.advance(height_mm * mm)
 
         if left_mm is None:
@@ -501,60 +588,62 @@ class Document:
 
     # Add one line of text. This line may include horizontal tabulators ('\t').
     # You can set the width of the tabulators with set_tabstops()
-    def add_text_line(self, l, bold=False):
+    def add_text_line(self, l: str, bold: bool = False) -> None:
         self.check_pagebreak()
 
         def aligned_string(x, y, t, alignment):
-            if alignment == 'l':
+            if alignment == "l":
                 self._canvas.drawString(x, y, t)
-            elif alignment == 'r':
+            elif alignment == "r":
                 self._canvas.drawRightString(x, y, t)
             else:
                 self._canvas.drawCentredString(x, y, t)
 
-        l = l.strip(' ')
+        l = l.strip(" ")
         self._linepos -= self.lineskip()
         tab = -1
 
-        for part in l.split('\t'):
+        for part in l.split("\t"):
             self.save_state()
 
             if tab >= 0:
                 format_chars, x_position = self._tabstops[tab]  # added extra tab stop every 20 mm
-                if 'b' in format_chars:
+                if "b" in format_chars:
                     self.set_font_bold(True)
-                if 't' in format_chars:
+                if "t" in format_chars:
                     self.set_font_tt(True)
-                if 'g' in format_chars:
+                if "g" in format_chars:
                     self.set_font_color(gray)
-                if 'r' in format_chars:
-                    alignment = 'r'
-                elif 'c' in format_chars:
-                    alignment = 'c'
+                if "r" in format_chars:
+                    alignment = "r"
+                elif "c" in format_chars:
+                    alignment = "c"
                 else:
-                    alignment = 'l'
+                    alignment = "l"
 
                 # Negative values are interpreted as offset from the right border
                 if x_position < 0:
                     x_position = self._right - x_position
             else:
                 x_position = 0
-                alignment = 'l'
+                alignment = "l"
             tab += 1
             abs_x = self._left + x_position
-            abs_y = self._linepos + (self._gfx_state["font_size"] *
-                                     self._gfx_state["font_zoom_factor"]) * 0.2
+            abs_y = (
+                self._linepos
+                + (self._gfx_state["font_size"] * self._gfx_state["font_zoom_factor"]) * 0.2
+            )
             aligned_string(abs_x, abs_y, part, alignment)
             self.restore_state()
 
-    def set_tabstops(self, tabstops: List[Union[int, float, str]]) -> None:
+    def set_tabstops(self, tabstops: list[SizeMM | float | str]) -> None:
         # t is a list of tab stops. Each entry is either an int
         # or float -> tabstop in mm. Or it is a string that has
         # prefix of characters followed by a number (mm). The
         # characters specify alignment and font style. We convert
         # all this here to a pair ( "bc", 17.2 ) of the alignment
         # characters and the tabstop in *internal* dimensions.
-        def convert_tabstop(t):
+        def convert_tabstop(t: SizeMM | str) -> tuple[str, SizeInternal]:
             if isinstance(t, (int, float)):
                 return "", float(t) * mm
             if isinstance(t, str):
@@ -567,39 +656,59 @@ class Document:
 
         self._tabstops = list(map(convert_tabstop, tabstops))
 
-    def clear_tabstops(self):
+    def clear_tabstops(self) -> None:
         self._tabstops = []
 
-    def wrap_text(self, text, width, wrap_long_words=True):  # width in internal dimension
+    def wrap_text(self, text: str, width: SizeInternal, wrap_long_words: bool = True) -> list[str]:
         # The Python STL wrapper works on characters, in pdf we have fonts
         # of different size and they are not monospaced. We take the
         # character length average to normalize to font size
         if text.strip() == "":
-            return ""
+            return [""]
         char_avg = self._canvas.stringWidth(text) / len(text)
         return wrap(text, max(1, int(width / char_avg)), break_long_words=wrap_long_words)
 
-    def add_table(self,
-                  header_texts: Any,
-                  raw_rows: Any,
-                  font_size: RawTableRows,
-                  show_headings: Any,
-                  padding: Any,
-                  spacing: Any,
-                  hrules: Any,
-                  vrules: Any,
-                  rule_width: Any,
-                  row_shading: Any,
-                  respect_narrow_columns: bool = True) -> None:
-        TableRenderer(self).add_table(header_texts, raw_rows, font_size, show_headings, padding,
-                                      spacing, hrules, vrules, rule_width, row_shading,
-                                      respect_narrow_columns)
+    def add_table(
+        self,
+        header_texts: Sequence[str],
+        raw_rows: RawTableRows,
+        font_size: SizePT,
+        show_headings: bool,
+        padding: tuple[SizeMM, SizeMM],
+        spacing: tuple[SizeMM, SizeMM],
+        hrules: bool,
+        vrules: bool,
+        rule_width: SizeMM,
+        row_shading: RowShading,
+        respect_narrow_columns: bool = True,
+    ) -> None:
+        TableRenderer(self).add_table(
+            header_texts,
+            raw_rows,
+            font_size,
+            show_headings,
+            padding,
+            spacing,
+            hrules,
+            vrules,
+            rule_width,
+            row_shading,
+            respect_narrow_columns,
+        )
 
     # Lowlevel functions for direct rendering into the page. Dimensions are in
     # mm. Positions are from the top left of the physical page. These functions
     # are e.g. being used in the render functions of Perf-O-Meters.
 
-    def render_text(self, left_mm, top_mm, text, align="left", bold=False, color=black):
+    def render_text(
+        self,
+        left_mm: SizeMM,
+        top_mm: SizeMM,
+        text: str,
+        align: Align = "left",
+        bold: bool = False,
+        color: RGBColor = black,
+    ) -> None:
         self.save_state()
         self.set_font_bold(bold)
         self.set_font_color(color)
@@ -611,36 +720,37 @@ class Document:
             self._canvas.drawCentredString(left_mm * mm, top_mm * mm, text)
         self.restore_state()
 
-    def render_image(self, left_mm, top_mm, width_mm, height_mm, path):
+    def render_image(
+        self, left_mm: SizeMM, top_mm: SizeMM, width_mm: SizeMM, height_mm: SizeMM, path: str
+    ) -> None:
         pil = PngImagePlugin.PngImageFile(fp=path)
         ir = ImageReader(pil)
         try:
-            self._canvas.drawImage(ir,
-                                   left_mm * mm,
-                                   top_mm * mm,
-                                   width_mm * mm,
-                                   height_mm * mm,
-                                   mask='auto')
+            self._canvas.drawImage(
+                ir, left_mm * mm, top_mm * mm, width_mm * mm, height_mm * mm, mask="auto"
+            )
         except Exception as e:
-            raise Exception("Cannot render image %s: %s" % (path, e))
+            raise Exception(f"Cannot render image {path}: {e}")
 
-    def get_line_skip(self):
+    def get_line_skip(self) -> SizeMM:
         return self.lineskip() / mm  # fixed: true-division
 
-    def text_width(self, text):
+    def text_width(self, text) -> SizeMM:  # type: ignore[no-untyped-def]
         return self._canvas.stringWidth(text) / mm  # fixed: true-division
 
     # TODO: unify with render_text()
-    def render_aligned_text(self,
-                            left_mm,
-                            top_mm,
-                            width_mm,
-                            height_mm,
-                            text,
-                            align="center",
-                            valign="bottom",
-                            bold=False,
-                            color=None):
+    def render_aligned_text(
+        self,
+        left_mm: SizeMM,
+        top_mm: SizeMM,
+        width_mm: SizeMM,
+        height_mm: SizeMM,
+        text: str,
+        align: Align = "center",
+        valign: VerticalAlign = "bottom",
+        bold: bool = False,
+        color: RGBColor | None = None,
+    ) -> None:
         if color or bold:
             self.save_state()
 
@@ -664,14 +774,16 @@ class Document:
         if color or bold:
             self.restore_state()
 
-    def render_rect(self,
-                    left_mm,
-                    top_mm,
-                    width_mm,
-                    height_mm,
-                    line_width=None,
-                    line_color=None,
-                    fill_color=None):
+    def render_rect(
+        self,
+        left_mm: SizeMM,
+        top_mm: SizeMM,
+        width_mm: SizeMM,
+        height_mm: SizeMM,
+        line_width: SizeInternal | None = None,
+        line_color: RGBColor | None = None,
+        fill_color: RGBColor | None = None,
+    ) -> None:
         self.save_state()
 
         # Default to unfilled rect with fine black outline
@@ -688,23 +800,27 @@ class Document:
         if fill_color:
             self.set_fill_color(fill_color)
 
-        self._canvas.rect(left_mm * mm,
-                          top_mm * mm,
-                          width_mm * mm,
-                          height_mm * mm,
-                          fill=fill_color and 1 or 0,
-                          stroke=(line_color or line_width) and 1 or 0)
+        self._canvas.rect(
+            left_mm * mm,
+            top_mm * mm,
+            width_mm * mm,
+            height_mm * mm,
+            fill=fill_color and 1 or 0,
+            stroke=(line_color or line_width) and 1 or 0,
+        )
 
         self.restore_state()
 
-    def render_line(self,
-                    left1_mm,
-                    top1_mm,
-                    left2_mm,
-                    top2_mm,
-                    width=0.05,
-                    color=black,
-                    dashes=None):
+    def render_line(
+        self,
+        left1_mm: SizeMM,
+        top1_mm: SizeMM,
+        left2_mm: SizeMM,
+        top2_mm: SizeMM,
+        width: SizeInternal = 0.05,
+        color: RGBColor = black,
+        dashes: Sequence[SizeMM] | None = None,
+    ) -> None:
         self.save_state()
         self.set_line_width(width)
         self.set_line_color(color)
@@ -714,19 +830,19 @@ class Document:
         self.restore_state()
 
     # Access to paths
-    def begin_path(self):
+    def begin_path(self) -> None:
         self._path = self._canvas.beginPath()
 
-    def move_to(self, left, top):
+    def move_to(self, left: SizeMM, top: SizeMM) -> None:
         self._path.moveTo(left * mm, top * mm)
 
-    def line_to(self, left, top):
+    def line_to(self, left: SizeMM, top: SizeMM) -> None:
         self._path.lineTo(left * mm, top * mm)
 
-    def close_path(self):
+    def close_path(self) -> None:
         self._path.close()
 
-    def fill_path(self, color, gradient=None):
+    def fill_path(self, color: RGBColor, gradient=None) -> None:  # type: ignore[no-untyped-def]
         self.save_state()
 
         # The gradient is dramatically increasing the size of the PDFs. For example a PDF with
@@ -734,32 +850,32 @@ class Document:
         # It may look better, but that's not worth it.
         #
         # Older versions of reportlab do not support gradients
-        #try:
+        # try:
         #    self._canvas.linearGradient
-        #except:
+        # except:
         #    gradient = None
 
-        #if gradient:
+        # if gradient:
         #    grad_left, grad_top, grad_width, grad_height, color_range, switch_points = gradient
         #    self._canvas.saveState()
         #    self._canvas.clipPath(self._path, stroke=0)
         #    self._canvas.linearGradient(grad_left * mm, grad_top * mm, grad_width * mm, grad_height * mm,
         #                                color_range, switch_points, extend=False)
         #    self._canvas.restoreState()
-        #else:
+        # else:
         self.set_fill_color(color)
         self._canvas.drawPath(self._path, stroke=0, fill=1)
 
         self.restore_state()
 
-    def stroke_path(self, color=black, width=0.05):
+    def stroke_path(self, color: RGBColor = black, width: SizeMM = 0.05) -> None:
         self.save_state()
         self.set_line_color(color)
         self.set_line_width(width * mm)
         self._canvas.drawPath(self._path, stroke=1, fill=0)
         self.restore_state()
 
-    def add_clip_rect(self, left, top, width, height):
+    def add_clip_rect(self, left: SizeMM, top: SizeMM, width: SizeMM, height: SizeMM) -> None:
         clip_path = self._canvas.beginPath()
         clip_path.moveTo(left * mm, top * mm)
         clip_path.lineTo(left * mm + width * mm, top * mm)
@@ -772,18 +888,21 @@ class Document:
     # Internal functions
 
     # Compute the absolute distance between two lines
-    def lineskip(self):
-        return self._gfx_state["line_height"] * self._gfx_state[
-            "font_zoom_factor"] * self._gfx_state["font_size"]
+    def lineskip(self) -> SizeInternal:
+        return (
+            self._gfx_state["line_height"]
+            * self._gfx_state["font_zoom_factor"]
+            * self._gfx_state["font_size"]
+        )
 
     # Estimate the height of a one-line text
-    def font_height_ex(self):
-        return self._canvas.stringWidth('M') * 1
+    def font_height_ex(self) -> float:
+        return self._canvas.stringWidth("M") * 1
 
-    def font_height(self):
+    def font_height(self) -> SizeMM:
         return self.font_height_ex() / mm  # fixed: true-division
 
-    def advance(self, l):
+    def advance(self, l: SizeInternal) -> None:
         if self._linepos - l < self._bottom:
             self.do_pagebreak()
             self._linepos = max(self._bottom, self._linepos - l)
@@ -791,29 +910,36 @@ class Document:
             self._linepos -= l
 
     # Current vertical position of cursor
-    def line_pos(self):
+    def line_pos(self) -> SizeMM:
         return self._linepos / mm  # fixed: true-division
 
-    def left(self):
+    def left(self) -> SizeMM:
         return self._left / mm  # fixed: true-division
 
-    def right(self):
+    def right(self) -> SizeMM:
         return self._right / mm  # fixed: true-division
 
-    def width(self):
+    def width(self) -> SizeMM:
         return self.right() - self.left()
 
     # Insert a vertical margin of m. If this leads to a page
     # break then do *not* insert that margin at the top of the new
     # page. Also do not insert that margin if we are already at the
     # top of the page. But: you can force the margin
-    def margin(self, m, force=False):
+    def margin(self, m: SizeInternal, force: bool = False) -> None:
         if self._linepos != self._top or force:
             self._linepos -= m
             if self._linepos < self._bottom:
                 self.do_pagebreak()
 
-    def rect(self, x, y, width, height, color):
+    def rect(
+        self,
+        x: SizeInternal,
+        y: SizeInternal,
+        width: SizeInternal,
+        height: SizeInternal,
+        color: RGBColor,
+    ) -> None:
         self.save_state()
         self.set_fill_color(color)
         self._canvas.rect(x, y, width, height, fill=1, stroke=0)
@@ -821,12 +947,19 @@ class Document:
 
     # Get and compute image dimensions, convert from mm. If resolution
     # is set, then width and height are being ignored.
-    def get_image_dimensions(self, pil, width_mm, height_mm, resolution_dpi=None):
+    def get_image_dimensions(
+        self,
+        pil: Image,
+        width_mm: SizeMM | None,
+        height_mm: SizeMM | None,
+        resolution: SizeDPI | None = None,
+    ) -> tuple[SizeInternal, SizeInternal]:
         # Get bounding box of image in order to get aspect (width / height)
         bbox = pil.getbbox()
+        assert bbox is not None  # TODO: Why is this the case here?
         pix_width, pix_height = bbox[2], bbox[3]
-        if resolution_dpi is not None:
-            resolution_mm = resolution_dpi / 2.45
+        if resolution is not None:
+            resolution_mm = resolution / 2.45
             resolution_pt = resolution_mm / mm  # now we have pixels / pt # fixed: true-division
             width = pix_width / resolution_pt  # fixed: true-division
             height = pix_height / resolution_pt  # fixed: true-division
@@ -834,7 +967,7 @@ class Document:
             aspect = float(pix_width) / float(pix_height)
             # Both are unset, and no resolution: scale to inner width
             if width_mm is None and height_mm is None:
-                width = (self._right - self._left)
+                width = self._right - self._left
                 height = width / aspect  # fixed: true-division
             else:  # At least one known
                 if width_mm is not None:
@@ -848,24 +981,72 @@ class Document:
         return width, height
 
 
+class CellRenderer(Protocol):
+    supports_stepwise_rendering: bool
+
+    def render(
+        self,
+        pdfdoc: Document,
+        left: SizeMM,
+        top: SizeMM,
+        width: SizeMM,
+        height: SizeMM,
+        x_padding: SizeMM,
+        y_padding: SizeMM,
+        row_oddeven: OddEven | None,
+    ) -> None:
+        ...
+
+    def get_render_steps(
+        self, pdfdoc: Document, headers: Sequence[CellRenderer], y_padding: SizeMM
+    ) -> Sequence[CellRenderer]:
+        ...
+
+    def maximal_width(self, pdfdoc: Document) -> SizeMM:
+        ...
+
+    def minimal_width(self, pdfdoc: Document) -> SizeMM:
+        ...
+
+    def can_add_dynamic_width(self) -> bool:
+        ...
+
+    def set_width(self, pdfdoc: Document, width: SizeMM) -> None:
+        ...
+
+    def height(self, pdfdoc: Document) -> SizeMM:
+        ...
+
+
+@dataclass
+class ColStat:
+    row_count: int
+    total_width: SizeInternal
+    min_width: SizeInternal
+    max_width: SizeInternal
+    weight: SizeInternal
+    is_dynamic: bool
+
+
 class TableRenderer:
     """Intelligent table rendering with word wrapping and pagination"""
+
     def __init__(self, pdf: Document) -> None:
         super().__init__()
         self.pdf = pdf
 
-    def add_table(
+    def add_table(  # pylint: disable=too-many-branches
         self,
-        header_texts: Any,
-        raw_rows: Any,
-        font_size: RawTableRows,
-        show_headings: Any,
-        padding: Any,
-        spacing: Any,
-        hrules: Any,
-        vrules: Any,
-        rule_width: Any,
-        row_shading: Any,
+        header_texts: Sequence[str],
+        raw_rows: RawTableRows,
+        font_size: SizePT,
+        show_headings: bool,
+        padding: tuple[SizeMM, SizeMM],
+        spacing: tuple[SizeMM, SizeMM],
+        hrules: bool,
+        vrules: bool,
+        rule_width: SizeMM,
+        row_shading: RowShading,
         respect_narrow_columns: bool,
     ) -> None:
         self.pdf.save_state()
@@ -900,14 +1081,13 @@ class TableRenderer:
         # css and the thing, e.g.
         # ( "number", "0.75" ), or ("", ("icon", "/bar/foo.png") )
         # The headers come *without* the css field and are always texts.
-        headers: List[Union[TextCell, IconCell]] = [
-            TitleCell("heading", header_text)  #
-            for header_text in header_texts
+        headers: list[CellRenderer] = [
+            TitleCell(["heading"], header_text) for header_text in header_texts  #
         ]
 
-        rows: List[List[Union[TextCell, IconCell]]] = []
+        rows: list[list[CellRenderer]] = []
         for raw_row in raw_rows:
-            row: List[Union[TextCell, IconCell]] = []
+            row: list[CellRenderer] = []
             rows.append(row)
             for css, entry in raw_row:
                 if isinstance(entry, tuple):
@@ -916,8 +1096,8 @@ class TableRenderer:
                     elif entry[0] == "object":
                         row.append(entry[1])
                     else:
-                        raise Exception("Invalid table entry %r in add_table()" % entry)
-                elif css == "leftheading":
+                        raise Exception(f"Invalid table entry {entry!r} in add_table()")
+                elif css == ["leftheading"]:
                     row.append(TitleCell(css, entry))
                 else:
                     row.append(TextCell(css, entry))
@@ -926,18 +1106,19 @@ class TableRenderer:
         # absolute minimum width (e.g. the width of the longest word) and
         # a maximum width (e.g. the length of the unwrapped text). All dimensions
         # are in internal units (not mm).
-        # TODO: Abusing a heterogeneous list as a product type is horrible!
-        stats = [[0, 0.0, 0.0, 0.0, None, True] for _c in range(num_cols)]
+        stats = [
+            ColStat(
+                row_count=0,
+                total_width=0.0,
+                min_width=0.0,
+                max_width=0.0,
+                weight=0.0,
+                is_dynamic=True,
+            )
+            for _c in range(num_cols)
+        ]
 
-        # Ease the typing pain a tiny bit... :-P
-        def _get_number(s, idx):
-            c = s[idx]
-            if c is None:
-                raise ValueError("something went wrong in add_table...")
-            return c
-
-        hurz: List[List[Union[TextCell, IconCell]]] = [headers] if headers else []
-        for row in hurz + rows:
+        for row in ([headers] if headers else []) + rows:
             for col, render_object in enumerate(row):
                 max_width = render_object.maximal_width(self.pdf) * mm
                 min_width = render_object.minimal_width(self.pdf) * mm
@@ -949,21 +1130,22 @@ class TableRenderer:
 
                 # TODO: indexes 0 (row count), 1 (total width)
                 #       -> drop them?
-                stats[col][0] = _get_number(stats[col], 0) + 1
-                stats[col][1] = _get_number(stats[col], 1) + max_width
-                stats[col][2] = max(min_width, stats[col][2])
-                stats[col][3] = max(max_width, stats[col][3])
+                stats[col].row_count += 1
+                stats[col].total_width += max_width
+                stats[col].min_width = max(min_width, stats[col].min_width)
+                stats[col].max_width = max(max_width, stats[col].max_width)
 
                 if not is_dynamic:
-                    stats[col][5] = False
+                    stats[col].is_dynamic = False
 
         # Compute required total width
-        sum_min = sum([s[2] for s in stats])
+        sum_min = sum(s.min_width for s in stats)
 
         # Now compute the available width, i.e. take the usable page width
         # and substract spacing and padding.
-        available_width = self.pdf._inner_width - (
-            (num_cols - 1) * x_spacing) - (num_cols * 2 * x_padding)
+        available_width = (
+            self.pdf._inner_width - ((num_cols - 1) * x_spacing) - (num_cols * 2 * x_padding)
+        )
 
         # If there is space enough for not breaking single words, then
         # we begin with giving each column the width of their maximal
@@ -974,124 +1156,132 @@ class TableRenderer:
 
         if sum_min <= available_width:
             remaining = available_width - sum_min
-            sum_weight = 0
+            sum_weight = 0.0
             for s in stats:
-                _row_count, _total_width, min_width, max_width, _weight, is_dynamic = s
-                if is_dynamic:
-                    weight = max_width - min_width + 1 * mm  # add 1mm in order to avoid zero weights
-                    s[4] = weight
+                if s.is_dynamic:
+                    # add 1mm in order to avoid zero weights
+                    weight = s.max_width - s.min_width + 1 * mm
+                    s.weight = weight
                     sum_weight += weight
                 else:
-                    s[4] = 0
+                    s.weight = 0.0
 
             column_widths = []
-            for _row_count, _total_width, min_width, max_width, weight, is_dynamic in stats:
+            for s in stats:
                 if sum_weight > 0:
-                    width = min_width + (weight / sum_weight * remaining)  # fixed: true-division
+                    width = s.min_width + (
+                        s.weight / sum_weight * remaining
+                    )  # fixed: true-division
                 else:
-                    width = min_width
+                    width = s.min_width
                 column_widths.append(width)
 
         # Not enough space for even printing the table without breaking
         # words in half. Divide space according to sum_max.
         else:
-            sum_weight = 0
+            sum_weight = 0.0
             for s in stats:
-                if s[0]:
-                    weight = _get_number(s, 1) / _get_number(s, 0)  # fixed: true-division
+                if s.row_count:
+                    weight = s.total_width / s.row_count  # fixed: true-division
                 else:
-                    weight = 0
+                    weight = 0.0
                 sum_weight += weight
-                s[4] = weight
+                s.weight = weight
 
             column_widths = []
             for s in stats:
-                width = available_width * s[4] / sum_weight  # fixed: true-division
+                width = available_width * s.weight / sum_weight  # fixed: true-division
                 column_widths.append(width)
 
-        row_oddeven = "even"
+        row_oddeven: OddEven = "even"
         for row_index, row in enumerate(rows):
             row_oddeven = "odd" if row_oddeven == "even" else "even"
 
-            if self._paint_graph_row(row,
-                                     column_widths,
-                                     y_padding,
-                                     x_padding,
-                                     y_spacing,
-                                     x_spacing,
-                                     headers,
-                                     hrules,
-                                     vrules,
-                                     rule_width,
-                                     row_shading,
-                                     paint_header=row_index == 0,
-                                     row_oddeven=row_oddeven):
+            if self._paint_stepwise(
+                row,
+                column_widths,
+                y_padding,
+                x_padding,
+                y_spacing,
+                x_spacing,
+                headers,
+                hrules,
+                vrules,
+                rule_width,
+                row_shading,
+                paint_header=row_index == 0,
+                row_oddeven=row_oddeven,
+            ):
                 continue
 
-            self._paint_row(row,
-                            column_widths,
-                            y_padding,
-                            x_padding,
-                            y_spacing,
-                            x_spacing,
-                            headers,
-                            hrules,
-                            vrules,
-                            rule_width,
-                            row_shading,
-                            paint_header=row_index == 0,
-                            is_header=False,
-                            row_oddeven=row_oddeven)
+            self._paint_row(
+                row,
+                column_widths,
+                y_padding,
+                x_padding,
+                y_spacing,
+                x_spacing,
+                headers,
+                hrules,
+                vrules,
+                rule_width,
+                row_shading,
+                paint_header=row_index == 0,
+                is_header=False,
+                row_oddeven=row_oddeven,
+            )
 
         self.pdf.restore_state()
 
     def _paint_headers(
         self,
-        headers,
-        column_widths,
-        y_padding,
-        x_padding,
-        y_spacing,
-        x_spacing,
-        hrules,
-        vrules,
-        rule_width,
-        row_shading,
-    ):
+        headers: Sequence[CellRenderer],
+        column_widths: Sequence[SizeMM],
+        y_padding: SizeMM,
+        x_padding: SizeMM,
+        y_spacing: SizeMM,
+        x_spacing: SizeMM,
+        hrules: bool,
+        vrules: bool,
+        rule_width: SizeMM,
+        row_shading: RowShading,
+    ) -> None:
         self._paint_hrule(hrules, rule_width)
         if headers:
-            self._paint_row(headers,
-                            column_widths,
-                            y_padding,
-                            x_padding,
-                            y_spacing,
-                            x_spacing,
-                            headers,
-                            hrules,
-                            vrules,
-                            rule_width,
-                            row_shading,
-                            paint_header=False,
-                            is_header=True,
-                            row_oddeven="heading")
+            self._paint_row(
+                headers,
+                column_widths,
+                y_padding,
+                x_padding,
+                y_spacing,
+                x_spacing,
+                headers,
+                hrules,
+                vrules,
+                rule_width,
+                row_shading,
+                paint_header=False,
+                is_header=True,
+                row_oddeven="heading",
+            )
 
     def _paint_row(
         self,
-        row,
-        column_widths,
-        y_padding,
-        x_padding,
-        y_spacing,
-        x_spacing,
-        headers,
-        hrules,
-        vrules,
-        rule_width,
-        row_shading,
+        row: Sequence[CellRenderer],
+        column_widths: Sequence[SizeMM],
+        y_padding: SizeMM,
+        x_padding: SizeMM,
+        y_spacing: SizeMM,
+        x_spacing: SizeMM,
+        headers: Sequence[CellRenderer],
+        hrules: bool,
+        vrules: bool,
+        rule_width: SizeMM,
+        row_shading: RowShading,
         paint_header: bool,
         is_header: bool,
-        row_oddeven: str,
-    ):
+        row_oddeven: OddEven,
+    ) -> None:
         # Give each cell information about its final width so it can reorganize internally.
         # This is used for text cells that do the wrapping.
         for column_width, render_object in zip(column_widths, row):
@@ -1100,14 +1290,15 @@ class TableRenderer:
         # Now - after the text-wrapping - we know the maximum height of all cells
         # a in row and can decide whether it fits on the current page.
         if row:
-            row_height = max([render_object.height(self.pdf) * mm for render_object in row])
+            row_height = max(render_object.height(self.pdf) * mm for render_object in row)
         else:
             row_height = self.pdf.lineskip()
 
         needed_vspace = row_height + 2 * y_padding + y_spacing
 
-        if (not self.pdf.fits_on_remaining_page(needed_vspace / mm) and
-                self.pdf.fits_on_empty_page(needed_vspace / mm)):
+        if not self.pdf.fits_on_remaining_page(needed_vspace / mm) and self.pdf.fits_on_empty_page(
+            needed_vspace / mm
+        ):
             self.pdf.do_pagebreak()
             paint_header = True
 
@@ -1133,7 +1324,8 @@ class TableRenderer:
                 self.pdf._linepos / mm - h,  # fixed: true-divisioin
                 self.pdf._inner_width / mm,  # fixed: true-division
                 h,
-                fill_color=row_shading[row_oddeven])
+                fill_color=row_shading[row_oddeven],
+            )
 
         # Finally paint
         left = self.pdf._left
@@ -1147,7 +1339,8 @@ class TableRenderer:
                 (row_height + 2 * y_padding) / mm,
                 x_padding / mm,  # fixed: true-division
                 y_padding / mm,  # fixed: true-division
-                row_oddeven if row_shading["enabled"] else None)
+                row_oddeven if row_shading["enabled"] else None,
+            )
 
             self.pdf._linepos = old_linepos
 
@@ -1158,32 +1351,40 @@ class TableRenderer:
         self._paint_hrule(hrules, rule_width)
         self.pdf.advance(y_spacing / 2.0)
 
-    def _paint_hrule(self, hrules, rule_width):
+    def _paint_hrule(self, hrules: bool, rule_width: SizeInternal) -> None:
         if hrules:
             self.pdf.add_hrule(width=rule_width / mm, margin=0)  # fixed: true-division
 
-    def _paint_vrule(self, rule_width, y_padding, row_height, vrules, left):
+    def _paint_vrule(
+        self,
+        rule_width: SizeInternal,
+        y_padding: SizeInternal,
+        row_height: SizeInternal,
+        vrules: bool,
+        left: SizeInternal,
+    ) -> None:
         if vrules:
             self.pdf._canvas.setLineWidth(rule_width)
             self.pdf._canvas.setStrokeColorRGB(*black)
-            self.pdf._canvas.line(left, self.pdf._linepos, left,
-                                  self.pdf._linepos - row_height - 2 * y_padding)
+            self.pdf._canvas.line(
+                left, self.pdf._linepos, left, self.pdf._linepos - row_height - 2 * y_padding
+            )
 
-    def _paint_graph_row(
+    def _paint_stepwise(
         self,
-        row,
-        column_widths,
-        y_padding,
-        x_padding,
-        y_spacing,
-        x_spacing,
-        headers,
-        hrules,
-        vrules,
-        rule_width,
-        row_shading,
+        row: Sequence[CellRenderer],
+        column_widths: Sequence[SizeMM],
+        y_padding: SizeMM,
+        x_padding: SizeMM,
+        y_spacing: SizeMM,
+        x_spacing: SizeMM,
+        headers: Sequence[CellRenderer],
+        hrules: bool,
+        vrules: bool,
+        rule_width: SizeMM,
+        row_shading: RowShading,
         paint_header: bool,
-        row_oddeven: str,
+        row_oddeven: OddEven,
     ) -> bool:
         """Paint special form of graph rows
 
@@ -1196,73 +1397,75 @@ class TableRenderer:
         solution we should drop the approach of trying to build our own table rendering solution and
         find something more battle tested.
         """
-        if cmk_version.is_raw_edition():
-            return False
-
-        # This import hack is needed because this module is part of the raw edition while
-        # the PainterPrinterTimeGraph class is not (also we don't have a base class
-        # available in CRE to use instead).
-        from cmk.gui.cee.plugins.reporting.pnp_graphs import PainterPrinterTimeGraph  # pylint: disable=no-name-in-module
-
-        is_single_dataset = (len(row) == 2 and isinstance(row[0], TitleCell) and
-                             isinstance(row[1], PainterPrinterTimeGraph))
-        is_single_column = (len(row) == 1 and isinstance(row[0], PainterPrinterTimeGraph))
+        is_single_dataset = (
+            len(row) == 2 and isinstance(row[0], TitleCell) and row[1].supports_stepwise_rendering
+        )
+        is_single_column = len(row) == 1 and row[0].supports_stepwise_rendering
 
         if not is_single_dataset and not is_single_column:
             return False
 
-        graph_column = row[-1]
-        assert isinstance(graph_column, PainterPrinterTimeGraph)
-
-        if self.pdf.fits_on_remaining_page(graph_column.height(self) * mm):
+        column = row[-1]
+        if self.pdf.fits_on_remaining_page(column.height(self.pdf) * mm):
             return False
 
-        if self.pdf.fits_on_empty_page(graph_column.height(self) * mm):
+        if self.pdf.fits_on_empty_page(column.height(self.pdf) * mm):
             return False
 
-        for index, step in enumerate(graph_column.get_render_steps(self.pdf, headers, y_padding)):
+        for index, step in enumerate(column.get_render_steps(self.pdf, headers, y_padding)):
             if is_single_dataset:
-                step_row = [row[0] if index == 0 else TitleCell("lefheading", ""), step]
+                step_row = [row[0] if index == 0 else TitleCell(["leftheading"], ""), step]
             else:
                 step_row = [step]
 
-            self._paint_row(step_row,
-                            column_widths,
-                            y_padding,
-                            x_padding,
-                            y_spacing,
-                            x_spacing,
-                            headers,
-                            hrules,
-                            vrules,
-                            rule_width,
-                            row_shading,
-                            paint_header=paint_header and index == 0,
-                            is_header=False,
-                            row_oddeven=row_oddeven)
+            self._paint_row(
+                step_row,
+                column_widths,
+                y_padding,
+                x_padding,
+                y_spacing,
+                x_spacing,
+                headers,
+                hrules,
+                vrules,
+                rule_width,
+                row_shading,
+                paint_header=paint_header and index == 0,
+                is_header=False,
+                row_oddeven=row_oddeven,
+            )
         return True
 
 
 # Note: all dimensions this objects handles with are in mm! This is due
 # to the fact that this API is also available externally
-class TextCell:
-    def __init__(self, csses, text):
+class TextCell(CellRenderer):
+    def __init__(self, csses: Sequence[str], text: str) -> None:
+        self.supports_stepwise_rendering = False
         self._text = text
         self._bold = False
         self._color = black
         self._bg_color = white
-        self._alignment = "left"
+        self._alignment: Align = "left"
 
-        if csses is None:
-            csses = ""
+        state_in_css: bool = any(
+            css.startswith("hstate")
+            or css.startswith("state")
+            or css.startswith("svcstate")
+            or css.startswith("if_state")
+            for css in csses
+        )
 
         # TODO: Sollte das nicht lieber raus aus dem allgemeinen pdf.py? Ist eigentlich
         # Spezifisch für Views, etc.
-        if "heading" in csses or "state" in csses:
+        if "heading" in csses or state_in_css:
             self._bold = True
 
         if "number" in csses:
             self._alignment = "right"
+
+        if "count" in csses:
+            self._alignment = "center"
 
         if "unused" in csses:
             self._color = (0.6, 0.6, 0.6)
@@ -1275,32 +1478,47 @@ class TextCell:
                 self._bg_color = color
                 self._alignment = "center"
 
-        self._narrow = "narrow" in csses or "state" in csses
+        self._narrow = "narrow" in csses or state_in_css
 
-    def minimal_width(self, pdfdoc):  # without padding
+    def get_render_steps(
+        self, pdfdoc: Document, headers: Sequence[CellRenderer], y_padding: SizeMM
+    ) -> Sequence[TextCell]:
+        return []
+
+    def minimal_width(self, pdfdoc: Document) -> SizeMM:  # without padding
         # TODO: consider bold here!
         return max([pdfdoc.text_width(word) for word in self._text.split()] + [0])
 
-    def maximal_width(self, pdfdoc):  # without padding
+    def maximal_width(self, pdfdoc: Document) -> SizeMM:  # without padding
         return pdfdoc.text_width(self._text)
 
-    def can_add_dynamic_width(self):
+    def can_add_dynamic_width(self) -> bool:
         return not self._narrow
 
-    def width(self, pdfdoc):
+    def width(self, pdfdoc: Document) -> SizeMM:
         return self._width
 
     # Do wrapping of text to actual width. width() and height()
     # can be called only after this has run.
-    def set_width(self, pdfdoc, width):
+    def set_width(self, pdfdoc: Document, width: SizeMM) -> None:
         self._width = width
         self._lines = pdfdoc.wrap_text(self._text, width, wrap_long_words=not self._narrow)
 
-    def height(self, pdfdoc):
+    def height(self, pdfdoc: Document) -> SizeMM:
         return max(1, len(self._lines)) * pdfdoc.get_line_skip()
 
     # Render itself at left/top into direction right/down by width/height
-    def render(self, pdfdoc, left, top, width, height, x_padding, y_padding, row_oddeven):
+    def render(
+        self,
+        pdfdoc: Document,
+        left: SizeMM,
+        top: SizeMM,
+        width: SizeMM,
+        height: SizeMM,
+        x_padding: SizeMM,
+        y_padding: SizeMM,
+        row_oddeven: OddEven | None,
+    ) -> None:
         if self._bg_color != white:
             color = self._bg_color
             if row_oddeven == "odd":
@@ -1309,55 +1527,70 @@ class TextCell:
 
         for line in self._lines:
             top -= pdfdoc.get_line_skip()
-            y = top - y_padding + (
-                (pdfdoc.get_line_skip() - pdfdoc.font_height()) / 2.0)  # fixed: true-division
+            y = (
+                top - y_padding + ((pdfdoc.get_line_skip() - pdfdoc.font_height()) / 2.0)
+            )  # fixed: true-division
             if self._alignment == "right":
                 x = left + width - x_padding
             elif self._alignment == "left":
                 x = left + x_padding
             else:
                 x = left + (width / 2.0)
-            pdfdoc.render_text(x,
-                               y,
-                               line,
-                               align=self._alignment,
-                               bold=self._bold,
-                               color=self._color)
+            pdfdoc.render_text(
+                x, y, line, align=self._alignment, bold=self._bold, color=self._color
+            )
 
 
 class TitleCell(TextCell):
     pass
 
 
-# Rendering *one* Multisite-Icon
-class IconCell:
-    def __init__(self, path):
+class IconCell(CellRenderer):
+    """Rendering *one* UI icon"""
+
+    def __init__(self, path: str) -> None:
+        self.supports_stepwise_rendering = False
         self._image_path = path
 
-    def minimal_width(self, pdfdoc):
+    def get_render_steps(
+        self, pdfdoc: Document, headers: Sequence[CellRenderer], y_padding: SizeMM
+    ) -> Sequence[TextCell]:
+        return []
+
+    def minimal_width(self, pdfdoc: Document) -> SizeMM:
         return self.height(pdfdoc)
 
-    def maximal_width(self, pdfdoc):
+    def maximal_width(self, pdfdoc: Document) -> SizeMM:
         return self.height(pdfdoc)
 
-    def can_add_dynamic_width(self):
+    def can_add_dynamic_width(self) -> bool:
         return False
 
-    def set_width(self, pdfdoc, width):
+    def set_width(self, pdfdoc: Document, width: SizeMM) -> None:
         pass
 
-    def width(self, pdfdoc):
+    def width(self, pdfdoc: Document) -> SizeMM:
         return self.height(pdfdoc)
 
-    def height(self, pdfdoc):
+    def height(self, pdfdoc: Document) -> SizeMM:
         return pdfdoc.get_line_skip()
 
-    def render(self, pdfdoc, left, top, width, height, x_padding, y_padding, row_oddeven):
+    def render(
+        self,
+        pdfdoc: Document,
+        left: SizeMM,
+        top: SizeMM,
+        width: SizeMM,
+        height: SizeMM,
+        x_padding: SizeMM,
+        y_padding: SizeMM,
+        row_oddeven: OddEven | None,
+    ) -> None:
         w = self.width(pdfdoc)
         pdfdoc.render_image(left + x_padding, top - w - y_padding, w, w, self._image_path)
 
 
-#.
+# .
 #   .--PDF2PNG-------------------------------------------------------------.
 #   |              ____  ____  _____ ____  ____  _   _  ____               |
 #   |             |  _ \|  _ \|  ___|___ \|  _ \| \ | |/ ___|              |
@@ -1373,30 +1606,40 @@ class IconCell:
 
 # On RedHat 5 the tool that we need is not available.
 # Better check this and do not break the layout
-def is_pdf2png_possible():
+def is_pdf2png_possible() -> bool:
     return os.path.exists("/usr/bin/pdftoppm")
 
 
-def pdf2png(pdf_source):
+def pdf2png(pdf_source: bytes) -> bytes:
     # Older version of pdftoppm cannot read pipes. The need to seek around
     # in the file. Therefore we need to save the PDF source into a temporary file.
-    temp_file = tempfile.NamedTemporaryFile(dir=cmk.utils.paths.tmp_dir)
-    temp_file.write(pdf_source)
-    temp_file.flush()
+    pdf_tmp_dir = cmk.utils.paths.tmp_dir / "pdf"
+    pdf_tmp_dir.mkdir(exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        dir=str(pdf_tmp_dir),
+        delete=False,
+    ) as temp_file:
+        temp_file.write(pdf_source)
 
-    command = ["pdftoppm", "-png", "-f", "1", "-l", "1", "-scale-to", "1000", temp_file.name]
-    p = subprocess.Popen(
-        command,
+    completed_process = subprocess.run(
+        ["pdftoppm", "-png", "-f", "1", "-l", "1", "-scale-to", "1000", temp_file.name],
         close_fds=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
+        check=False,
     )
-    stdout, stderr = p.communicate()
-    exitcode = p.returncode
-    if exitcode != 0:
-        raise MKInternalError(
-            _('Cannot create PNG from PDF: %s, Exit code is %d, '
-              'command was "%s", PDF source code was "%s..."') %
-            (stderr, exitcode, " ".join(command), pdf_source[:500]))
 
-    return stdout
+    if completed_process.returncode:
+        raise MKInternalError(
+            _(
+                "Cannot create PNG from PDF: %s, Exit code is %d, "
+                'command was "%s", PDF source code was "%s..."'
+            )
+            % (
+                completed_process.stderr,
+                completed_process.returncode,
+                " ".join(completed_process.args),
+                pdf_source[:500],
+            )
+        )
+
+    return completed_process.stdout

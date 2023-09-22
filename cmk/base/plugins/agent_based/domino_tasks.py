@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+import time
+from collections.abc import Mapping, Sequence
+from typing import Any
 
-from .agent_based_api.v1.type_defs import (
-    CheckResult,
-    DiscoveryResult,
-    StringTable,
-)
-
+from .agent_based_api.v1 import IgnoreResultsError, register, SNMPTree
+from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult, StringTable
 from .utils import domino, memory, ps
-from .agent_based_api.v1 import register, SNMPTree
 
 # Example SNMP walk:
 #
@@ -27,20 +23,19 @@ from .agent_based_api.v1 import register, SNMPTree
 # .1.3.6.1.4.1.334.72.1.1.6.1.2.1.4.7 tm_grab
 # .1.3.6.1.4.1.334.72.1.1.6.1.2.1.4.8 Router
 
-ProcessLines = List[Tuple[Optional[str], ps.PsInfo, List[str]]]
-
 
 # Bring the SNMP data in the format expected by the common ps functions.
 # e.g.:
 # [PsInfo(), u'/sbin/init', u'splash']
-def parse_domino_tasks(string_table: List[StringTable]) -> ps.Section:
+def parse_domino_tasks(string_table: list[StringTable]) -> ps.Section:
+    now = int(time.time())
     process_lines = [(ps.PsInfo(), line) for line in string_table[0]]
     # add cpu_cores count to be compatible with ps section
-    return 1, process_lines
+    return 1, process_lines, now
 
 
 register.snmp_section(
-    name='domino_tasks',
+    name="domino_tasks",
     parse_function=parse_domino_tasks,
     fetch=[
         SNMPTree(
@@ -54,8 +49,8 @@ register.snmp_section(
 
 def discover_domino_tasks(
     params: Sequence[Mapping[str, Any]],
-    section_domino_tasks: Optional[ps.Section],
-    section_mem: Optional[memory.SectionMem],
+    section_domino_tasks: ps.Section | None,
+    section_mem: memory.SectionMem | None,
 ) -> DiscoveryResult:
     yield from ps.discover_ps(params, section_domino_tasks, section_mem, None, None)
 
@@ -63,13 +58,16 @@ def discover_domino_tasks(
 def check_domino_tasks(
     item: str,
     params: Mapping[str, Any],
-    section_domino_tasks: Optional[ps.Section],
-    section_mem: Optional[Dict[str, float]],
+    section_domino_tasks: ps.Section | None,
+    section_mem: dict[str, float] | None,
 ) -> CheckResult:
     if section_domino_tasks is None:
-        return
-    cpu_cores, lines = section_domino_tasks
-    process_lines: ProcessLines = [(None, psi, cmd_line) for (psi, cmd_line) in lines]
+        # The driving force of this check is the section 'domino_tasks'. If
+        # this data is not available, the check should go stale.
+        raise IgnoreResultsError
+
+    cpu_cores, lines, ps_time = section_domino_tasks
+    process_lines = [(None, psi, cmd_line, ps_time) for (psi, cmd_line) in lines]
 
     total_ram = section_mem.get("MemTotal") if section_mem else None
 
@@ -86,16 +84,19 @@ def check_domino_tasks(
 def cluster_check_domino_tasks(
     item: str,
     params: Mapping[str, Any],
-    section_domino_tasks: Dict[str, Optional[ps.Section]],
-    section_mem: Dict[str, Optional[memory.SectionMem]],
+    section_domino_tasks: Mapping[str, ps.Section | None],
+    section_mem: Mapping[str, memory.SectionMem | None],
 ) -> CheckResult:
-
-    iter_non_trivial_sections = ((node_name, node_section)
-                                 for node_name, node_section in section_domino_tasks.items()
-                                 if node_section is not None)
-    process_lines: ProcessLines = [(node_name, psi, cmd_line)
-                                   for node_name, node_section in iter_non_trivial_sections
-                                   for (psi, cmd_line) in node_section[1]]
+    iter_non_trivial_sections = (
+        (node_name, node_section)
+        for node_name, node_section in section_domino_tasks.items()
+        if node_section is not None
+    )
+    process_lines = [
+        (node_name, psi, cmd_line, node_section[2])
+        for node_name, node_section in iter_non_trivial_sections
+        for (psi, cmd_line) in node_section[1]
+    ]
 
     yield from ps.check_ps_common(
         label="Tasks",
@@ -112,7 +113,7 @@ def cluster_check_domino_tasks(
 
 
 register.check_plugin(
-    name='domino_tasks',
+    name="domino_tasks",
     service_name="Domino Task %s",
     sections=["domino_tasks", "mem"],
     discovery_function=discover_domino_tasks,
@@ -120,12 +121,13 @@ register.check_plugin(
     discovery_ruleset_type=register.RuleSetType.ALL,
     discovery_default_parameters={},
     check_function=check_domino_tasks,
-    # Note: domino_tasks is a ManualCheckParameterRulespec. If the user specifies an already
-    # discovered item, the manual check will overrule the corresponding autocheck. As a result, for
-    # the user it looks as if the parameters specified in the manual check configuration were simply
-    # passed to the check plugin, without any sort of overruling. Also note that we cannot simply
-    # remove this line. If we did that, the checktype domino_tasks would not be available any more
-    # when configuring the manual check.
+    # Note: domino_tasks is a ManualCheckParameterRulespec.
+    # If the user specifies an already discovered item, the enforced service will shadow the
+    # corresponding autocheck. As a result, to the user it looks as if the parameters specified in
+    # the enforced service configuration were simply passed to the check plugin, without any sort of
+    # shadowing.
+    # Also note that we cannot simply remove this line. If we did that, the plugin domino_tasks
+    # would not be available any more when configuring enforced services.
     check_ruleset_name="domino_tasks",
     check_default_parameters={},
     cluster_check_function=cluster_check_domino_tasks,

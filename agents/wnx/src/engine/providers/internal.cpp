@@ -1,88 +1,94 @@
-
-// provides basic api to start and stop service
 #include "stdafx.h"
 
 #include "providers/internal.h"
 
 #include <chrono>
 #include <functional>
-#include <iostream>
+#include <mutex>
 #include <string>
 #include <tuple>
 
-#include "cfg.h"
 #include "common/mailslot_transport.h"
-#include "tools/_raii.h"
-#include "tools/_xlog.h"
+#include "wnx/cfg.h"
+
+using namespace std::chrono_literals;
 
 namespace cma::provider {
 
-// Confirmed values with AB from LA(3600s)
-std::unordered_map<std::string_view, std::chrono::seconds> g_delays_on_fail = {
-    {kDotNetClrMemory, cma::cfg::G_DefaultDelayOnFail},  //
-    {kWmiWebservices, cma::cfg::G_DefaultDelayOnFail},   //
-    {kWmiCpuLoad, cma::cfg::G_DefaultDelayOnFail},       //
-    {kMsExch, cma::cfg::G_DefaultDelayOnFail},           //
-    {kOhm, cma::cfg::G_DefaultDelayOnFail},
-
-    // end of the real sections
-    {kBadWmi, cma::cfg::G_DefaultDelayOnFail},  // used to testing
-};
-
 namespace {
+// Confirmed values with AB from LA(3600s)
+const std::unordered_map<std::string_view, std::chrono::seconds>
+    &GetDelaysOnFail() {
+    const static std::unordered_map<std::string_view, std::chrono::seconds>
+        delays_on_fail = {
+            {kDotNetClrMemory, cfg::G_DefaultDelayOnFail},  //
+            {kWmiWebservices, cfg::G_DefaultDelayOnFail},   //
+            {kWmiCpuLoad, cfg::G_DefaultDelayOnFail},       //
+            {kMsExch, cfg::G_DefaultDelayOnFail},           //
+            {kOhm, cfg::G_DefaultDelayOnFail},
+
+            // end of the real sections
+            {kBadWmi, cfg::G_DefaultDelayOnFail},  // used to testing
+            {"OhmBad", 1500s},                     // used to testing
+        };
+    return delays_on_fail;
+}
+
 /// Separates string by first space
-// "word left over" => ["word", "left over"]
+/// "word left over" => ["word", "left over"]
 std::pair<std::string, std::string> SplitStringBySpace(
-    const std::string& line) {
-    auto end = line.find_first_of(' ');
-    if (end == std::string::npos) {
-        return {line, {}};
+    const std::string &line) {
+    auto table = tools::SplitString(line, " ", 1);
+    switch (table.size()) {
+        case 0U:
+            // impossible
+            return {std::string{}, std::string{}};
+        case 2U:
+            // standard
+            return std::pair{table[0], table[1]};
+        default:
+            // last arg
+            return std::pair{table[0], std::string{}};
     }
-    // split
-    return {line.substr(0, end), line.substr(end + 1)};
 }
 }  // namespace
 
 /// returns tuple with parsed command line
-// {marker of Answer, First, Leftover}
+/// {marker of Answer, First, Leftover}
 std::tuple<uint64_t, std::string, std::string> ParseCommandLine(
-    const std::string& line) noexcept {
+    const std::string &line) noexcept {
     uint64_t marker = 0;
     try {
-        auto [marker_str, leftover] = SplitStringBySpace(line);
-        marker = std::stoull(marker_str, nullptr,
-                             10);  // may generate exception
+        const auto &[marker_str, leftover] = SplitStringBySpace(line);
+        marker = std::stoull(marker_str, nullptr, 10);  // exception!
 
-        // Second parameter is section name
+        // Next parameter is section name
         if (!leftover.empty()) {
-            // get second parameter
-            auto [section_name_str, leftover_last] =
+            const auto &[section_name_str, leftover_last] =
                 SplitStringBySpace(leftover);
 
-            // make valid return
             return {marker, section_name_str, leftover_last};
         }
-    } catch (const std::exception& e) {
-        XLOG::l("Command line '{}' is not valid, exception: '{}'", line,
-                e.what());
+    } catch (const std::exception &e) {
+        XLOG::l("Command line '{}' is not valid, exception: '{}'", line, e);
         marker = 0;
     }
 
     return {marker, std::string(section::kUseEmbeddedName), ""};
 }
 
-void Basic::registerOwner(cma::srv::ServiceProcessor* sp) { host_sp_ = sp; }
+void Basic::registerOwner(srv::ServiceProcessor *sp) noexcept { host_sp_ = sp; }
 
-std::string Basic::generateContent(const std::string_view& section_name,
+std::string Basic::generateContent(std::string_view section_name,
                                    bool force_generation) {
     auto real_name =
         section_name == section::kUseEmbeddedName ? uniq_name_ : section_name;
 
-    if (!force_generation && !cfg::groups::global.allowedSection(real_name)) {
+    if (!force_generation && !cfg::groups::g_global.allowedSection(real_name)) {
         XLOG::t("The section \"{}\" is disabled in config", real_name);
         return {};
     }
-    // print body
+
     try {
         auto section_body = makeBody();
         if (section_body.empty()) {
@@ -90,11 +96,9 @@ std::string Basic::generateContent(const std::string_view& section_name,
             return {};
         }
         // header-less mode is for the Plugins and Local
-
-        if (headerless_) return section_body;
-        // print header with default or commanded section name
-        return makeHeader(section_name) + section_body;
-    } catch (const std::exception& e) {
+        return headerless_ ? section_body
+                           : makeHeader(section_name) + section_body;
+    } catch (const std::exception &e) {
         XLOG::l.crit("Exception {} in {}", e.what(), uniq_name_);
     } catch (...) {
         XLOG::l.crit("Exception UNKNOWN in {}", uniq_name_);
@@ -103,31 +107,28 @@ std::string Basic::generateContent(const std::string_view& section_name,
 }
 
 bool Basic::isAllowedByCurrentConfig() const {
-    auto name = getUniqName();
-    bool allowed = cfg::groups::global.allowedSection(name);
-    return allowed;
+    return cfg::groups::g_global.allowedSection(getUniqName());
 }
 
-bool Basic::isAllowedByTime() const {
+bool Basic::isAllowedByTime() const noexcept {
     return std::chrono::steady_clock::now() > allowed_from_time_;
 }
 
-void Basic::loadStandardConfig() {
+void Basic::loadStandardConfig() noexcept {
     enabled_ = cfg::GetVal(uniq_name_, cfg::vars::kEnabled, true);
     timeout_ = cfg::GetVal(uniq_name_, cfg::vars::kTimeout, 0);
 }
 
-void Basic::registerCommandLine(const std::string& command_line) {
-    auto [ip, leftover] = SplitStringBySpace(command_line);
+void Basic::registerCommandLine(const std::string &command_line) {
+    const auto &[ip, _] = SplitStringBySpace(command_line);
     ip_ = ip;
 }
 
 void Basic::setupDelayOnFail() noexcept {
-    // setup delay on fail
     try {
-        const auto& delay_in_seconds = g_delays_on_fail[uniq_name_];
+        const auto &delay_in_seconds = GetDelaysOnFail().at(uniq_name_);
         delay_on_fail_ = delay_in_seconds;
-    } catch (const std::exception&) {
+    } catch (const std::out_of_range &) {
         // do nothing here
     }
 }
@@ -135,32 +136,30 @@ void Basic::setupDelayOnFail() noexcept {
 // if section fails then we may set time point in the future to avoid
 // calling section too soon
 void Basic::disableSectionTemporary() {
-    if (delay_on_fail_.count() == 0) return;
+    if (delay_on_fail_.count() == 0) {
+        return;
+    }
 
     allowed_from_time_ = std::chrono::steady_clock::now();
     allowed_from_time_ += delay_on_fail_;
 
-    {
-        // System clock is not Steady Clock
-        auto sys_clock = std::chrono::system_clock::now() + delay_on_fail_;
-        XLOG::l.w(
-            "Resetting time for earliest start of the section '{}' at '{}'",
-            getUniqName(), cma::tools::TimeToString(sys_clock));
-    }
+    // report using _system_ clock
+    const auto sys_clock = std::chrono::system_clock::now() + delay_on_fail_;
+    XLOG::d.w("Resetting time for earliest start of the section '{}' at '{}'",
+              getUniqName(), tools::TimeToString(sys_clock));
 }
 
-// returns true when data exist.
-bool Basic::sendGatheredData(const std::string& command_line) {
-    // command line parser
-    auto [marker, section_name, leftover] = ParseCommandLine(command_line);
+/// true when data exist.
+bool Basic::sendGatheredData(const std::string &command_line) {
+    const auto &[marker, section_name, leftover] =
+        ParseCommandLine(command_line);
 
     auto section = generateContent(section_name);
 
-    // send data
     if (!section.empty()) {
-        if (section.back() == '\0')
+        if (section.back() == '\0' || section.back() == '\n') {
             section.pop_back();  // some plugins may add zero. remove it
-        if (section.back() == '\n') section.pop_back();
+        }
         carrier_.sendData(uniq_name_, marker, section.c_str(), section.size());
         return true;
     }
@@ -170,38 +169,35 @@ bool Basic::sendGatheredData(const std::string& command_line) {
     return false;
 }
 
-bool Synchronous::startExecution(
-    const std::string& internal_port,  // format "type:value", where type:
-                                       // mail - for mail slot
-                                       // asio - for TCP
-                                       // grpc - for GRPC
-                                       // rest - for Rest
-    const std::string& command_line    // format "id name whatever"
-) {
+/// port format: "type:value", where type:
+/// mail - for mail slot
+/// asio - for TCP
+/// grpc - for GRPC
+/// rest - for Rest
+/// id format: any string
+bool Synchronous::startExecution(const std::string &internal_port,
+                                 const std::string &command_line) {
     try {
         carrier_.establishCommunication(internal_port);
         sendGatheredData(command_line);
 
-    } catch (const std::exception& e) {
+    } catch (const std::exception &e) {
         XLOG::l(XLOG_FUNC + " - unexpected exception {}", e.what());
     }
     carrier_.shutdownCommunication();
     return true;
 }
 
-bool Asynchronous::startExecution(const std::string& internal_port,
-                                  const std::string& command_line) {
-    using namespace std::chrono_literals;
+bool Asynchronous::startExecution(const std::string &internal_port,
+                                  const std::string &command_line) {
     if (thread_.joinable()) {
         XLOG::l.crit("Attempt to start service twice, no way!");
         return false;
     }
-
     threadProc(internal_port, command_line, 0ms);
     return true;
 }
 
-// #TODO gtest
 bool Asynchronous::stop(bool wait) {
     std::unique_lock lk(lock_stopper_);
     stop_requested_ = true;
@@ -215,33 +211,27 @@ bool Asynchronous::stop(bool wait) {
 }
 
 void Asynchronous::threadProc(
-    const std::string& internal_port,  // address to send data
-    const std::string& command_line,   // "Marker SectionName LeftOver"
+    const std::string &internal_port,  // address to send data
+    const std::string &command_line,   // "Marker SectionName LeftOver"
     std::chrono::milliseconds period)  // for infinite running(FUTURE!)
 {
-    using namespace std::chrono_literals;
-
     try {
         carrier_.establishCommunication(internal_port);
 
         while (true) {
-            auto tm = std::chrono::steady_clock::now();
-
+            const auto tm = std::chrono::steady_clock::now();
             sendGatheredData(command_line);
-
             if (period == 0ms) {
                 break;
             }
-
             std::unique_lock l(lock_stopper_);
-            auto stop = stop_thread_.wait_until(
-                l, tm + period, [this]() { return stop_requested_; });
-
+            const auto stop = stop_thread_.wait_until(
+                l, tm + period, [this] { return stop_requested_; });
             if (stop) {
                 break;
             }
         }
-    } catch (const std::exception& e) {
+    } catch (const std::exception &e) {
         XLOG::l(XLOG_FUNC + " - unexpected exception {}", e.what());
     }
     carrier_.shutdownCommunication();

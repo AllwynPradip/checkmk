@@ -1,100 +1,102 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """The bulk import for hosts can be used to import multiple new hosts into a
-single WATO folder. The hosts can either be provided by uploading a CSV file or
+single Setup folder. The hosts can either be provided by uploading a CSV file or
 by pasting the contents of a CSV file into a textbox."""
 
 import csv
 import time
-from typing import Dict, Type, List, Optional, Any
-from pathlib import Path
-
+import uuid
+from collections.abc import Collection
 from difflib import SequenceMatcher
+from pathlib import Path
+from typing import Any
 
 import cmk.utils.store as store
 
 import cmk.gui.pages
+import cmk.gui.watolib.bakery as bakery
 import cmk.gui.weblib as weblib
-import cmk.gui.config as config
-import cmk.gui.watolib as watolib
-
-from cmk.gui.table import table_element
-from cmk.gui.exceptions import MKUserError
-from cmk.gui.i18n import _
-from cmk.gui.globals import html, transactions, request
-from cmk.gui.type_defs import PermissionName
 from cmk.gui.breadcrumb import Breadcrumb
+from cmk.gui.config import active_config
+from cmk.gui.exceptions import MKUserError
+from cmk.gui.htmllib.html import html
+from cmk.gui.http import request
+from cmk.gui.i18n import _
+from cmk.gui.logged_in import user
 from cmk.gui.page_menu import (
+    make_form_submit_link,
+    make_simple_form_page_menu,
     PageMenu,
     PageMenuDropdown,
-    PageMenuTopic,
     PageMenuEntry,
-    make_simple_form_page_menu,
-    make_form_submit_link,
+    PageMenuTopic,
+)
+from cmk.gui.table import table_element
+from cmk.gui.type_defs import ActionResult, PermissionName
+from cmk.gui.utils.escaping import escape_to_html_permissive
+from cmk.gui.utils.flashed_messages import flash
+from cmk.gui.utils.transaction_manager import transactions
+from cmk.gui.valuespec import (
+    Checkbox,
+    Dictionary,
+    FixedValue,
+    Hostname,
+    TextInput,
+    UploadOrPasteTextFile,
 )
 from cmk.gui.wato.pages.custom_attributes import ModeCustomHostAttrs
 from cmk.gui.wato.pages.folders import ModeFolder
 from cmk.gui.watolib.host_attributes import host_attribute_registry
-from cmk.gui.utils.escaping import escape_html_permissive
-
-from cmk.gui.valuespec import (
-    Hostname,
-    Checkbox,
-    Dictionary,
-    FixedValue,
-    TextInput,
-    UploadOrPasteTextFile,
-)
-
-from cmk.gui.plugins.wato import (
-    WatoMode,
-    ActionResult,
-    mode_registry,
-    redirect,
-    mode_url,
-    flash,
-)
+from cmk.gui.watolib.hosts_and_folders import folder_from_request
+from cmk.gui.watolib.mode import mode_url, redirect, WatoMode
 
 # Was not able to get determine the type of csv._reader / _csv.reader
 CSVReader = Any
 
+from cmk.gui.watolib.mode import ModeRegistry
 
-@mode_registry.register
+
+def register(mode_registry: ModeRegistry) -> None:
+    mode_registry.register(ModeBulkImport)
+
+
 class ModeBulkImport(WatoMode):
     @classmethod
     def name(cls) -> str:
         return "bulk_import"
 
-    @classmethod
-    def permissions(cls) -> List[PermissionName]:
+    @staticmethod
+    def static_permissions() -> Collection[PermissionName]:
         return ["hosts", "manage_hosts"]
 
     @classmethod
-    def parent_mode(cls) -> Optional[Type[WatoMode]]:
+    def parent_mode(cls) -> type[WatoMode] | None:
         return ModeFolder
 
     def __init__(self) -> None:
-        super(ModeBulkImport, self).__init__()
-        self._params: Optional[Dict[str, Any]] = None
+        super().__init__()
+        self._params: dict[str, Any] | None = None
         self._has_title_line = True
 
     @property
     def _upload_tmp_path(self) -> Path:
-        return Path(cmk.utils.paths.tmp_dir) / "host-import"
+        return cmk.utils.paths.tmp_dir / "host-import"
 
     def title(self) -> str:
         return _("Bulk host import")
 
     def page_menu(self, breadcrumb: Breadcrumb) -> PageMenu:
         if not request.has_var("file_id"):
-            return make_simple_form_page_menu(_("Hosts"),
-                                              breadcrumb,
-                                              form_name="upload",
-                                              button_name="_do_upload",
-                                              save_title=_("Upload"))
+            return make_simple_form_page_menu(
+                _("Hosts"),
+                breadcrumb,
+                form_name="upload",
+                button_name="_do_upload",
+                save_title=_("Upload"),
+            )
 
         # preview phase, after first upload
         return PageMenu(
@@ -139,9 +141,11 @@ class ModeBulkImport(WatoMode):
                 return self._import(csv_reader)
         return None
 
-    def _file_path(self) -> Path:
-        file_id = request.get_unicode_input_mandatory("file_id",
-                                                      "%s-%d" % (config.user.id, int(time.time())))
+    def _file_path(self, file_id: str | None = None) -> Path:
+        if file_id is None:
+            file_id = request.get_str_input_mandatory("file_id")
+        if not file_id.isalnum():
+            raise MKUserError("file_id", _("The file_id has to be alphanumeric."))
         return self._upload_tmp_path / ("%s.csv" % file_id)
 
     # Upload the CSV file into a temporary directoy to make it available not only
@@ -155,9 +159,9 @@ class ModeBulkImport(WatoMode):
         upload_info = self._vs_upload().from_html_vars("_upload")
         self._vs_upload().validate_value(upload_info, "_upload")
 
-        file_id = "%s-%d" % (config.user.id, int(time.time()))
+        file_id = uuid.uuid4().hex
 
-        store.save_text_to_file(self._file_path(), upload_info["file"])
+        store.save_text_to_file(self._file_path(file_id=file_id), upload_info["file"])
 
         # make selections available to next page
         request.set_var("file_id", file_id)
@@ -171,7 +175,7 @@ class ModeBulkImport(WatoMode):
             if mtime < time.time() - 3600:
                 path.unlink()
 
-    def _get_custom_csv_dialect(self, delim: str) -> Type[csv.Dialect]:
+    def _get_custom_csv_dialect(self, delim: str) -> type[csv.Dialect]:
         class CustomCSVDialect(csv.excel):
             delimiter = delim
 
@@ -180,9 +184,10 @@ class ModeBulkImport(WatoMode):
     def _open_csv_file(self) -> CSVReader:
         try:
             csv_file = self._file_path().open(encoding="utf-8")
-        except IOError:
+        except OSError:
             raise MKUserError(
-                None, _("Failed to read the previously uploaded CSV file. Please upload it again."))
+                None, _("Failed to read the previously uploaded CSV file. Please upload it again.")
+            )
 
         if list(request.itervars(prefix="_preview")):
             params = self._vs_parse_params().from_html_vars("_preview")
@@ -225,6 +230,7 @@ class ModeBulkImport(WatoMode):
         fail_messages = []
         selected = []
         imported_hosts = []
+        folder = folder_from_request()
 
         for row_num, row in enumerate(csv_reader):
             if not row:
@@ -232,19 +238,17 @@ class ModeBulkImport(WatoMode):
 
             host_name, attributes = self._get_host_info_from_row(row, row_num)
             try:
-                watolib.Folder.current().create_hosts(
-                    [(host_name, attributes, None)],
-                    bake_hosts=False,
-                )
+                folder.create_hosts([(host_name, attributes, None)])
                 imported_hosts.append(host_name)
-                selected.append('_c_%s' % host_name)
+                selected.append("_c_%s" % host_name)
                 num_succeeded += 1
             except Exception as e:
                 fail_messages.append(
-                    _("Failed to create a host from line %d: %s") % (csv_reader.line_num, e))
+                    _("Failed to create a host from line %d: %s") % (csv_reader.line_num, e)
+                )
                 num_failed += 1
 
-        watolib.hosts_and_folders.try_bake_agents_for_hosts(imported_hosts)
+        bakery.try_bake_agents_for_hosts(imported_hosts)
 
         self._delete_csv_file()
 
@@ -256,22 +260,24 @@ class ModeBulkImport(WatoMode):
                 msg += "<li>%s</li>" % fail_msg
             msg += "</ul>"
 
+        folder_path = folder.path()
         if num_succeeded > 0 and request.var("do_service_detection") == "1":
             # Create a new selection for performing the bulk discovery
-            folder_path = watolib.Folder.current().path()
-            config.user.set_rowselection(
+            user.set_rowselection(
                 weblib.selection_id(),
-                'wato-folder-/' + folder_path,
+                "wato-folder-/" + folder_path,
                 selected,
                 "set",
             )
             return redirect(
                 mode_url(
                     "bulkinventory",
-                    _bulk_inventory='1',
-                    show_checkboxes='1',
+                    _bulk_inventory="1",
+                    show_checkboxes="1",
+                    folder=folder_path,
                     selection=weblib.selection_id(),
-                ))
+                )
+            )
         flash(msg)
         return redirect(mode_url("folder", folder=folder_path))
 
@@ -280,7 +286,7 @@ class ModeBulkImport(WatoMode):
 
     def _get_host_info_from_row(self, row, row_num):
         host_name = None
-        attributes: Dict[str, str] = {}
+        attributes: dict[str, str] = {}
         for col_num, value in enumerate(row):
             if not value:
                 continue
@@ -294,9 +300,13 @@ class ModeBulkImport(WatoMode):
                 if attribute in attributes:
                     raise MKUserError(
                         None,
-                        _("The attribute \"%s\" is assigned to multiple columns. "
-                          "You can not populate one attribute from multiple columns. "
-                          "The column to attribute associations need to be unique.") % attribute)
+                        _(
+                            'The attribute "%s" is assigned to multiple columns. '
+                            "You can not populate one attribute from multiple columns. "
+                            "The column to attribute associations need to be unique."
+                        )
+                        % attribute,
+                    )
 
                 attr = host_attribute_registry[attribute]()
 
@@ -312,16 +322,18 @@ class ModeBulkImport(WatoMode):
                     if not value.isascii():
                         raise MKUserError(
                             None,
-                            _("Non-ASCII characters are not allowed in the "
-                              "attribute \"%s\".") % attribute)
+                            _('Non-ASCII characters are not allowed in the attribute "%s".')
+                            % attribute,
+                        )
 
                     try:
                         attr.validate_input(value, "")
                     except MKUserError as e:
                         raise MKUserError(
                             None,
-                            _("Invalid value in column %d (%s) of row %d: %s") %
-                            (col_num, attribute, row_num, e))
+                            _("Invalid value in column %d (%s) of row %d: %s")
+                            % (col_num, attribute, row_num, e),
+                        )
 
                     attributes[attribute] = value
 
@@ -339,10 +351,12 @@ class ModeBulkImport(WatoMode):
     def _upload_form(self) -> None:
         html.begin_form("upload", method="POST")
         html.p(
-            _("Using this page you can import several hosts at once into the choosen folder. You can "
-              "choose a CSV file from your workstation to be uploaded, paste a CSV files contents "
-              "into the textarea or simply enter a list of hostnames (one per line) to the textarea."
-             ))
+            _(
+                "Using this page you can import several hosts at once into the choosen folder. You can "
+                "choose a CSV file from your workstation to be uploaded, paste a CSV files contents "
+                "into the textarea or simply enter a list of hostnames (one per line) to the textarea."
+            )
+        )
 
         self._vs_upload().render_input("_upload", None)
         html.hidden_fields()
@@ -351,11 +365,22 @@ class ModeBulkImport(WatoMode):
     def _vs_upload(self):
         return Dictionary(
             elements=[
-                ("file", UploadOrPasteTextFile(
-                    title=_("Import Hosts"),
-                    file_title=_("CSV File"),
-                )),
-                ("do_service_detection", Checkbox(title=_("Perform automatic service discovery"),)),
+                (
+                    "file",
+                    UploadOrPasteTextFile(
+                        elements=[],
+                        allowed_extensions=[".csv"],
+                        mime_types=["text/csv"],
+                        title=_("Import Hosts"),
+                        file_title=_("CSV File"),
+                    ),
+                ),
+                (
+                    "do_service_detection",
+                    Checkbox(
+                        title=_("Perform automatic service discovery"),
+                    ),
+                ),
             ],
             render="form",
             title=_("Import Hosts"),
@@ -375,20 +400,30 @@ class ModeBulkImport(WatoMode):
 
         html.h2(_("Preview"))
         attribute_list = "<ul>%s</ul>" % "".join(
-            ["<li>%s (%s)</li>" % a for a in attributes if a[0] is not None])
+            ["<li>%s (%s)</li>" % a for a in attributes if a[0] is not None]
+        )
         html.help(
-            _("This list shows you the first 10 rows from your CSV file in the way the import is "
-              "currently parsing it. If the lines are not splitted correctly or the title line is "
-              "not shown as title of the table, you may change the import settings above and try "
-              "again.") + "<br><br>" +
-            _("The first row below the titles contains fields to specify which column of the "
-              "CSV file should be imported to which attribute of the created hosts. The import "
-              "progress is trying to match the columns to attributes automatically by using the "
-              "titles found in the title row (if you have some). "
-              "If you use the correct titles, the attributes can be mapped automatically. The "
-              "currently available attributes are:") + attribute_list +
-            _("You can change these assignments according to your needs and then start the "
-              "import by clicking on the <i>Import</i> button above."))
+            _(
+                "This list shows you the first 10 rows from your CSV file in the way the import is "
+                "currently parsing it. If the lines are not splitted correctly or the title line is "
+                "not shown as title of the table, you may change the import settings above and try "
+                "again."
+            )
+            + "<br><br>"
+            + _(
+                "The first row below the titles contains fields to specify which column of the "
+                "CSV file should be imported to which attribute of the created hosts. The import "
+                "progress is trying to match the columns to attributes automatically by using the "
+                "titles found in the title row (if you have some). "
+                "If you use the correct titles, the attributes can be mapped automatically. The "
+                "currently available attributes are:"
+            )
+            + attribute_list
+            + _(
+                "You can change these assignments according to your needs and then start the "
+                "import by clicking on the <i>Import</i> button above."
+            )
+        )
 
         # Wenn bei einem Host ein Fehler passiert, dann wird die Fehlermeldung zu dem Host angezeigt, so dass man sehen kann, was man anpassen muss.
         # Die problematischen Zeilen sollen angezeigt werden, so dass man diese als Block in ein neues CSV-File eintragen kann und dann diese Datei
@@ -404,16 +439,16 @@ class ModeBulkImport(WatoMode):
         rows = list(csv_reader)
 
         # Determine how many columns should be rendered by using the longest column
-        num_columns = max([len(r) for r in [headers] + rows])
+        num_columns = max(len(r) for r in [headers] + rows)
 
-        with table_element(sortable=False, searchable=False,
-                           omit_headers=not self._has_title_line) as table:
-
+        with table_element(
+            sortable=False, searchable=False, omit_headers=not self._has_title_line
+        ) as table:
             # Render attribute selection fields
             table.row()
             for col_num in range(num_columns):
                 header = headers[col_num] if len(headers) > col_num else None
-                table.cell(escape_html_permissive(header))
+                table.cell(escape_to_html_permissive(header))
                 attribute_varname = "attribute_%d" % col_num
                 if request.var(attribute_varname):
                     attribute_method = request.get_ascii_input_mandatory(attribute_varname)
@@ -421,10 +456,9 @@ class ModeBulkImport(WatoMode):
                     attribute_method = self._try_detect_default_attribute(attributes, header)
                     request.del_var(attribute_varname)
 
-                html.dropdown("attribute_%d" % col_num,
-                              attributes,
-                              deflt=attribute_method,
-                              autocomplete="off")
+                html.dropdown(
+                    "attribute_%d" % col_num, attributes, deflt=attribute_method, autocomplete="off"
+                )
 
             # Render sample rows
             for row in rows:
@@ -445,19 +479,23 @@ class ModeBulkImport(WatoMode):
     def _vs_parse_params(self):
         return Dictionary(
             elements=[
-                ("field_delimiter",
-                 TextInput(
-                     title=_("Set field delimiter"),
-                     default_value=";",
-                     size=1,
-                     allow_empty=False,
-                 )),
-                ("has_title_line",
-                 FixedValue(
-                     True,
-                     title=_("Has title line"),
-                     totext=_("The first line in the file contains titles."),
-                 )),
+                (
+                    "field_delimiter",
+                    TextInput(
+                        title=_("Set field delimiter"),
+                        default_value=";",
+                        size=1,
+                        allow_empty=False,
+                    ),
+                ),
+                (
+                    "has_title_line",
+                    FixedValue(
+                        value=True,
+                        title=_("Has title line"),
+                        totext=_("The first line in the file contains titles."),
+                    ),
+                ),
             ],
             render="form",
             title=_("File Parsing Settings"),
@@ -477,12 +515,12 @@ class ModeBulkImport(WatoMode):
         ]
 
         # Add tag groups
-        for tag_group in config.tags.tag_groups:
+        for tag_group in active_config.tags.tag_groups:
             attributes.append(("tag_" + tag_group.id, _("Tag: %s") % tag_group.title))
 
         # Add custom attributes
         for entry in ModeCustomHostAttrs().get_attributes():
-            name = entry['name']
+            name = entry["name"]
             attributes.append((name, _("Custom variable: %s") % name))
 
         return attributes
@@ -502,7 +540,9 @@ class ModeBulkImport(WatoMode):
             if key is not None:
                 key_match_score = similarity(key, header)
                 title_match_score = similarity(title, header)
-                score = key_match_score if key_match_score > title_match_score else title_match_score
+                score = (
+                    key_match_score if key_match_score > title_match_score else title_match_score
+                )
 
                 if score > 0.6 and score > highscore:
                     best_key = key

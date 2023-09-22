@@ -1,818 +1,1541 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Dict, List
-
-import shutil
-import pytest
-from pathlib import Path
 import gzip
+import shutil
+from collections.abc import Iterable, Mapping, Sequence
+from pathlib import Path
+from typing import Literal
 
-from testlib import cmk_path
+import pytest
 
-from cmk.utils.exceptions import MKGeneralException
-from cmk.utils.structured_data import StructuredDataTree, Container, Attributes, Numeration
+from tests.testlib import cmk_path
 
-# Convention: test functions are named like
-#   test_structured_data_INFIX_METHODNAME where
-#   INFIX in [NodeAttribute, StructuredDataTree,]
-
-# TODO functions to test
-# egrep "    def\s*[^_]|\s*class" lib/structured_data.py | grep -v "__init__" > ~/playground/inventory/functions_to_test
-
-#   .--NodeAttribute-------------------------------------------------------.
-#   |  _   _           _         _   _   _        _ _           _          |
-#   | | \ | | ___   __| | ___   / \ | |_| |_ _ __(_) |__  _   _| |_ ___    |
-#   | |  \| |/ _ \ / _` |/ _ \ / _ \| __| __| '__| | '_ \| | | | __/ _ \   |
-#   | | |\  | (_) | (_| |  __// ___ \ |_| |_| |  | | |_) | |_| | ||  __/   |
-#   | |_| \_|\___/ \__,_|\___/_/   \_\__|\__|_|  |_|_.__/ \__,_|\__\___|   |
-#   |                                                                      |
-#   '----------------------------------------------------------------------'
-
-
-def mk_root():
-    # This tree contains all possibilities:
-    # {'0_cna': {'__Att__': '{:}',
-    #            '__Con__': {'1_ca': {'__Att__': '{:}',
-    #                                 '__Con__': {'2_a': {'__Att__': '{:}',
-    #                                                     '__path__': ('0_cna',
-    #                                                                  '1_ca',
-    #                                                                  '2_a')}},
-    #                                 '__path__': ('0_cna', '1_ca')},
-    #                        '1_cn': {'__Con__': {'2_n': {'__Num__': '[:]',
-    #                                                     '__path__': ('0_cna',
-    #                                                                  '1_ca',
-    #                                                                  '2_n')}},
-    #                                 '__Num__': '[:]',
-    #                                 '__path__': ('0_cna', '1_cn')},
-    #                        '1_na': {'__Att__': '{:}',
-    #                                 '__Num__': '[:]',
-    #                                 '__path__': ('0_cna', '1_na')}},
-    #            '__Num__': '[:]',
-    #            '__path__': ('0_cna',)}}
-    root = Container()
-    container_0 = Container()
-    numeration_0 = Numeration()
-    attributes_0 = Attributes()
-    root.add_child("0_cna", container_0)
-    root.add_child("0_cna", numeration_0)
-    root.add_child("0_cna", attributes_0)
-
-    numeration_1 = Numeration()
-    container_1 = Container()
-    container_0.add_child("1_cn", numeration_1)
-    container_0.add_child("1_cn", container_1)
-
-    attributes_1 = Attributes()
-    container_2 = Container()
-    container_0.add_child("1_ca", attributes_1)
-    container_0.add_child("1_ca", container_2)
-
-    numeration_2 = Numeration()
-    attributes_2 = Attributes()
-    container_0.add_child("1_na", numeration_2)
-    container_0.add_child("1_na", attributes_2)
-
-    numeration_3 = Numeration()
-    attributes_3 = Attributes()
-    container_1.add_child("2_n", numeration_3)
-    container_2.add_child("2_a", attributes_3)
-    return root
+from cmk.utils.hostaddress import HostName
+from cmk.utils.structured_data import (
+    _MutableAttributes,
+    _MutableTable,
+    _RetentionInterval,
+    ImmutableAttributes,
+    ImmutableDeltaTree,
+    ImmutableTable,
+    ImmutableTree,
+    MutableTree,
+    parse_visible_raw_path,
+    SDFilterChoice,
+    SDNodeName,
+    SDPath,
+    SDRetentionFilterChoices,
+    TreeStore,
+    UpdateResult,
+)
 
 
-def mk_filled_root():
-    root = Container()
-    container_0 = Container()
-    numeration_0 = Numeration()
-    attributes_0 = Attributes()
-    root.add_child("0_cna", container_0)
-    root.add_child("0_cna", numeration_0)
-    root.add_child("0_cna", attributes_0)
-
-    numeration_1 = Numeration()
-    numeration_1.set_child_data([{"n10": "N-1-0"}])
-    container_1 = Container()
-    container_0.add_child("1_cn", numeration_1)
-    container_0.add_child("1_cn", container_1)
-
-    attributes_1 = Attributes()
-    attributes_1.set_child_data({"a10": "A-1-0"})
-    container_2 = Container()
-    container_0.add_child("1_ca", attributes_1)
-    container_0.add_child("1_ca", container_2)
-
-    numeration_2 = Numeration()
-    numeration_2.set_child_data([{"n20": "N-2-0"}, {"n21": "N-2-1"}])
-    attributes_2 = Attributes()
-    attributes_2.set_child_data({"a20": "A-2-0", "a21": "A-1-1"})
-    container_0.add_child("1_na", numeration_2)
-    container_0.add_child("1_na", attributes_2)
-
-    numeration_3 = Numeration()
-    numeration_3.set_child_data([{"n30": "N-3-0"}, {"n31": "N-3-1"}, {"n32": "N-3-2"}])
-    attributes_3 = Attributes()
-    attributes_3.set_child_data({"a30": "A-3-0", "a31": "A-3-1", "a32": "A-3-2"})
-    container_1.add_child("2_n", numeration_3)
-    container_2.add_child("2_a", attributes_3)
-    return root
+def _make_mutable_tree(tree: ImmutableTree) -> MutableTree:
+    return MutableTree(
+        path=tree.path,
+        attributes=_MutableAttributes(
+            pairs=dict(tree.attributes.pairs),
+            retentions=tree.attributes.retentions,
+        ),
+        table=_MutableTable(
+            key_columns=tree.table.key_columns,
+            rows_by_ident={ident: dict(row) for ident, row in tree.table.rows_by_ident.items()},
+            retentions=tree.table.retentions,
+        ),
+        nodes_by_name={name: _make_mutable_tree(node) for name, node in tree.nodes_by_name.items()},
+    )
 
 
-def test_structured_data_NodeAttribute():
-    mk_root()
-    mk_filled_root()
-
-
-node_attributes = [
-    mk_root(),
-    mk_filled_root(),
-]
-
-
-@pytest.mark.parametrize("node_attribute", [mk_root()])
-def test_structured_data_NodeAttribute_is_empty(node_attribute):
-    assert node_attribute.is_empty()
-
-
-@pytest.mark.parametrize("node_attribute", [mk_filled_root()])
-def test_structured_data_NodeAttribute_is_empty_false(node_attribute):
-    assert not node_attribute.is_empty()
-
-
-@pytest.mark.parametrize("na_x", node_attributes)
-@pytest.mark.parametrize("na_y", node_attributes)
-def test_structured_data_NodeAttribute_is_equal(na_x, na_y):
-    if id(na_x) == id(na_y):
-        assert na_x.is_equal(na_y)
-    else:
-        assert not na_x.is_equal(na_y)
-
-
-@pytest.mark.parametrize("node_attribute,result", list(zip(node_attributes, [0, 12])))
-def test_structured_data_NodeAttribute_count_entries(node_attribute, result):
-    assert node_attribute.count_entries() == result
-
-
-@pytest.mark.parametrize("na_old,na_new,result", [(mk_root(), mk_filled_root(), (12, 0, 0))])
-def test_structured_data_NodeAttribute_compare_with(na_old, na_new, result):
-    n, c, r, d = na_new.compare_with(na_old)
-    assert (n, c, r) == result
-    if result == (0, 0, 0):
-        assert d.is_empty()
-    else:
-        assert not d.is_empty()
-
-
-@pytest.mark.parametrize("old_numeration_data,new_numeration_data,result", [
-    ([], [], (0, 0, 0)),
-    ([{
-        "id": "1",
-        "val": 0
-    }], [], (0, 0, 1)),
-    ([], [{
-        "id": "1",
-        "val": 0
-    }], (1, 0, 0)),
-    ([{
-        "id": "1",
-        "val": 0
-    }], [{
-        "id": "1",
-        "val": 0
-    }], (0, 0, 0)),
-    ([{
-        "id": "1",
-        "val": 0
-    }, {
-        "id": "2",
-        "val": 1
-    }], [{
-        "id": "1",
-        "val": 0
-    }], (0, 0, 1)),
-    ([{
-        "id": "1",
-        "val": 0
-    }], [{
-        "id": "1",
-        "val": 0
-    }, {
-        "id": "2",
-        "val": 1
-    }], (1, 0, 0)),
-    ([{
-        "id": "1",
-        "val1": 1
-    }], [{
-        "id": "1",
-        "val1": 1,
-        "val2": 1
-    }], (1, 0, 0)),
-    ([{
-        "id": "1",
-        "val": 0
-    }], [{
-        "id": "1",
-        "val": 1
-    }], (0, 1, 0)),
-    ([{
-        "id": "1",
-        "val1": 1,
-        "val2": -1
-    }], [{
-        "id": "1",
-        "val1": 1
-    }], (0, 0, 1)),
-    ([{
-        "id": "1",
-        "val1": 0
-    }, {
-        "id": "2",
-        "val1": 0,
-        "val2": 0
-    }, {
-        "id": "3",
-        "val1": 0
-    }], [{
-        "id": "1",
-        "val1": 1
-    }, {
-        "id": "2",
-        "val1": 0
-    }, {
-        "id": "3",
-        "val1": 0,
-        "val2": 1
-    }], (1, 1, 1)),
-    ([{
-        "id": "1",
-        "val1": 1
-    }, {
-        "id": "2",
-        "val1": 1
-    }], [{
-        "id": "1",
-        "val1": 1,
-        "val2": -1
-    }, {
-        "id": "2",
-        "val1": 1,
-        "val2": -1
-    }], (2, 0, 0)),
-    ([{
-        "id": "1",
-        "val": 1
-    }, {
-        "id": "2",
-        "val": 3
-    }], [{
-        "id": "1",
-        "val": 2
-    }, {
-        "id": "2",
-        "val": 4
-    }], (0, 2, 0)),
-    ([{
-        "id": "1",
-        "val1": 1,
-        "val2": -1
-    }, {
-        "id": "2",
-        "val1": 1,
-        "val2": -1
-    }], [{
-        "id": "1",
-        "val1": 1
-    }, {
-        "id": "2",
-        "val1": 1
-    }], (0, 0, 2)),
-    ([{
-        "id": "2",
-        "val": 1
-    }, {
-        "id": "3",
-        "val": 3
-    }, {
-        "id": "1",
-        "val": 0
-    }], [{
-        "id": "2",
-        "val": 2
-    }, {
-        "id": "1",
-        "val": 0
-    }, {
-        "id": "3",
-        "val": 4
-    }], (0, 2, 0)),
-    ([{
-        "id": "1",
-        "val": 1
-    }, {
-        "id": "2",
-        "val": 3
-    }, {
-        "id": "3",
-        "val": 0
-    }], [{
-        "id": "0",
-        "val": 2
-    }, {
-        "id": "1",
-        "val": 0
-    }, {
-        "id": "2",
-        "val": 4
-    }, {
-        "id": "3",
-        "val": 1
-    }], (4, 0, 3)),
-])
-def test_structured_data_Numeration_compare_with(old_numeration_data, new_numeration_data, result):
-    old_numeration = Numeration()
-    old_numeration.set_child_data(old_numeration_data)
-    new_numeration = Numeration()
-    new_numeration.set_child_data(new_numeration_data)
-    n, c, r, _d = new_numeration.compare_with(old_numeration)
-    assert (n, c, r) == result
-
-
-@pytest.mark.parametrize("node_attribute,edge", [
-    (mk_root(), "0_cna"),
-])
-def test_structured_data_NodeAttribute_has_edge(node_attribute, edge):
-    assert node_attribute.has_edge(edge)
-    assert not node_attribute.has_edge("REALLY NO EDGE")
-
-
-#.
-#   .--Structured DataTree-------------------------------------------------.
-#   |         ____  _                   _                      _           |
-#   |        / ___|| |_ _ __ _   _  ___| |_ _   _ _ __ ___  __| |          |
-#   |        \___ \| __| '__| | | |/ __| __| | | | '__/ _ \/ _` |          |
-#   |         ___) | |_| |  | |_| | (__| |_| |_| | | |  __/ (_| |          |
-#   |        |____/ \__|_|   \__,_|\___|\__|\__,_|_|  \___|\__,_|          |
-#   |                                                                      |
-#   |               ____        _       _____                              |
-#   |              |  _ \  __ _| |_ __ |_   _| __ ___  ___                 |
-#   |              | | | |/ _` | __/ _` || || '__/ _ \/ _ \                |
-#   |              | |_| | (_| | || (_| || || | |  __/  __/                |
-#   |              |____/ \__,_|\__\__,_||_||_|  \___|\___|                |
-#   |                                                                      |
-#   '----------------------------------------------------------------------'
-
-TEST_DIR = "%s/tests/unit/cmk/utils/structured_data/tree_test_data" % cmk_path()
-
-tree_name_old_addresses_arrays_memory = "%s/tree_old_addresses_arrays_memory" % TEST_DIR
-tree_name_old_addresses = "%s/tree_old_addresses" % TEST_DIR
-tree_name_old_arrays = "%s/tree_old_arrays" % TEST_DIR
-tree_name_old_interfaces = "%s/tree_old_interfaces" % TEST_DIR
-tree_name_old_memory = "%s/tree_old_memory" % TEST_DIR
-tree_name_old_heute = "%s/tree_old_heute" % TEST_DIR
-
-tree_name_new_addresses_arrays_memory = "%s/tree_new_addresses_arrays_memory" % TEST_DIR
-tree_name_new_addresses = "%s/tree_new_addresses" % TEST_DIR
-tree_name_new_arrays = "%s/tree_new_arrays" % TEST_DIR
-tree_name_new_interfaces = "%s/tree_new_interfaces" % TEST_DIR
-tree_name_new_memory = "%s/tree_new_memory" % TEST_DIR
-tree_name_new_heute = "%s/tree_new_heute" % TEST_DIR
-
-old_trees = [
-    tree_name_old_addresses_arrays_memory,
-    tree_name_old_addresses,
-    tree_name_old_arrays,
-    tree_name_old_interfaces,
-    tree_name_old_memory,
-    tree_name_old_heute,
-]
-new_trees = [
-    tree_name_new_addresses_arrays_memory,
-    tree_name_new_addresses,
-    tree_name_new_arrays,
-    tree_name_new_interfaces,
-    tree_name_new_memory,
-    tree_name_new_heute,
-]
-
-
-def test_structured_data_StructuredDataTree_get_dict():
-    with pytest.raises(MKGeneralException) as e:
-        StructuredDataTree().get_dict("")
-    assert 'Empty tree path or zero' in "%s" % e
-
-    with pytest.raises(MKGeneralException) as e:
-        StructuredDataTree().get_dict(0)  # type: ignore[arg-type]
-    assert 'Empty tree path or zero' in "%s" % e
-
-    with pytest.raises(MKGeneralException) as e:
-        StructuredDataTree().get_dict(100)  # type: ignore[arg-type]
-    assert 'Wrong tree path format' in "%s" % e
-
-    with pytest.raises(MKGeneralException) as e:
-        StructuredDataTree().get_dict("a?")
-    assert 'No valid tree path' in "%s" % e
-
-    with pytest.raises(MKGeneralException) as e:
-        StructuredDataTree().get_dict("a$.")
-    assert 'Specified tree path contains unexpected characters' in "%s" % e
-
-    assert StructuredDataTree().get_dict("a.") == {}
-
-
-def test_structured_data_StructuredDataTree_get_list():
-    with pytest.raises(MKGeneralException) as e:
-        StructuredDataTree().get_list("")
-    assert 'Empty tree path or zero' in "%s" % e
-
-    with pytest.raises(MKGeneralException) as e:
-        StructuredDataTree().get_list(0)  # type: ignore[arg-type]
-    assert 'Empty tree path or zero' in "%s" % e
-
-    with pytest.raises(MKGeneralException) as e:
-        StructuredDataTree().get_list(100)  # type: ignore[arg-type]
-    assert 'Wrong tree path format' in "%s" % e
-
-    with pytest.raises(MKGeneralException) as e:
-        StructuredDataTree().get_list("a?")
-    assert 'No valid tree path' in "%s" % e
-
-    with pytest.raises(MKGeneralException) as e:
-        StructuredDataTree().get_list("a$.")
-    assert 'Specified tree path contains unexpected characters' in "%s" % e
-
-    assert StructuredDataTree().get_list("a:") == []
-
-
-@pytest.mark.parametrize("tree_name", old_trees + new_trees)
-def test_structured_data_StructuredDataTree_load_from(tree_name):
-    StructuredDataTree().load_from(tree_name)
-
-
-def test_structured_data_StructuredDataTree_save_gzip(tmp_path):
-    filename = "heute"
-    target = Path(tmp_path).joinpath(filename)
-    raw_tree = {
-        "node": {
-            "foo": 1,
-            "bär": 2,
+def _make_immutable_tree(tree: MutableTree) -> ImmutableTree:
+    return ImmutableTree(
+        path=tree.path,
+        attributes=ImmutableAttributes(
+            pairs=tree.attributes.pairs,
+            retentions=tree.attributes.retentions,
+        ),
+        table=ImmutableTable(
+            key_columns=tree.table.key_columns,
+            rows_by_ident=tree.table.rows_by_ident,
+            retentions=tree.table.retentions,
+        ),
+        nodes_by_name={
+            name: _make_immutable_tree(node) for name, node in tree.nodes_by_name.items()
         },
-    }
-    tree = StructuredDataTree().create_tree_from_raw_tree(raw_tree)
+    )
 
-    tree.save_to(tmp_path, filename)
+
+def _create_empty_mut_tree() -> MutableTree:
+    root = MutableTree()
+    root.add(path=("path-to-nta", "nt"))
+    root.add(path=("path-to-nta", "na"))
+    root.add(path=("path-to-nta", "ta"))
+    return root
+
+
+def _create_empty_imm_tree() -> ImmutableTree:
+    return _make_immutable_tree(_create_empty_mut_tree())
+
+
+def _create_filled_mut_tree() -> MutableTree:
+    root = MutableTree()
+    root.add(
+        path=("path-to-nta", "nt"),
+        key_columns=["nt0"],
+        rows=[
+            {"nt0": "NT 00", "nt1": "NT 01"},
+            {"nt0": "NT 10", "nt1": "NT 11"},
+        ],
+    )
+    root.add(path=("path-to-nta", "na"), pairs=[{"na0": "NA 0", "na1": "NA 1"}])
+    root.add(
+        path=("path-to-nta", "ta"),
+        pairs=[{"ta0": "TA 0", "ta1": "TA 1"}],
+        key_columns=["ta0"],
+        rows=[
+            {"ta0": "TA 00", "ta1": "TA 01"},
+            {"ta0": "TA 10", "ta1": "TA 11"},
+        ],
+    )
+    return root
+
+
+def _create_filled_imm_tree() -> ImmutableTree:
+    return _make_immutable_tree(_create_filled_mut_tree())
+
+
+def test_serialize_empty_mut_tree() -> None:
+    assert _create_empty_mut_tree().serialize() == {"Attributes": {}, "Table": {}, "Nodes": {}}
+
+
+def test_serialize_filled_mut_tree() -> None:
+    raw_tree = _create_filled_mut_tree().serialize()
+    assert not raw_tree["Attributes"]
+    assert not raw_tree["Table"]
+    assert not raw_tree["Nodes"]["path-to-nta"]["Attributes"]
+    assert not raw_tree["Nodes"]["path-to-nta"]["Table"]
+
+    assert raw_tree["Nodes"]["path-to-nta"]["Nodes"]["na"]["Attributes"]["Pairs"] == {
+        "na0": "NA 0",
+        "na1": "NA 1",
+    }
+    assert not raw_tree["Nodes"]["path-to-nta"]["Nodes"]["na"]["Table"]
+    assert not raw_tree["Nodes"]["path-to-nta"]["Nodes"]["na"]["Nodes"]
+
+    assert not raw_tree["Nodes"]["path-to-nta"]["Nodes"]["nt"]["Attributes"]
+    assert raw_tree["Nodes"]["path-to-nta"]["Nodes"]["nt"]["Table"]["KeyColumns"] == ["nt0"]
+    nt_rows = raw_tree["Nodes"]["path-to-nta"]["Nodes"]["nt"]["Table"]["Rows"]
+    assert len(nt_rows) == 2
+    for row in [
+        {"nt0": "NT 00", "nt1": "NT 01"},
+        {"nt0": "NT 10", "nt1": "NT 11"},
+    ]:
+        assert row in nt_rows
+    assert not raw_tree["Nodes"]["path-to-nta"]["Nodes"]["nt"]["Nodes"]
+
+    assert raw_tree["Nodes"]["path-to-nta"]["Nodes"]["ta"]["Attributes"]["Pairs"] == {
+        "ta0": "TA 0",
+        "ta1": "TA 1",
+    }
+    assert raw_tree["Nodes"]["path-to-nta"]["Nodes"]["ta"]["Table"]["KeyColumns"] == ["ta0"]
+    ta_rows = raw_tree["Nodes"]["path-to-nta"]["Nodes"]["ta"]["Table"]["Rows"]
+    assert len(ta_rows) == 2
+    for row in [
+        {"ta0": "TA 00", "ta1": "TA 01"},
+        {"ta0": "TA 10", "ta1": "TA 11"},
+    ]:
+        assert row in ta_rows
+    assert not raw_tree["Nodes"]["path-to-nta"]["Nodes"]["ta"]["Nodes"]
+
+
+def test_deserialize_empty_imm_tree() -> None:
+    assert ImmutableTree.deserialize({}) == MutableTree()
+    assert ImmutableTree.deserialize({}) == ImmutableTree()
+
+
+def test_deserialize_filled_imm_tree() -> None:
+    tree = ImmutableTree.deserialize(
+        {
+            "Attributes": {},
+            "Table": {},
+            "Nodes": {
+                "path-to-nta": {
+                    "Attributes": {},
+                    "Nodes": {
+                        "na": {
+                            "Attributes": {"Pairs": {"na0": "NA 0", "na1": "NA 1"}},
+                            "Nodes": {},
+                            "Table": {},
+                        },
+                        "nt": {
+                            "Attributes": {},
+                            "Nodes": {},
+                            "Table": {
+                                "KeyColumns": ["nt0"],
+                                "Rows": [
+                                    {"nt0": "NT 00", "nt1": "NT 01"},
+                                    {"nt0": "NT 10", "nt1": "NT 11"},
+                                ],
+                            },
+                        },
+                        "ta": {
+                            "Attributes": {"Pairs": {"ta0": "TA 0", "ta1": "TA 1"}},
+                            "Nodes": {},
+                            "Table": {
+                                "KeyColumns": ["ta0"],
+                                "Rows": [
+                                    {"ta0": "TA 00", "ta1": "TA 01"},
+                                    {"ta0": "TA 10", "ta1": "TA 11"},
+                                ],
+                            },
+                        },
+                    },
+                    "Table": {},
+                }
+            },
+        }
+    )
+    assert tree == _create_filled_mut_tree()
+    assert tree == _create_filled_imm_tree()
+
+
+def test_serialize_empty_delta_tree() -> None:
+    assert _create_empty_imm_tree().difference(_create_empty_imm_tree()).serialize() == {
+        "Attributes": {},
+        "Table": {},
+        "Nodes": {},
+    }
+
+
+def test_serialize_filled_delta_tree() -> None:
+    raw_tree = _create_empty_imm_tree().difference(_create_filled_imm_tree()).serialize()
+    assert not raw_tree["Attributes"]
+    assert not raw_tree["Table"]
+    assert not raw_tree["Nodes"]["path-to-nta"]["Attributes"]
+    assert not raw_tree["Nodes"]["path-to-nta"]["Table"]
+
+    assert raw_tree["Nodes"]["path-to-nta"]["Nodes"]["na"]["Attributes"]["Pairs"] == {
+        "na0": ("NA 0", None),
+        "na1": ("NA 1", None),
+    }
+    assert not raw_tree["Nodes"]["path-to-nta"]["Nodes"]["na"]["Table"]
+    assert not raw_tree["Nodes"]["path-to-nta"]["Nodes"]["na"]["Nodes"]
+
+    assert not raw_tree["Nodes"]["path-to-nta"]["Nodes"]["nt"]["Attributes"]
+    assert raw_tree["Nodes"]["path-to-nta"]["Nodes"]["nt"]["Table"]["KeyColumns"] == ["nt0"]
+    nt_rows = raw_tree["Nodes"]["path-to-nta"]["Nodes"]["nt"]["Table"]["Rows"]
+    assert len(nt_rows) == 2
+    for row in [
+        {"nt0": ("NT 00", None), "nt1": ("NT 01", None)},
+        {"nt0": ("NT 10", None), "nt1": ("NT 11", None)},
+    ]:
+        assert row in nt_rows
+    assert not raw_tree["Nodes"]["path-to-nta"]["Nodes"]["nt"]["Nodes"]
+
+    assert raw_tree["Nodes"]["path-to-nta"]["Nodes"]["ta"]["Attributes"]["Pairs"] == {
+        "ta0": ("TA 0", None),
+        "ta1": ("TA 1", None),
+    }
+    assert raw_tree["Nodes"]["path-to-nta"]["Nodes"]["ta"]["Table"]["KeyColumns"] == ["ta0"]
+    ta_rows = raw_tree["Nodes"]["path-to-nta"]["Nodes"]["ta"]["Table"]["Rows"]
+    assert len(ta_rows) == 2
+    for row in [
+        {"ta0": ("TA 00", None), "ta1": ("TA 01", None)},
+        {"ta0": ("TA 10", None), "ta1": ("TA 11", None)},
+    ]:
+        assert row in ta_rows
+    assert not raw_tree["Nodes"]["path-to-nta"]["Nodes"]["ta"]["Nodes"]
+
+
+def test_deserialize_empty_delta_tree() -> None:
+    assert len(ImmutableDeltaTree()) == 0
+
+
+def test_deserialize_filled_delta_tree() -> None:
+    delta_tree = ImmutableDeltaTree.deserialize(
+        {
+            "Attributes": {},
+            "Nodes": {
+                "path-to-nta": {
+                    "Attributes": {},
+                    "Nodes": {
+                        "na": {
+                            "Attributes": {"Pairs": {"na0": ("NA 0", None), "na1": ("NA 1", None)}},
+                            "Nodes": {},
+                            "Table": {},
+                        },
+                        "nt": {
+                            "Attributes": {},
+                            "Nodes": {},
+                            "Table": {
+                                "KeyColumns": ["nt0"],
+                                "Rows": [
+                                    {"nt0": ("NT 00", None), "nt1": ("NT 01", None)},
+                                    {"nt0": ("NT 10", None), "nt1": ("NT 11", None)},
+                                ],
+                            },
+                        },
+                        "ta": {
+                            "Attributes": {"Pairs": {"ta0": ("TA 0", None), "ta1": ("TA 1", None)}},
+                            "Nodes": {},
+                            "Table": {
+                                "KeyColumns": ["ta0"],
+                                "Rows": [
+                                    {"ta0": ("TA 00", None), "ta1": ("TA 01", None)},
+                                    {"ta0": ("TA 10", None), "ta1": ("TA 11", None)},
+                                ],
+                            },
+                        },
+                    },
+                    "Table": {},
+                }
+            },
+            "Table": {},
+        }
+    )
+    assert len(delta_tree) == 12
+    stats = delta_tree.get_stats()
+    assert stats["new"] == 0
+    assert stats["changed"] == 0
+    assert stats["removed"] == 12
+
+
+def test_get_tree_empty() -> None:
+    root = _create_empty_imm_tree()
+    assert len(root) == 0
+    assert root.get_tree(("path-to-nta",)).path == ("path-to-nta",)
+    assert root.get_tree(("path-to-nta", "nt")).path == ("path-to-nta", "nt")
+    assert root.get_tree(("path-to-nta", "na")).path == ("path-to-nta", "na")
+    assert root.get_tree(("path-to-nta", "ta")).path == ("path-to-nta", "ta")
+
+
+def test_get_tree_not_empty() -> None:
+    root = _create_filled_imm_tree()
+    nta = root.get_tree(("path-to-nta",))
+    nt = root.get_tree(("path-to-nta", "nt"))
+    na = root.get_tree(("path-to-nta", "na"))
+    ta = root.get_tree(("path-to-nta", "ta"))
+    assert len(root) == 12
+    assert len(nta) == 12
+    assert len(nt) == 4
+    assert len(na) == 2
+    assert len(ta) == 6
+
+    assert nta.path == ("path-to-nta",)
+    assert nt.path == ("path-to-nta", "nt")
+    assert root.get_attribute(("path-to-nta", "nt"), "foo") is None
+    nt_rows = root.get_rows(("path-to-nta", "nt"))
+    for row in [
+        {"nt0": "NT 00", "nt1": "NT 01"},
+        {"nt0": "NT 10", "nt1": "NT 11"},
+    ]:
+        assert row in nt_rows
+
+    assert na.path == ("path-to-nta", "na")
+    assert root.get_attribute(("path-to-nta", "na"), "na0") == "NA 0"
+    assert root.get_attribute(("path-to-nta", "na"), "na1") == "NA 1"
+    assert root.get_attribute(("path-to-nta", "na"), "foo") is None
+    assert not root.get_rows(("path-to-nta", "na"))
+
+    assert ta.path == ("path-to-nta", "ta")
+    assert root.get_attribute(("path-to-nta", "ta"), "ta0") == "TA 0"
+    assert root.get_attribute(("path-to-nta", "ta"), "ta1") == "TA 1"
+    assert root.get_attribute(("path-to-nta", "ta"), "foo") is None
+    ta_rows = root.get_rows(("path-to-nta", "ta"))
+    for row in [
+        {"ta0": "TA 00", "ta1": "TA 01"},
+        {"ta0": "TA 10", "ta1": "TA 11"},
+    ]:
+        assert row in ta_rows
+
+
+def test_add_or_rows() -> None:
+    root = _create_filled_mut_tree()
+    root.add(
+        path=("path-to-nta", "node"),
+        pairs=[{"sn0": "SN 0", "sn1": "SN 1"}],
+        key_columns=["sn0"],
+        rows=[
+            {"sn0": "SN 00", "sn1": "SN 01"},
+            {"sn0": "SN 10", "sn1": "SN 11"},
+        ],
+    )
+    assert len(root) == 18
+
+
+def test_compare_tree_with_itself_1() -> None:
+    empty_root = _create_empty_imm_tree()
+    delta_tree = empty_root.difference(empty_root)
+    stats = delta_tree.get_stats()
+    assert stats["new"] == 0
+    assert stats["changed"] == 0
+    assert stats["removed"] == 0
+
+
+def test_compare_tree_with_itself_2() -> None:
+    filled_root = _create_filled_imm_tree()
+    delta_tree = filled_root.difference(filled_root)
+    stats = delta_tree.get_stats()
+    assert stats["new"] == 0
+    assert stats["changed"] == 0
+    assert stats["removed"] == 0
+
+
+def test_compare_tree_1() -> None:
+    delta_tree = _create_empty_imm_tree().difference(_create_filled_imm_tree())
+    stats = delta_tree.get_stats()
+    assert stats["new"] == 0
+    assert stats["changed"] == 0
+    assert stats["removed"] == 12
+
+
+def test_compare_tree_2() -> None:
+    delta_tree = _create_filled_imm_tree().difference(_create_empty_imm_tree())
+    stats = delta_tree.get_stats()
+    assert stats["new"] == 12
+    assert stats["changed"] == 0
+    assert stats["removed"] == 0
+
+
+def test_filter_delta_tree_nt() -> None:
+    filtered = (
+        _create_filled_imm_tree()
+        .difference(_create_empty_imm_tree())
+        .filter(
+            [
+                SDFilterChoice(
+                    path=("path-to-nta", "nt"),
+                    pairs=["nt1"],
+                    columns=["nt1"],
+                    nodes="nothing",
+                )
+            ],
+        )
+    )
+
+    assert len(filtered.get_tree(("path-to-nta", "na"))) == 0
+    assert len(filtered.get_tree(("path-to-nta", "ta"))) == 0
+
+    filtered_child = filtered.get_tree(("path-to-nta", "nt"))
+    assert len(filtered_child) == 2
+    assert filtered_child.path == ("path-to-nta", "nt")
+    assert not filtered_child.attributes.pairs
+    assert len(filtered_child.table.rows) == 2
+    for row in (
+        {"nt1": (None, "NT 01")},
+        {"nt1": (None, "NT 11")},
+    ):
+        assert row in filtered_child.table.rows
+
+
+def test_filter_delta_tree_na() -> None:
+    filtered = (
+        _create_filled_imm_tree()
+        .difference(_create_empty_imm_tree())
+        .filter(
+            [
+                SDFilterChoice(
+                    path=("path-to-nta", "na"),
+                    pairs=["na1"],
+                    columns=["na1"],
+                    nodes="nothing",
+                )
+            ],
+        )
+    )
+
+    assert len(filtered.get_tree(("path-to-nta", "nt"))) == 0
+    assert len(filtered.get_tree(("path-to-nta", "ta"))) == 0
+
+    filtered_child = filtered.get_tree(("path-to-nta", "na"))
+    assert len(filtered_child) == 1
+    assert filtered_child.path == ("path-to-nta", "na")
+    assert filtered_child.attributes.pairs == {"na1": (None, "NA 1")}
+    assert filtered_child.table.rows == []
+
+
+def test_filter_delta_tree_ta() -> None:
+    filtered = (
+        _create_filled_imm_tree()
+        .difference(_create_empty_imm_tree())
+        .filter(
+            [
+                SDFilterChoice(
+                    path=("path-to-nta", "ta"),
+                    pairs=["ta1"],
+                    columns=["ta1"],
+                    nodes="nothing",
+                )
+            ],
+        )
+    )
+
+    assert len(filtered.get_tree(("path-to-nta", "nt"))) == 0
+    assert len(filtered.get_tree(("path-to-nta", "na"))) == 0
+
+    filtered_child = filtered.get_tree(("path-to-nta", "ta"))
+    assert len(filtered_child) == 3
+    assert filtered_child.path == ("path-to-nta", "ta")
+    assert filtered_child.attributes.pairs == {"ta1": (None, "TA 1")}
+    assert len(filtered_child.table.rows) == 2
+    for row in (
+        {"ta1": (None, "TA 01")},
+        {"ta1": (None, "TA 11")},
+    ):
+        assert row in filtered_child.table.rows
+
+
+def test_filter_delta_tree_nta_ta() -> None:
+    filtered = (
+        _create_filled_imm_tree()
+        .difference(_create_empty_imm_tree())
+        .filter(
+            [
+                SDFilterChoice(
+                    path=("path-to-nta", "ta"),
+                    pairs=["ta0"],
+                    columns=["ta0"],
+                    nodes="nothing",
+                ),
+                SDFilterChoice(
+                    path=("path-to-nta", "ta"),
+                    pairs="nothing",
+                    columns=["ta1"],
+                    nodes="nothing",
+                ),
+            ],
+        )
+    )
+
+    nta = filtered.get_tree(("path-to-nta",))
+    assert len(nta) == 5
+    assert not nta.attributes.pairs
+    assert nta.table.rows == []
+
+    assert len(filtered.get_tree(("path-to-nta", "nt"))) == 0
+    assert len(filtered.get_tree(("path-to-nta", "na"))) == 0
+
+    filtered_ta = filtered.get_tree(("path-to-nta", "ta"))
+    assert len(filtered_ta) == 5
+    assert filtered_ta.attributes.pairs == {"ta0": (None, "TA 0")}
+    assert len(filtered_ta.table.rows) == 2
+    for row in (
+        {"ta0": (None, "TA 00"), "ta1": (None, "TA 01")},
+        {"ta0": (None, "TA 10"), "ta1": (None, "TA 11")},
+    ):
+        assert row in filtered_ta.table.rows
+
+
+@pytest.mark.parametrize(
+    "previous_pairs, current_pairs, result",
+    [
+        ({}, {}, (0, 0, 0)),
+        ({"k0": "v0"}, {"k0": "v0"}, (0, 0, 0)),
+        ({"k0": "v0"}, {}, (0, 0, 1)),
+        ({}, {"k0": "v0"}, (1, 0, 0)),
+        ({"k0": "v00"}, {"k0": "v01"}, (0, 1, 0)),
+        (
+            {
+                "k0": "v0",
+                "k1": "v1",
+            },
+            {"k1": "v1"},
+            (0, 0, 1),
+        ),
+        (
+            {"k1": "v1"},
+            {
+                "k0": "v0",
+                "k1": "v1",
+            },
+            (1, 0, 0),
+        ),
+        (
+            {
+                "k0": "v00",
+                "k1": "v1",
+            },
+            {
+                "k0": "v01",
+                "k1": "v1",
+            },
+            (0, 1, 0),
+        ),
+    ],
+)
+def test_difference_pairs(
+    previous_pairs: Mapping[str, str],
+    current_pairs: Mapping[str, str],
+    result: tuple[int, int, int],
+) -> None:
+    previous_tree = MutableTree()
+    previous_tree.add(path=(), pairs=[previous_pairs])
+
+    current_tree = MutableTree()
+    current_tree.add(path=(), pairs=[current_pairs])
+
+    stats = (
+        _make_immutable_tree(current_tree)
+        .difference(_make_immutable_tree(previous_tree))
+        .get_stats()
+    )
+    assert (stats["new"], stats["changed"], stats["removed"]) == result
+
+
+@pytest.mark.parametrize(
+    "previous_rows, current_rows, result",
+    [
+        ([], [], (0, 0, 0)),
+        ([{"id": "1", "val": 0}], [], (0, 0, 2)),
+        ([], [{"id": "1", "val": 0}], (2, 0, 0)),
+        ([{"id": "1", "val": 0}], [{"id": "1", "val": 0}], (0, 0, 0)),
+        ([{"id": "1", "val": 0}, {"id": "2", "val": 1}], [{"id": "1", "val": 0}], (0, 0, 2)),
+        ([{"id": "1", "val": 0}], [{"id": "1", "val": 0}, {"id": "2", "val": 1}], (2, 0, 0)),
+        ([{"id": "1", "val1": 1}], [{"id": "1", "val1": 1, "val2": 1}], (1, 0, 0)),
+        ([{"id": "1", "val": 0}], [{"id": "1", "val": 1}], (0, 1, 0)),
+        ([{"id": "1", "val1": 1, "val2": -1}], [{"id": "1", "val1": 1}], (0, 0, 1)),
+        (
+            [{"id": "1", "val1": 0}, {"id": "2", "val1": 0, "val2": 0}, {"id": "3", "val1": 0}],
+            [{"id": "1", "val1": 1}, {"id": "2", "val1": 0}, {"id": "3", "val1": 0, "val2": 1}],
+            (1, 1, 1),
+        ),
+        (
+            [{"id": "1", "val1": 1}, {"id": "2", "val1": 1}],
+            [{"id": "1", "val1": 1, "val2": -1}, {"id": "2", "val1": 1, "val2": -1}],
+            (2, 0, 0),
+        ),
+        (
+            [{"id": "1", "val": 1}, {"id": "2", "val": 3}],
+            [{"id": "1", "val": 2}, {"id": "2", "val": 4}],
+            (0, 2, 0),
+        ),
+        (
+            [{"id": "1", "val1": 1, "val2": -1}, {"id": "2", "val1": 1, "val2": -1}],
+            [{"id": "1", "val1": 1}, {"id": "2", "val1": 1}],
+            (0, 0, 2),
+        ),
+        (
+            [{"id": "2", "val": 1}, {"id": "3", "val": 3}, {"id": "1", "val": 0}],
+            [{"id": "2", "val": 2}, {"id": "1", "val": 0}, {"id": "3", "val": 4}],
+            (0, 2, 0),
+        ),
+        (
+            [{"id": "1", "val": 1}, {"id": "2", "val": 3}, {"id": "3", "val": 0}],
+            [
+                {"id": "0", "val": 2},
+                {"id": "1", "val": 0},
+                {"id": "2", "val": 4},
+                {"id": "3", "val": 1},
+            ],
+            (2, 3, 0),
+        ),
+    ],
+)
+def test_difference_rows(
+    previous_rows: Sequence[Mapping[str, str | int]],
+    current_rows: Sequence[Mapping[str, str | int]],
+    result: tuple[int, int, int],
+) -> None:
+    previous_tree = MutableTree()
+    previous_tree.add(path=(), key_columns=["id"], rows=previous_rows)
+
+    current_tree = MutableTree()
+    current_tree.add(path=(), key_columns=["id"], rows=current_rows)
+
+    delta_tree = _make_immutable_tree(current_tree).difference(_make_immutable_tree(previous_tree))
+    if any(result):
+        assert len(delta_tree) > 0
+    else:
+        assert len(delta_tree) == 0
+
+    stats = delta_tree.get_stats()
+    assert (stats["new"], stats["changed"], stats["removed"]) == result
+
+
+@pytest.mark.parametrize(
+    "previous_row, current_row, expected_keys",
+    [
+        ({}, {}, set()),
+        ({"id": "id", "val": "val"}, {"id": "id", "val": "val"}, set()),
+        ({"id": "id", "val": "val"}, {"id": "id"}, {"id", "val"}),
+        ({"id": "id"}, {"id": "id", "val": "val"}, {"id", "val"}),
+        ({"id": "id1", "val": "val"}, {"id": "id2", "val": "val"}, {"id", "val"}),
+    ],
+)
+def test_difference_rows_keys(
+    previous_row: dict[str, str],
+    current_row: dict[str, str],
+    expected_keys: set[str],
+) -> None:
+    previous_tree = MutableTree()
+    previous_tree.add(path=(), key_columns=["id"], rows=[previous_row])
+
+    current_tree = MutableTree()
+    current_tree.add(path=(), key_columns=["id"], rows=[current_row])
+
+    delta_tree = _make_immutable_tree(current_tree).difference(_make_immutable_tree(previous_tree))
+    assert {k for r in delta_tree.table.rows for k in r} == expected_keys
+
+
+def test_filter_tree_no_paths() -> None:
+    assert len(_create_filled_imm_tree().filter([])) == 0
+
+
+def test_filter_tree_wrong_node() -> None:
+    filled_root = _create_filled_imm_tree()
+    filters = [
+        SDFilterChoice(
+            path=("path-to-nta", "ta"),
+            pairs="all",
+            columns="all",
+            nodes="all",
+        ),
+    ]
+    filtered = filled_root.filter(filters)
+    assert len(filtered.get_tree(("path-to-nta", "na"))) == 0
+    assert len(filtered.get_tree(("path-to-nta", "nt"))) == 0
+    assert len(filtered.get_tree(("path-to-nta", "ta"))) == 6
+
+
+def test_filter_tree_paths_no_keys() -> None:
+    filled_root = _create_filled_imm_tree()
+    filters = [
+        SDFilterChoice(
+            path=("path-to-nta", "ta"),
+            pairs="all",
+            columns="all",
+            nodes="all",
+        ),
+    ]
+    filtered_root = filled_root.filter(filters)
+
+    assert filtered_root.get_attribute(("path-to-nta", "ta"), "ta0") == "TA 0"
+    assert filtered_root.get_attribute(("path-to-nta", "ta"), "ta1") == "TA 1"
+    assert filtered_root.get_attribute(("path-to-nta", "ta"), "foo") is None
+
+    rows = filtered_root.get_rows(("path-to-nta", "ta"))
+    assert len(rows) == 2
+    for row in [
+        {"ta0": "TA 00", "ta1": "TA 01"},
+        {"ta0": "TA 10", "ta1": "TA 11"},
+    ]:
+        assert row in rows
+
+
+def test_filter_tree_paths_and_keys() -> None:
+    filled_root = _create_filled_imm_tree()
+    filters = [
+        SDFilterChoice(
+            path=("path-to-nta", "ta"),
+            pairs=["ta1"],
+            columns=["ta1"],
+            nodes="all",
+        ),
+    ]
+    filtered_root = filled_root.filter(filters)
+
+    assert filtered_root.get_attribute(("path-to-nta", "ta"), "ta1") == "TA 1"
+    assert filtered_root.get_attribute(("path-to-nta", "ta"), "foo") is None
+
+    rows = filtered_root.get_rows(("path-to-nta", "ta"))
+    assert len(rows) == 2
+    for row in [
+        {"ta1": "TA 01"},
+        {"ta1": "TA 11"},
+    ]:
+        assert row in rows
+
+
+def test_filter_tree_mixed() -> None:
+    filled_root_ = _create_filled_mut_tree()
+    filled_root_.add(
+        path=("path-to", "another", "node1"),
+        pairs=[{"ak11": "Another value 11", "ak12": "Another value 12"}],
+    )
+    filled_root_.add(
+        path=("path-to", "another", "node2"),
+        key_columns=["ak21"],
+        rows=[
+            {
+                "ak21": "Another value 211",
+                "ak22": "Another value 212",
+            },
+            {
+                "ak21": "Another value 221",
+                "ak22": "Another value 222",
+            },
+        ],
+    )
+
+    filters = [
+        SDFilterChoice(
+            path=("path-to", "another"),
+            pairs="all",
+            columns="all",
+            nodes="all",
+        ),
+        SDFilterChoice(
+            path=("path-to-nta", "ta"),
+            pairs=["ta0"],
+            columns=["ta1"],
+            nodes="all",
+        ),
+    ]
+    filtered_root = _make_immutable_tree(filled_root_).filter(filters)
+
+    assert len(filtered_root) == 9
+    assert len(filtered_root.get_tree(("path-to-nta", "nt"))) == 0
+    assert len(filtered_root.get_tree(("path-to-nta", "na"))) == 0
+    assert len(filtered_root.get_tree(("path-to", "another", "node1"))) == 2
+    assert len(filtered_root.get_tree(("path-to", "another", "node2"))) == 4
+
+
+def _get_tree_store() -> TreeStore:
+    return TreeStore(Path("%s/tests/unit/cmk/utils/structured_data/tree_test_data" % cmk_path()))
+
+
+@pytest.mark.parametrize(
+    "tree_name",
+    [
+        HostName("tree_old_addresses_arrays_memory"),
+        HostName("tree_old_addresses"),
+        HostName("tree_old_arrays"),
+        HostName("tree_old_interfaces"),
+        HostName("tree_old_memory"),
+        HostName("tree_old_heute"),
+        HostName("tree_new_addresses_arrays_memory"),
+        HostName("tree_new_addresses"),
+        HostName("tree_new_arrays"),
+        HostName("tree_new_interfaces"),
+        HostName("tree_new_memory"),
+        HostName("tree_new_heute"),
+    ],
+)
+def test_load_from(tree_name: HostName) -> None:
+    _get_tree_store().load(host_name=tree_name)
+
+
+def test_save_tree(tmp_path: Path) -> None:
+    host_name = HostName("heute")
+    target = tmp_path / "inventory" / str(host_name)
+    tree = MutableTree()
+    tree.add(path=("path-to", "node"), pairs=[{"foo": 1, "bär": 2}])
+    tree_store = TreeStore(tmp_path / "inventory")
+    tree_store.save(host_name=host_name, tree=tree)
 
     assert target.exists()
 
-    gzip_filepath = target.with_suffix('.gz')
+    gzip_filepath = target.with_suffix(".gz")
     assert gzip_filepath.exists()
 
-    with gzip.open(str(gzip_filepath), 'rb') as f:
+    with gzip.open(str(gzip_filepath), "rb") as f:
         f.read()
 
 
-tree_old_addresses_arrays_memory = StructuredDataTree().load_from(
-    tree_name_old_addresses_arrays_memory)
-tree_old_addresses = StructuredDataTree().load_from(tree_name_old_addresses)
-tree_old_arrays = StructuredDataTree().load_from(tree_name_old_arrays)
-tree_old_interfaces = StructuredDataTree().load_from(tree_name_old_interfaces)
-tree_old_memory = StructuredDataTree().load_from(tree_name_old_memory)
-tree_old_heute = StructuredDataTree().load_from(tree_name_old_heute)
-
-tree_new_addresses_arrays_memory = StructuredDataTree().load_from(
-    tree_name_new_addresses_arrays_memory)
-tree_new_addresses = StructuredDataTree().load_from(tree_name_new_addresses)
-tree_new_arrays = StructuredDataTree().load_from(tree_name_new_arrays)
-tree_new_interfaces = StructuredDataTree().load_from(tree_name_new_interfaces)
-tree_new_memory = StructuredDataTree().load_from(tree_name_new_memory)
-tree_new_heute = StructuredDataTree().load_from(tree_name_new_heute)
-
-# Must have same order as tree_new
-trees_old = [
-    tree_old_addresses_arrays_memory,
-    tree_old_addresses,
-    tree_old_arrays,
-    tree_old_interfaces,
-    tree_old_memory,
-    tree_old_heute,
-]
-
-# Must have same order as tree_old
-trees_new = [
-    tree_new_addresses_arrays_memory,
-    tree_new_addresses,
-    tree_new_arrays,
-    tree_new_interfaces,
-    tree_new_memory,
-    tree_new_heute,
-]
-
-trees = trees_old + trees_new
+@pytest.mark.parametrize(
+    "tree_name",
+    [
+        HostName("tree_old_addresses_arrays_memory"),
+        HostName("tree_old_addresses"),
+        HostName("tree_old_arrays"),
+        HostName("tree_old_interfaces"),
+        HostName("tree_old_memory"),
+        HostName("tree_old_heute"),
+        HostName("tree_new_addresses_arrays_memory"),
+        HostName("tree_new_addresses"),
+        HostName("tree_new_arrays"),
+        HostName("tree_new_interfaces"),
+        HostName("tree_new_memory"),
+        HostName("tree_new_heute"),
+    ],
+)
+def test_load_real_tree(tree_name: HostName) -> None:
+    assert len(_get_tree_store().load(host_name=tree_name)) > 0
 
 
-def test_structured_data_StructuredDataTree_is_empty():
-    assert StructuredDataTree().is_empty() is True
+@pytest.mark.parametrize(
+    "tree_name_x",
+    [
+        HostName("tree_old_addresses_arrays_memory"),
+        HostName("tree_old_addresses"),
+        HostName("tree_old_arrays"),
+        HostName("tree_old_interfaces"),
+        HostName("tree_old_memory"),
+        HostName("tree_old_heute"),
+        HostName("tree_new_addresses_arrays_memory"),
+        HostName("tree_new_addresses"),
+        HostName("tree_new_arrays"),
+        HostName("tree_new_interfaces"),
+        HostName("tree_new_memory"),
+        HostName("tree_new_heute"),
+    ],
+)
+@pytest.mark.parametrize(
+    "tree_name_y",
+    [
+        HostName("tree_old_addresses_arrays_memory"),
+        HostName("tree_old_addresses"),
+        HostName("tree_old_arrays"),
+        HostName("tree_old_interfaces"),
+        HostName("tree_old_memory"),
+        HostName("tree_old_heute"),
+        HostName("tree_new_addresses_arrays_memory"),
+        HostName("tree_new_addresses"),
+        HostName("tree_new_arrays"),
+        HostName("tree_new_interfaces"),
+        HostName("tree_new_memory"),
+        HostName("tree_new_heute"),
+    ],
+)
+def test_real_tree_is_equal(tree_name_x: HostName, tree_name_y: HostName) -> None:
+    tree_store = _get_tree_store()
+    tree_x = tree_store.load(host_name=tree_name_x)
+    tree_y = tree_store.load(host_name=tree_name_y)
 
-
-@pytest.mark.parametrize("tree", trees)
-def test_structured_data_StructuredDataTree_is_empty_trees(tree):
-    assert not tree.is_empty()
-
-
-@pytest.mark.parametrize("tree_x", trees)
-@pytest.mark.parametrize("tree_y", trees)
-def test_structured_data_StructuredDataTree_is_equal(tree_x, tree_y):
-    if id(tree_x) == id(tree_y):
-        assert tree_x.is_equal(tree_y)
+    if tree_name_x == tree_name_y:
+        assert tree_x == tree_y
     else:
-        assert not tree_x.is_equal(tree_y)
+        assert tree_x != tree_y
 
 
-def test_structured_data_StructuredDataTree_equal_numerations():
-    tree_addresses_ordered = StructuredDataTree().load_from("%s/tree_addresses_ordered" % TEST_DIR)
-    tree_addresses_unordered = StructuredDataTree().load_from("%s/tree_addresses_unordered" %
-                                                              TEST_DIR)
-    assert tree_addresses_ordered.is_equal(tree_addresses_unordered)
-    assert tree_addresses_unordered.is_equal(tree_addresses_ordered)
+def test_real_tree_order() -> None:
+    tree_store = _get_tree_store()
+    tree_ordered = tree_store.load(host_name=HostName("tree_addresses_ordered"))
+    tree_unordered = tree_store.load(host_name=HostName("tree_addresses_unordered"))
+    assert tree_ordered == tree_unordered
 
 
-@pytest.mark.parametrize("tree", trees)
-def test_structured_data_StructuredDataTree_is_equal_save_and_load(tree, tmp_path):
+@pytest.mark.parametrize(
+    "tree_name",
+    [
+        HostName("tree_old_addresses_arrays_memory"),
+        HostName("tree_old_addresses"),
+        HostName("tree_old_arrays"),
+        HostName("tree_old_interfaces"),
+        HostName("tree_old_memory"),
+        HostName("tree_old_heute"),
+        HostName("tree_new_addresses_arrays_memory"),
+        HostName("tree_new_addresses"),
+        HostName("tree_new_arrays"),
+        HostName("tree_new_interfaces"),
+        HostName("tree_new_memory"),
+        HostName("tree_new_heute"),
+    ],
+)
+def test_save_and_load_real_tree(tree_name: HostName, tmp_path: Path) -> None:
+    orig_tree = _get_tree_store().load(host_name=tree_name)
+    tree_store = TreeStore(tmp_path / "inventory")
     try:
-        tree.save_to(str(tmp_path), "foo", False)
-        loaded_tree = StructuredDataTree().load_from(str(tmp_path / "foo"))
-        assert tree.is_equal(loaded_tree)
+        tree_store.save(host_name=HostName("foo"), tree=_make_mutable_tree(orig_tree))
+        loaded_tree = tree_store.load(host_name=HostName("foo"))
+        assert orig_tree == loaded_tree
     finally:
         shutil.rmtree(str(tmp_path))
 
 
-@pytest.mark.parametrize("tree,result",
-                         list(zip(trees, [
-                             21,
-                             9,
-                             10,
-                             6284,
-                             2,
-                             16654,
-                             23,
-                             8,
-                             10,
-                             6185,
-                             2,
-                             16653,
-                         ])))
-def test_structured_data_StructuredDataTree_count_entries(tree, result):
-    assert tree.count_entries() == result
-
-
-@pytest.mark.parametrize("tree", trees)
-def test_structured_data_StructuredDataTree_compare_with_self(tree):
-    new, changed, removed, _delta = tree.compare_with(tree)
-    assert (new, changed, removed) == (0, 0, 0)
-
-
-@pytest.mark.parametrize("tree_old,tree_new,result",
-                         list(
-                             zip(trees_old, trees_new, [
-                                 (2, 2, 1),
-                                 (0, 2, 1),
-                                 (1, 0, 1),
-                                 (2, 3, 16),
-                                 (1, 1, 1),
-                                 (1, 1, 2),
-                             ])))
-def test_structured_data_StructuredDataTree_compare_with(tree_old, tree_new, result):
-    new, changed, removed, _delta = tree_new.compare_with(tree_old)
-    assert (new, changed, removed) == result
-
-
-@pytest.mark.parametrize("tree,edges_t,edges_f",
-                         list(
-                             zip(trees_old, [
-                                 ["hardware", "networking"],
-                                 ["networking"],
-                                 ["hardware"],
-                                 ["hardware", "software", "networking"],
-                                 ["hardware"],
-                                 ["hardware", "software", "networking"],
-                             ], [
-                                 ["", "foobar", "software"],
-                                 ["", "foobar", "hardware", "software"],
-                                 ["", "foobar", "software", "networking"],
-                                 [
-                                     "",
-                                     "foobar",
-                                 ],
-                                 ["", "foobar", "software", "networking"],
-                                 [
-                                     "",
-                                     "foobar",
-                                 ],
-                             ])))
-def test_structured_data_StructuredDataTree_has_edge(tree, edges_t, edges_f):
-    for edge_t in edges_t:
-        assert tree.has_edge(edge_t)
-    for edge_f in edges_f:
-        assert not tree.has_edge(edge_f)
-
-
-@pytest.mark.parametrize("tree,len_children", list(zip(
-    trees_old,
-    [2, 1, 1, 4, 1, 4],
-)))
-def test_structured_data_StructuredDataTree_get_children(tree, len_children):
-    tree_children = tree._root._get_children()
-    for entry in tree_children:
-        assert len(entry) == 2
-    assert len(tree_children) == len_children
-
-
-@pytest.mark.parametrize("tree", trees)
-def test_structured_data_StructuredDataTree_copy(tree):
-    copied = tree.copy()
-    assert id(tree) != id(copied)
-    assert tree.is_equal(copied)
-
-
-@pytest.mark.parametrize("tree_start,tree_edges", [
-    (tree_old_addresses, [
-        (tree_old_arrays, ["hardware", "networking"], [
-            ("get_sub_attributes", ["hardware", "memory", "arrays", 0]),
-            ("get_sub_numeration", ["hardware", "memory", "arrays", 0, "devices"]),
-            ("get_sub_numeration", ["hardware", "memory", "arrays", 1, "others"]),
-        ]),
-        (tree_new_memory, ["hardware", "networking"], [
-            ("get_sub_attributes", ["hardware", "memory"]),
-        ]),
-        (tree_new_interfaces, ["hardware", "networking", "software"], [
-            ("get_sub_numeration", ["hardware", "components", "backplanes"]),
-            ("get_sub_numeration", ["hardware", "components", "chassis"]),
-            ("get_sub_numeration", ["hardware", "components", "containers"]),
-            ("get_sub_numeration", ["hardware", "components", "fans"]),
-            ("get_sub_numeration", ["hardware", "components", "modules"]),
-            ("get_sub_numeration", ["hardware", "components", "others"]),
-            ("get_sub_numeration", ["hardware", "components", "psus"]),
-            ("get_sub_numeration", ["hardware", "components", "sensors"]),
-            ("get_sub_attributes", ["hardware", "system"]),
-            ("get_sub_attributes", ["software", "applications", "check_mk", "cluster"]),
-            ("get_sub_attributes", ["software", "os"]),
-        ])
-    ]),
-])
-def test_structured_data_StructuredDataTree_merge_with_get_sub_children(tree_start, tree_edges):
-    tree_start = tree_start.copy()
-    for tree, edges, sub_children in tree_edges:
-        tree_start.merge_with(tree)
-        assert id(tree) == id(tree)
-        assert tree.is_equal(tree)
-        for edge in edges:
-            assert tree_start.has_edge(edge)
-        for m_name, path in sub_children:
-            m = getattr(tree_start, m_name)
-            assert m is not None
-            assert m(path) is not None
-
-
-TREE_INV = StructuredDataTree().load_from("%s/tree_inv" % TEST_DIR)
-TREE_STATUS = StructuredDataTree().load_from("%s/tree_status" % TEST_DIR)
-
-
-@pytest.mark.parametrize("tree_inv,tree_status", [
-    (TREE_INV, TREE_STATUS),
-])
-def test_structured_data_StructuredDataTree_merge_with_numeration(tree_inv, tree_status):
-    tree_inv.merge_with(tree_status)
-    assert 'foobar' in tree_inv.get_raw_tree()
-    num = tree_inv.get_sub_numeration(['foobar'])
-    assert len(num.get_child_data()) == 5
-
-
-@pytest.mark.parametrize("tree", trees)
-def test_structured_data_StructuredDataTree_get_root_container(tree):
-    assert id(tree.get_root_container()) == id(tree._root)
+@pytest.mark.parametrize(
+    "tree_name, result",
+    [
+        (HostName("tree_old_addresses_arrays_memory"), 21),
+        (HostName("tree_old_addresses"), 9),
+        (HostName("tree_old_arrays"), 10),
+        (HostName("tree_old_interfaces"), 6284),
+        (HostName("tree_old_memory"), 2),
+        (HostName("tree_old_heute"), 16654),
+        (HostName("tree_new_addresses_arrays_memory"), 23),
+        (HostName("tree_new_addresses"), 8),
+        (HostName("tree_new_arrays"), 10),
+        (HostName("tree_new_interfaces"), 6185),
+        (HostName("tree_new_memory"), 2),
+        (HostName("tree_new_heute"), 16653),
+    ],
+)
+def test_count_entries(tree_name: HostName, result: int) -> None:
+    assert len(_get_tree_store().load(host_name=tree_name)) == result
 
 
 @pytest.mark.parametrize(
-    "tree,paths,unavail",
+    "tree_name",
+    [
+        HostName("tree_old_addresses_arrays_memory"),
+        HostName("tree_old_addresses"),
+        HostName("tree_old_arrays"),
+        HostName("tree_old_interfaces"),
+        HostName("tree_old_memory"),
+        HostName("tree_old_heute"),
+        HostName("tree_new_addresses_arrays_memory"),
+        HostName("tree_new_addresses"),
+        HostName("tree_new_arrays"),
+        HostName("tree_new_interfaces"),
+        HostName("tree_new_memory"),
+        HostName("tree_new_heute"),
+    ],
+)
+def test_compare_real_tree_with_itself(tree_name: HostName) -> None:
+    tree = _get_tree_store().load(host_name=tree_name)
+    stats = tree.difference(tree).get_stats()
+    assert (stats["new"], stats["changed"], stats["removed"]) == (0, 0, 0)
+
+
+@pytest.mark.parametrize(
+    "tree_name_old, tree_name_new, result",
     [
         (
-            tree_new_interfaces,
-            # container                   numeration                    attributes
-            [(["hardware", "components"], None), (["networking", "interfaces"], None),
-             (["software", "os"], None)],
-            [["hardware", "system"], ["software", "applications"]]),
-    ])
-def test_structured_data_StructuredDataTree_filtered_tree(tree, paths, unavail):
-    filtered = tree.get_filtered_tree(paths)
+            HostName("tree_old_addresses_arrays_memory"),
+            HostName("tree_new_addresses_arrays_memory"),
+            (3, 2, 1),
+        ),
+        (
+            HostName("tree_old_addresses"),
+            HostName("tree_new_addresses"),
+            (5, 0, 6),
+        ),
+        (
+            HostName("tree_old_arrays"),
+            HostName("tree_new_arrays"),
+            (2, 0, 2),
+        ),
+        (
+            HostName("tree_old_interfaces"),
+            HostName("tree_new_interfaces"),
+            (17, 0, 116),
+        ),
+        (
+            HostName("tree_old_memory"),
+            HostName("tree_new_memory"),
+            (1, 1, 1),
+        ),
+        (
+            HostName("tree_old_heute"),
+            HostName("tree_new_heute"),
+            (1, 1, 2),
+        ),
+    ],
+)
+def test_compare_real_trees(
+    tree_name_old: HostName, tree_name_new: HostName, result: tuple[int, int, int]
+) -> None:
+    tree_store = _get_tree_store()
+    old_tree = tree_store.load(host_name=tree_name_old)
+    new_tree = tree_store.load(host_name=tree_name_new)
+    stats = new_tree.difference(old_tree).get_stats()
+    assert (stats["new"], stats["changed"], stats["removed"]) == result
+
+
+@pytest.mark.parametrize(
+    "tree_name, edges_t, edges_f",
+    [
+        (
+            HostName("tree_old_addresses_arrays_memory"),
+            ["hardware", "networking"],
+            ["", "foobar", "software"],
+        ),
+        (
+            HostName("tree_old_addresses"),
+            ["networking"],
+            ["", "foobar", "hardware", "software"],
+        ),
+        (
+            HostName("tree_old_arrays"),
+            ["hardware"],
+            ["", "foobar", "software", "networking"],
+        ),
+        (
+            HostName("tree_old_interfaces"),
+            ["hardware", "software", "networking"],
+            ["", "foobar"],
+        ),
+        (
+            HostName("tree_old_memory"),
+            ["hardware"],
+            ["", "foobar", "software", "networking"],
+        ),
+        (
+            HostName("tree_old_heute"),
+            ["hardware", "software", "networking"],
+            ["", "foobar"],
+        ),
+    ],
+)
+def test_get_node(
+    tree_name: HostName, edges_t: Iterable[SDNodeName], edges_f: Iterable[SDNodeName]
+) -> None:
+    tree = _get_tree_store().load(host_name=tree_name)
+    for edge_t in edges_t:
+        assert len(tree.get_tree((edge_t,))) > 0
+    for edge_f in edges_f:
+        assert len(tree.get_tree((edge_f,))) == 0
+
+
+@pytest.mark.parametrize(
+    "tree_name, amount_of_nodes",
+    [
+        (HostName("tree_old_addresses_arrays_memory"), 2),
+        (HostName("tree_old_addresses"), 1),
+        (HostName("tree_old_arrays"), 1),
+        (HostName("tree_old_interfaces"), 3),
+        (HostName("tree_old_memory"), 1),
+        (HostName("tree_old_heute"), 3),
+    ],
+)
+def test_amount_of_nodes(tree_name: HostName, amount_of_nodes: int) -> None:
+    tree = _get_tree_store().load(host_name=tree_name)
+    assert len(list(tree.nodes_by_name.values())) == amount_of_nodes
+
+
+@pytest.mark.parametrize(
+    "tree_name, edges, sub_children",
+    [
+        (
+            HostName("tree_old_arrays"),
+            ["hardware", "networking"],
+            [
+                ("get_attributes", ["hardware", "memory", "arrays", "0"]),
+                ("get_table", ["hardware", "memory", "arrays", "0", "devices"]),
+                ("get_table", ["hardware", "memory", "arrays", "1", "others"]),
+            ],
+        ),
+        (
+            HostName("tree_new_memory"),
+            ["hardware", "networking"],
+            [
+                ("get_attributes", ["hardware", "memory"]),
+            ],
+        ),
+        (
+            HostName("tree_new_interfaces"),
+            ["hardware", "networking", "software"],
+            [
+                ("get_table", ["hardware", "components", "backplanes"]),
+                ("get_table", ["hardware", "components", "chassis"]),
+                ("get_table", ["hardware", "components", "containers"]),
+                ("get_table", ["hardware", "components", "fans"]),
+                ("get_table", ["hardware", "components", "modules"]),
+                ("get_table", ["hardware", "components", "others"]),
+                ("get_table", ["hardware", "components", "psus"]),
+                ("get_table", ["hardware", "components", "sensors"]),
+                ("get_attributes", ["hardware", "system"]),
+                ("get_attributes", ["software", "applications", "check_mk", "cluster"]),
+                ("get_attributes", ["software", "os"]),
+            ],
+        ),
+    ],
+)
+def test_merge_trees_1(
+    tree_name: HostName, edges: Sequence[str], sub_children: Sequence[tuple[str, Sequence[str]]]
+) -> None:
+    tree_store = _get_tree_store()
+    tree = tree_store.load(host_name=HostName("tree_old_addresses")).merge(
+        tree_store.load(host_name=tree_name)
+    )
+
+    for edge in edges:
+        assert bool(tree.get_tree((edge,)))
+
+    for m_name, path in sub_children:
+        if m_name == "get_attributes":
+            assert len(tree.get_tree(tuple(path)).attributes) > 0
+        elif m_name == "get_table":
+            assert len(tree.get_tree(tuple(path)).table) > 0
+
+
+def test_merge_trees_2() -> None:
+    tree_store = _get_tree_store()
+    inventory_tree = tree_store.load(host_name=HostName("tree_inv"))
+    status_data_tree = tree_store.load(host_name=HostName("tree_status"))
+    tree = inventory_tree.merge(status_data_tree)
+    assert "foobar" in tree.serialize()["Nodes"]
+    table = tree.get_tree(("foobar",)).table
+    assert len(table) == 19
+    assert len(table.rows) == 5
+
+
+@pytest.mark.parametrize(
+    "filters, unavail",
+    [
+        (
+            # container                   table                    attributes
+            [
+                SDFilterChoice(
+                    path=("hardware", "components"),
+                    pairs="all",
+                    columns="all",
+                    nodes="all",
+                ),
+                SDFilterChoice(
+                    path=("networking", "interfaces"),
+                    pairs="all",
+                    columns="all",
+                    nodes="all",
+                ),
+                SDFilterChoice(
+                    path=("software", "os"),
+                    pairs="all",
+                    columns="all",
+                    nodes="all",
+                ),
+            ],
+            [("hardware", "system"), ("software", "applications")],
+        ),
+    ],
+)
+def test_filter_real_tree(
+    filters: Sequence[SDFilterChoice],
+    unavail: Sequence[tuple[str, str]],
+) -> None:
+    tree = _get_tree_store().load(host_name=HostName("tree_new_interfaces"))
+    filtered = tree.filter(filters)
     assert id(tree) != id(filtered)
-    assert not tree.is_equal(filtered)
+    assert tree != filtered
     for path in unavail:
-        assert filtered.get_sub_container(path) is None
+        assert len(filtered.get_tree(path)) == 0
 
 
-@pytest.mark.parametrize("tree,paths,node_types,amount_if_entries", [
-    (tree_new_interfaces, [(['networking'], None)], [Container, Attributes], 3178),
-    (tree_new_interfaces, [(['networking'], [])], [Attributes], None),
-    (tree_new_interfaces, [
-        (['networking'], ['total_interfaces', 'total_ethernet_ports', 'available_ethernet_ports'])
-    ], [Attributes], None),
-    (tree_new_interfaces, [(['networking', 'interfaces'], None)], [Container], 3178),
-    (tree_new_interfaces, [(['networking', 'interfaces'], [])], [Container], 3178),
-    (tree_new_interfaces, [(['networking', 'interfaces'], ['admin_status'])], [Container], 326),
-    (tree_new_interfaces, [(['networking', 'interfaces'], ['admin_status', 'FOOBAR'])], [Container
-                                                                                        ], 326),
-    (tree_new_interfaces, [(['networking', 'interfaces'], ['admin_status', 'oper_status'])
-                          ], [Container], 652),
-    (tree_new_interfaces, [(['networking', 'interfaces'], ['admin_status', 'oper_status', 'FOOBAR'])
-                          ], [Container], 652),
-])
-def test_structured_data_StructuredDataTree_filtered_tree_networking(tree, paths, node_types,
-                                                                     amount_if_entries):
-    the_paths = list(paths)
-    filtered = tree.get_filtered_tree(paths)
-    assert the_paths == paths
-    assert filtered.has_edge('networking')
-    assert not filtered.has_edge('hardware')
-    assert not filtered.has_edge('software')
+@pytest.mark.parametrize(
+    "filters, amount_if_entries",
+    [
+        (
+            [
+                SDFilterChoice(
+                    path=("networking",),
+                    pairs="all",
+                    columns="all",
+                    nodes="all",
+                )
+            ],
+            3178,
+        ),
+        (
+            [
+                SDFilterChoice(
+                    path=("networking",),
+                    pairs=(
+                        ["total_interfaces", "total_ethernet_ports", "available_ethernet_ports"]
+                    ),
+                    columns=(
+                        ["total_interfaces", "total_ethernet_ports", "available_ethernet_ports"]
+                    ),
+                    nodes="nothing",
+                ),
+            ],
+            None,
+        ),
+        (
+            [
+                SDFilterChoice(
+                    path=("networking", "interfaces"),
+                    pairs="all",
+                    columns="all",
+                    nodes="all",
+                ),
+            ],
+            3178,
+        ),
+        (
+            [
+                SDFilterChoice(
+                    path=("networking", "interfaces"),
+                    pairs=["admin_status"],
+                    columns=["admin_status"],
+                    nodes="nothing",
+                ),
+            ],
+            326,
+        ),
+        (
+            [
+                SDFilterChoice(
+                    path=("networking", "interfaces"),
+                    pairs=["admin_status", "FOOBAR"],
+                    columns=["admin_status", "FOOBAR"],
+                    nodes="nothing",
+                ),
+            ],
+            326,
+        ),
+        (
+            [
+                SDFilterChoice(
+                    path=("networking", "interfaces"),
+                    pairs=["admin_status", "oper_status"],
+                    columns=["admin_status", "oper_status"],
+                    nodes="nothing",
+                ),
+            ],
+            652,
+        ),
+        (
+            [
+                SDFilterChoice(
+                    path=("networking", "interfaces"),
+                    pairs=["admin_status", "oper_status", "FOOBAR"],
+                    columns=["admin_status", "oper_status", "FOOBAR"],
+                    nodes="nothing",
+                ),
+            ],
+            652,
+        ),
+    ],
+)
+def test_filter_networking_tree(
+    filters: Sequence[SDFilterChoice],
+    amount_if_entries: int,
+) -> None:
+    tree = _get_tree_store().load(host_name=HostName("tree_new_interfaces"))
+    filtered = tree.filter(filters)
+    assert len(filtered.get_tree(("networking",))) > 0
+    assert len(filtered.get_tree(("hardware",))) == 0
+    assert len(filtered.get_tree(("software",))) == 0
 
-    children = filtered.get_sub_children(['networking'])
-    assert len(children) == len(node_types)
-    for child in children:
-        assert type(child) in node_types  # pylint: disable=unidiomatic-typecheck
-
-    interfaces = filtered.get_sub_numeration(['networking', 'interfaces'])
-    if Container in node_types:
-        assert bool(interfaces)
-        assert interfaces.count_entries() == amount_if_entries
-    else:
-        assert interfaces is None
+    if amount_if_entries is not None:
+        interfaces = filtered.get_tree(("networking", "interfaces"))
+        assert len(interfaces) == amount_if_entries
 
 
-def test_structured_data_StructuredDataTree_building_tree():
-    def plugin_dict():
-        node = struct_tree.get_dict("level0_0.level1_dict.")
-        for a, b in [("d1", "D1"), ("d2", "D2")]:
-            node.setdefault(a, b)
-
-    def plugin_list():
-        node = struct_tree.get_list("level0_1.level1_list:")
-        for a, b in [("l1", "L1"), ("l2", "L2")]:
-            node.append({a: b})
-
-    def plugin_nested_list():
-        node = struct_tree.get_list("level0_2.level1_nested_list:")
-        for index in range(10):
-            array: Dict[str, List[Dict[str, str]]] = {"foo": []}
-            for a, b in [("nl1", "NL1"), ("nl2", "NL2")]:
-                array["foo"].append({a: "%s-%s" % (b, index)})
-            node.append(array)
-
-    struct_tree = StructuredDataTree()
-    plugin_dict()
-    plugin_list()
-    plugin_nested_list()
-    struct_tree.normalize_nodes()
-
-    assert struct_tree.has_edge("level0_0")
-    assert struct_tree.has_edge("level0_1")
-    assert struct_tree.has_edge("level0_2")
-    assert not struct_tree.has_edge("foobar")
-
-    level1_dict = struct_tree.get_sub_attributes(["level0_0", "level1_dict"])
-    level1_list = struct_tree.get_sub_numeration(["level0_1", "level1_list"])
-    level1_nested_list_con = struct_tree.get_sub_container(["level0_2", "level1_nested_list"])
-    level1_nested_list_num = struct_tree.get_sub_numeration(["level0_2", "level1_nested_list"])
-    level1_nested_list_att = struct_tree.get_sub_attributes(["level0_2", "level1_nested_list"])
-
-    assert isinstance(level1_dict, Attributes)
-    assert 'd1' in level1_dict.get_child_data()
-    assert 'd2' in level1_dict.get_child_data()
-
-    assert isinstance(level1_list, Numeration)
-    known_keys = [key for row in level1_list.get_child_data() for key in row]
-    assert 'l1' in known_keys
-    assert 'l2' in known_keys
-    assert level1_nested_list_num is None
-    assert level1_nested_list_att is None
-
-    assert isinstance(level1_nested_list_con, Container)
-    assert list(level1_nested_list_con._nodes) == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+def test_filter_networking_tree_empty() -> None:
+    tree = _get_tree_store().load(host_name=HostName("tree_new_interfaces"))
+    filtered = tree.filter(
+        [
+            SDFilterChoice(
+                path=("networking",),
+                pairs="nothing",
+                columns="nothing",
+                nodes="nothing",
+            ),
+        ]
+    )
+    assert len(filtered.get_tree(("networking",))) == 0
+    assert len(filtered.get_tree(("hardware",))) == 0
+    assert len(filtered.get_tree(("software",))) == 0
 
 
-@pytest.mark.parametrize("zipped_trees", list(zip(old_trees, new_trees)))
-def test_delta_structured_data_tree_serialization(zipped_trees):
-    old_tree = StructuredDataTree()
-    new_tree = StructuredDataTree()
+@pytest.mark.parametrize(
+    "raw_path, expected_path",
+    [
+        ("", tuple()),
+        ("path-to.node_1", ("path-to", "node_1")),
+    ],
+)
+def test_parse_visible_tree_path(raw_path: str, expected_path: SDPath) -> None:
+    assert parse_visible_raw_path(raw_path) == expected_path
 
-    old_filename, new_filename = zipped_trees
 
-    old_tree.load_from(old_filename)
-    new_tree.load_from(new_filename)
-    _, __, ___, delta_tree = old_tree.compare_with(new_tree)
+def test_legacy_tree() -> None:
+    raw_tree = {
+        "path-to": {
+            "idx-node": [
+                {
+                    "idx-attr": "value",
+                    "idx-enum": ["v1", 1.0, 2, None],
+                    "idx-table": [{"idx-col": "value"}],
+                    "idx-sub-node": {
+                        "foo-node": {
+                            "foo-attr": "value",
+                        },
+                    },
+                    "idx-sub-idx-node": [
+                        {
+                            "bar-node": {
+                                "bar-attr": "value",
+                            },
+                        },
+                    ],
+                },
+            ],
+            "node": {"attr": "value"},
+            "table": [{"col": "value"}],
+        },
+    }
+    # Object structure:
+    # {
+    #     'path-to': {
+    #         'idx-node': {
+    #             '0': {
+    #                 'idx-attr': 'value',
+    #                 'idx-sub-idx-node': {
+    #                     '0': {
+    #                         'bar-node': {
+    #                             'bar-attr': 'value'
+    #                         }
+    #                     }
+    #                 },
+    #                 'idx-sub-node': {
+    #                     'foo-node': {
+    #                         'foo-attr': 'value'
+    #                     }
+    #                 },
+    #                 'idx-table': [{
+    #                     'idx-col': 'value'
+    #                 }]
+    #             }
+    #         },
+    #         'node': {
+    #             'attr': 'value'
+    #         },
+    #         'table': [{
+    #             'col': 'value'
+    #         }]
+    #     }
+    # }
 
-    new_delta_tree = StructuredDataTree()
-    new_delta_tree.create_tree_from_raw_tree(delta_tree.get_raw_tree())
+    tree = ImmutableTree.deserialize(raw_tree)
 
-    assert delta_tree.is_equal(new_delta_tree)
+    idx_node_attr = tree.get_tree(("path-to", "idx-node", "0"))
+    assert len(idx_node_attr) > 0
+    assert idx_node_attr.attributes.pairs == {"idx-attr": "value", "idx-enum": "v1, 1.0, 2"}
+    assert not idx_node_attr.table.rows_by_ident
+    assert not idx_node_attr.table.rows
+
+    idx_sub_idx_node_attr = tree.get_tree(
+        ("path-to", "idx-node", "0", "idx-sub-idx-node", "0", "bar-node")
+    )
+    assert len(idx_sub_idx_node_attr) > 0
+    assert idx_sub_idx_node_attr.attributes.pairs == {"bar-attr": "value"}
+    assert not idx_sub_idx_node_attr.table.rows_by_ident
+    assert not idx_sub_idx_node_attr.table.rows
+
+    idx_sub_node_attr = tree.get_tree(("path-to", "idx-node", "0", "idx-sub-node", "foo-node"))
+    assert len(idx_sub_node_attr) > 0
+    assert idx_sub_node_attr.attributes.pairs == {"foo-attr": "value"}
+    assert not idx_sub_node_attr.table.rows_by_ident
+    assert not idx_sub_node_attr.table.rows
+
+    idx_table = tree.get_tree(("path-to", "idx-node", "0", "idx-table"))
+    assert len(idx_table) > 0
+    assert not idx_table.attributes.pairs
+    assert idx_table.table.rows_by_ident == {("value",): {"idx-col": "value"}}
+    assert idx_table.table.rows == [{"idx-col": "value"}]
+
+    attr_node = tree.get_tree(("path-to", "node"))
+    assert len(attr_node) > 0
+    assert attr_node.attributes.pairs == {"attr": "value"}
+    assert not attr_node.table.rows_by_ident
+    assert not attr_node.table.rows
+
+    table_node = tree.get_tree(("path-to", "table"))
+    assert len(table_node) > 0
+    assert not table_node.attributes.pairs
+    assert table_node.table.rows_by_ident == {("value",): {"col": "value"}}
+    assert table_node.table.rows == [{"col": "value"}]
+
+
+def test_update_from_previous_1() -> None:
+    previous_tree = ImmutableTree.deserialize(
+        {
+            "Attributes": {},
+            "Table": {
+                "KeyColumns": ["kc"],
+                "Rows": [{"kc": "KC", "c1": "C1: prev C1", "c2": "C2: only prev"}],
+                "Retentions": {("KC",): {"c1": (1, 2, 3), "c2": (1, 2, 3)}},
+            },
+            "Nodes": {},
+        }
+    )
+    current_tree_ = MutableTree()
+    current_tree_.add(
+        path=(),
+        key_columns=["kc"],
+        rows=[
+            {"kc": "KC", "c1": "C1: cur", "c3": "C3: only cur"},
+        ],
+    )
+    choices = SDRetentionFilterChoices(path=(), interval=6)
+    choices.add_columns_choice(choice="all", cache_info=(4, 5))
+
+    update_result = UpdateResult()
+    current_tree_.update(
+        now=0,
+        previous_tree=previous_tree,
+        choices=choices,
+        update_result=update_result,
+    )
+    assert bool(update_result)
+
+    current_tree = _make_immutable_tree(current_tree_)
+    assert current_tree.table.key_columns == ["kc"]
+    assert current_tree.table.retentions == {
+        ("KC",): {
+            "c1": _RetentionInterval(4, 5, 6, "current"),
+            "c2": _RetentionInterval(1, 2, 3, "previous"),
+            "c3": _RetentionInterval(4, 5, 6, "current"),
+            "kc": _RetentionInterval(4, 5, 6, "current"),
+        }
+    }
+    assert current_tree.get_rows(()) == [
+        {"c1": "C1: cur", "c2": "C2: only prev", "c3": "C3: only cur", "kc": "KC"}
+    ]
+
+
+def test_update_from_previous_2() -> None:
+    previous_tree = ImmutableTree.deserialize(
+        {
+            "Attributes": {},
+            "Table": {
+                "KeyColumns": ["kc"],
+                "Rows": [{"kc": "KC", "c1": "C1: prev C1", "c2": "C2: only prev"}],
+                "Retentions": {("KC",): {"c1": (1, 2, 3), "c2": (1, 2, 3)}},
+            },
+            "Nodes": {},
+        }
+    )
+    current_tree_ = MutableTree()
+    current_tree_.add(
+        path=(),
+        key_columns=["kc"],
+        rows=[
+            {"kc": "KC", "c3": "C3: only cur"},
+        ],
+    )
+    choices = SDRetentionFilterChoices(path=(), interval=6)
+    choices.add_columns_choice(choice=["c2", "c3"], cache_info=(4, 5))
+
+    update_result = UpdateResult()
+    current_tree_.update(
+        now=0,
+        previous_tree=previous_tree,
+        choices=choices,
+        update_result=update_result,
+    )
+    assert bool(update_result)
+
+    current_tree = _make_immutable_tree(current_tree_)
+    assert current_tree.table.key_columns == ["kc"]
+    assert current_tree.table.retentions == {
+        ("KC",): {
+            "c2": _RetentionInterval(1, 2, 3, "previous"),
+            "c3": _RetentionInterval(4, 5, 6, "current"),
+        }
+    }
+    assert current_tree.get_rows(()) == [{"c2": "C2: only prev", "c3": "C3: only cur", "kc": "KC"}]
+
+
+@pytest.mark.parametrize(
+    "raw_retention_interval, expected_retention_interval",
+    [
+        ((1, 2, 3), _RetentionInterval(1, 2, 3, "current")),
+        ((4, 5, 6, "previous"), _RetentionInterval(4, 5, 6, "previous")),
+        ((7, 8, 9, "current"), _RetentionInterval(7, 8, 9, "current")),
+    ],
+)
+def test_deserialize_retention_interval(
+    raw_retention_interval: tuple[int, int, int]
+    | tuple[int, int, int, Literal["previous", "current"]],
+    expected_retention_interval: _RetentionInterval,
+) -> None:
+    assert _RetentionInterval.deserialize(raw_retention_interval) == expected_retention_interval
+
+
+@pytest.mark.parametrize(
+    "retention_interval, expected_raw_retention_interval",
+    [
+        (_RetentionInterval(1, 2, 3, "previous"), (1, 2, 3, "previous")),
+        (_RetentionInterval(4, 5, 6, "current"), (4, 5, 6, "current")),
+    ],
+)
+def test_serialize_retention_interval(
+    retention_interval: _RetentionInterval,
+    expected_raw_retention_interval: tuple[int, int, int, Literal["previous", "current"]],
+) -> None:
+    assert retention_interval.serialize() == expected_raw_retention_interval

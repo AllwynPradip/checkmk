@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """
@@ -44,8 +43,8 @@ the check function is called.
 
 """
 
-from ._utils import ValueStoreManager
 from ._global_state import get_value_store, load_host_value_store
+from ._utils import ValueStoreManager
 
 __all__ = [
     "get_value_store",

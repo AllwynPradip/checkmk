@@ -1,16 +1,27 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import NamedTuple, Mapping, List, Any, Dict, Final
+from collections.abc import Mapping
+from typing import Any, Final, NamedTuple
 
+from .agent_based_api.v1 import (
+    all_of,
+    check_levels,
+    Metric,
+    not_matches,
+    OIDEnd,
+    register,
+    render,
+    Result,
+    Service,
+    SNMPTree,
+    State,
+)
+from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult, StringTable
 from .utils.constants import OID_SYS_OBJ
 from .utils.printer import DETECT_PRINTER
-from .agent_based_api.v1.type_defs import DiscoveryResult, CheckResult, StringTable
-from .agent_based_api.v1 import (all_of, not_matches, check_levels, register, Result, Service,
-                                 State, render, SNMPTree, OIDEnd, Metric)
 
 MAP_UNIT: Final = {
     "3": "ten thousandths of inches",
@@ -37,7 +48,7 @@ class PrinterSupply(NamedTuple):
     color: str
 
 
-Section = Dict[str, PrinterSupply]
+Section = dict[str, PrinterSupply]
 
 
 def _get_oid_end_last_index(oid_end: str) -> str:
@@ -50,7 +61,7 @@ def get_unit(unit_info: str) -> str:
     return unit if unit in ("", "%") else f" {unit}"
 
 
-def parse_printer_supply(string_table: List[StringTable]) -> Section:
+def parse_printer_supply(string_table: list[StringTable]) -> Section:
     if len(string_table) < 2:
         return {}
 
@@ -59,9 +70,9 @@ def parse_printer_supply(string_table: List[StringTable]) -> Section:
 
     color_mapping = {_get_oid_end_last_index(oid_end): value for oid_end, value in string_table[0]}
 
-    for index, (name, unit_info, raw_max_capacity, raw_level, supply_class,
-                color_id) in enumerate(string_table[1]):
-
+    for index, (name, unit_info, raw_max_capacity, raw_level, supply_class, color_id) in enumerate(
+        string_table[1]
+    ):
         try:
             max_capacity = int(raw_max_capacity)
             level = int(raw_level)
@@ -84,7 +95,7 @@ def parse_printer_supply(string_table: List[StringTable]) -> Section:
             elif color == "" and colors:
                 color = colors[index - len(colors)]
             if color:
-                name = "%s %s" % (color.title(), name)
+                name = f"{color.title()} {name}"
 
         # fix trailing zero bytes (seen on HP Jetdirect 143 and 153)
         description = name.split(" S/N:")[0].strip("\0")
@@ -106,7 +117,8 @@ register.snmp_section(
             oids=[
                 OIDEnd(),
                 "4",  # Printer-MIB::prtMarkerColorantValue
-            ]),
+            ],
+        ),
         SNMPTree(
             base=".1.3.6.1.2.1.43.11.1.1",
             oids=[
@@ -116,7 +128,8 @@ register.snmp_section(
                 "9",  # Printer-MIB::prtMarkerSuppliesLevel
                 "4",  # Printer-MIB::prtMarkerSuppliesClass
                 "3",  # Printer-MIB:prtMarkerSuppliesColorantIndex
-            ]),
+            ],
+        ),
     ],
 )
 
@@ -140,17 +153,20 @@ def check_printer_supply(item: str, params: Mapping[str, Any], section: Section)
     # handle cases with partial data
     if supply.max_capacity == -2 or supply.level in [-3, -2, -1]:  # no percentage possible
         if supply.level == -1 or supply.max_capacity == -1:
-            yield Result(state=State.OK,
-                         summary="%sThere are no restrictions on this supply" % color_info)
+            yield Result(
+                state=State.OK, summary="%sThere are no restrictions on this supply" % color_info
+            )
             return
         if supply.level == -3:
-            yield Result(state=State(params["some_remaining"]),
-                         summary="%sSome remaining" % color_info)
-            yield Metric("pages",
-                         supply.level,
-                         levels=(0.01 * warn * supply.max_capacity,
-                                 0.01 * crit * supply.max_capacity),
-                         boundaries=(0, supply.max_capacity))
+            yield Result(
+                state=State(params["some_remaining"]), summary="%sSome remaining" % color_info
+            )
+            yield Metric(
+                "pages",
+                supply.level,
+                levels=(0.01 * warn * supply.max_capacity, 0.01 * crit * supply.max_capacity),
+                boundaries=(0, supply.max_capacity),
+            )
             return
         if supply.level == -2:
             yield Result(state=State.UNKNOWN, summary="%s Unknown level" % color_info)
@@ -178,17 +194,21 @@ def check_printer_supply(item: str, params: Mapping[str, Any], section: Section)
     if params["upturn_toner"]:
         leftperc = 100 - leftperc
 
-    yield from check_levels(leftperc,
-                            levels_lower=(warn, crit),
-                            label=f"{color_info}Remaining",
-                            render_func=render.percent)
+    yield from check_levels(
+        leftperc,
+        levels_lower=(warn, crit),
+        label=f"{color_info}Remaining",
+        render_func=render.percent,
+    )
 
     summary = f"Supply: {supply.level} of max. {supply.max_capacity}{supply.unit}"
     yield Result(state=State.OK, summary=summary)
-    yield Metric("pages",
-                 supply.level,
-                 levels=(0.01 * warn * supply.max_capacity, 0.01 * crit * supply.max_capacity),
-                 boundaries=(0, supply.max_capacity))
+    yield Metric(
+        "pages",
+        supply.level,
+        levels=(0.01 * warn * supply.max_capacity, 0.01 * crit * supply.max_capacity),
+        boundaries=(0, supply.max_capacity),
+    )
 
 
 register.check_plugin(
@@ -197,9 +217,5 @@ register.check_plugin(
     discovery_function=discovery_printer_supply,
     check_function=check_printer_supply,
     check_ruleset_name="printer_supply",
-    check_default_parameters={
-        "levels": (20.0, 10.0),
-        "upturn_toner": False,
-        "some_remaining": 1
-    },
+    check_default_parameters={"levels": (20.0, 10.0), "upturn_toner": False, "some_remaining": 1},
 )

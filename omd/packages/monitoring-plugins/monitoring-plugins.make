@@ -1,39 +1,37 @@
 MONITORING_PLUGINS := monitoring-plugins
-MONITORING_PLUGINS_VERS := 2.3.1
-MONITORING_PLUGINS_DIR := $(MONITORING_PLUGINS)-$(MONITORING_PLUGINS_VERS)
 
-MONITORING_PLUGINS_PATCHING := $(BUILD_HELPER_DIR)/$(MONITORING_PLUGINS_DIR)-patching
-MONITORING_PLUGINS_BUILD := $(BUILD_HELPER_DIR)/$(MONITORING_PLUGINS_DIR)-build
-MONITORING_PLUGINS_INSTALL := $(BUILD_HELPER_DIR)/$(MONITORING_PLUGINS_DIR)-install
+MONITORING_PLUGINS_INSTALL := $(BUILD_HELPER_DIR)/$(MONITORING_PLUGINS)-install
 
-#MONITORING_PLUGINS_INSTALL_DIR := $(INTERMEDIATE_INSTALL_BASE)/$(MONITORING_PLUGINS_DIR)
-MONITORING_PLUGINS_BUILD_DIR := $(PACKAGE_BUILD_DIR)/$(MONITORING_PLUGINS_DIR)
-#MONITORING_PLUGINS_WORK_DIR := $(PACKAGE_WORK_DIR)/$(MONITORING_PLUGINS_DIR)
+# on Centos8 we don't build our own OpenSSL, so we have to inform the build about it
+ifeq ($(DISTRO_CODE),el8)
+OPTIONAL_BUILD_ARGS := BAZEL_EXTRA_ARGS="--define no-own-openssl=true"
+endif
 
-MONITORING_PLUGINS_CONFIGUREOPTS := \
-    --prefix=$(OMD_ROOT) \
-    --libexecdir=$(OMD_ROOT)/lib/nagios/plugins \
-    --with-snmpget-command=$(OMD_ROOT)/bin/snmpget \
-    --with-snmpgetnext-command=$(OMD_ROOT)/bin/snmpgetnext
+$(MONITORING_PLUGINS_INSTALL):
+	# run the Bazel build process which does all the dependency stuff
+	$(OPTIONAL_BUILD_ARGS) $(BAZEL_BUILD) @$(MONITORING_PLUGINS)//:$(MONITORING_PLUGINS)
 
-$(MONITORING_PLUGINS): $(MONITORING_PLUGINS_BUILD)
+	# THIS IS ALL HACKY WORKAROUND STUFF - BETTER GET RID OF IT BY LETTING
+	# BAZEL HANDLE ALL THIS RATHER THAN MODIFYING IT!
+	#
+	# Basically we create a temporary directory we're allowed to write to,
+	# copy all files we want and apply all needed modifications and move
+	# them over to "$(DESTDIR)$(OMD_ROOT)/" afterwards
+	$(eval TMP_DIR := $(shell mktemp -d))
+	# copy over all the plugins we built
+	mkdir -p "$(TMP_DIR)/lib/nagios"
+	$(RSYNC) -r --chmod=u+w \
+	    "$(BAZEL_BIN_EXT)/$(MONITORING_PLUGINS)/$(MONITORING_PLUGINS)/libexec/" \
+	    "$(TMP_DIR)/lib/nagios/plugins/"
+	# copy locales and 'documentation'
+	$(RSYNC) -r --chmod=u+w \
+	    "$(BAZEL_BIN_EXT)/$(MONITORING_PLUGINS)/$(MONITORING_PLUGINS)/share/" \
+	    "$(TMP_DIR)/share/"
+	# set RPATH for all ELF binaries we find
+	find "$(TMP_DIR)/lib/nagios/plugins/" -exec file {} \; \
+	    | grep ELF | cut -d ':' -f1 \
+	    | xargs patchelf --set-rpath "\$$ORIGIN/../../../lib"
+	ln -sf check_icmp "$(TMP_DIR)/lib/nagios/plugins/check_host"
+	$(RSYNC) "$(TMP_DIR)/" "$(DESTDIR)$(OMD_ROOT)/"
 
-$(MONITORING_PLUGINS_BUILD): $(MONITORING_PLUGINS_PATCHING)
-	cd $(MONITORING_PLUGINS_BUILD_DIR) ; ./configure $(MONITORING_PLUGINS_CONFIGUREOPTS)
-	$(MAKE) -C $(MONITORING_PLUGINS_BUILD_DIR) all
-	$(RM) plugins-scripts/check_ifoperstatus plugins-scripts/check_ifstatus
-	$(TOUCH) $@
-
-$(MONITORING_PLUGINS_INSTALL): $(MONITORING_PLUGINS_BUILD)
-	$(MAKE) DESTDIR=$(DESTDIR) -C $(MONITORING_PLUGINS_BUILD_DIR) install
-	# FIXME: pack these with SUID root
-	install -m 755 $(MONITORING_PLUGINS_BUILD_DIR)/plugins-root/check_icmp $(DESTDIR)$(OMD_ROOT)/lib/nagios/plugins
-	install -m 755 $(MONITORING_PLUGINS_BUILD_DIR)/plugins-root/check_dhcp $(DESTDIR)$(OMD_ROOT)/lib/nagios/plugins
-	ln -sf check_icmp $(DESTDIR)$(OMD_ROOT)/lib/nagios/plugins/check_host
-
-	# Copy package documentations to have these information in the binary packages
-	$(MKDIR) $(DESTDIR)$(OMD_ROOT)/share/doc/$(MONITORING_PLUGINS)
-	set -e ; for file in ACKNOWLEDGEMENTS AUTHORS CODING COPYING FAQ NEWS README REQUIREMENTS SUPPORT THANKS ; do \
-	   install -m 644 $(MONITORING_PLUGINS_BUILD_DIR)/$$file $(DESTDIR)$(OMD_ROOT)/share/doc/$(MONITORING_PLUGINS); \
-	done
-	$(TOUCH) $@
+	rm -rf $(TMP_DIR)

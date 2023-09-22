@@ -3,18 +3,19 @@
 
 #include "stdafx.h"
 
-#include "async_answer.h"
+#include "wnx/async_answer.h"
 
 #include <chrono>
 #include <cstdint>
 #include <mutex>
+#include <ranges>
 #include <string>
 #include <vector>
 
 #include "common/cfg_info.h"
-#include "logger.h"
-#include "section_header.h"       // names
-#include "windows_service_api.h"  // global situation
+#include "wnx/logger.h"
+#include "wnx/section_header.h"       // names
+#include "wnx/windows_service_api.h"  // global situation
 
 using std::chrono::milliseconds;
 using std::chrono::steady_clock;
@@ -22,7 +23,7 @@ using std::chrono::steady_clock;
 namespace cma::srv {
 
 bool AsyncAnswer::isAnswerOlder(milliseconds period) const {
-    auto tp = steady_clock::now();
+    const auto tp = steady_clock::now();
 
     std::lock_guard lk(lock_);
     return duration_cast<milliseconds>(tp - tp_id_) > period;
@@ -35,7 +36,6 @@ void AsyncAnswer::dropAnswer() {
     sw_.reset();
 }
 
-// returns true when answer is ready, false when timeout expires but not ready
 bool AsyncAnswer::waitAnswer(milliseconds to_wait) {
     std::unique_lock lk(lock_);
     ON_OUT_OF_SCOPE(sw_.stop());
@@ -50,51 +50,48 @@ bool AsyncAnswer::waitAnswer(milliseconds to_wait) {
         });
 }
 
+namespace {
 // combines two vectors together
-// in case of exception returns false
-// Caller MUST Fix section size!
-static bool AddVectorGracefully(std::vector<uint8_t>& Out,
-                                const std::vector<uint8_t>& In) {
-    if (In.empty()) return true;
+// on exception(malicious plugin @ 32 bit OS) returns false
+bool AddVectorGracefully(std::vector<uint8_t> &out_data,
+                         const std::vector<uint8_t> &in_data) {
+    if (in_data.empty()) {
+        return true;
+    }
 
-    auto old_size = Out.size();
-    // we have theoretical possibility of exception here
-
+    const auto old_size = out_data.size();
     try {
         // a bit of optimization
-        Out.reserve(Out.size() + In.size());
-        Out.insert(Out.end(), In.begin(), In.end());
+        out_data.reserve(out_data.size() + in_data.size());
+        out_data.insert(out_data.end(), in_data.begin(), in_data.end());
 
         // divider after every section with data
-        Out.push_back(static_cast<uint8_t>('\n'));
+        out_data.push_back(static_cast<uint8_t>('\n'));
         return true;
-    } catch (const std::exception& e) {
+    } catch (const std::exception &e) {
         // return to invariant...
         XLOG::l(XLOG_FLINE + "- disaster '{}'", e.what());
-        Out.resize(old_size);
+        out_data.resize(old_size);
     }
 
     return false;
 }
+}  // namespace
 
-// kills data in any case
-// return gathered data back
 AsyncAnswer::DataBlock AsyncAnswer::getDataAndClear() {
-    DataBlock v;
-
     std::lock_guard lk(lock_);
     if (order_ == Order::plugins_last) {
         AddVectorGracefully(data_, plugins_);
         AddVectorGracefully(data_, local_);
     }
 
-    v = std::move(data_);
+    auto v = std::move(data_);
     dropDataNoLock();
 
     return v;
 }
 
-bool AsyncAnswer::prepareAnswer(std::string_view Ip) {
+bool AsyncAnswer::prepareAnswer(std::string_view ip) {
     std::lock_guard lk(lock_);
 
     if (!external_ip_.empty() || awaited_segments_ != 0 ||
@@ -105,7 +102,7 @@ bool AsyncAnswer::prepareAnswer(std::string_view Ip) {
 
     dropDataNoLock();
     tp_id_ = GenerateAnswerId();
-    external_ip_ = Ip;
+    external_ip_ = ip;
     sw_.start();
     return true;
 }
@@ -114,18 +111,19 @@ bool AsyncAnswer::prepareAnswer(std::string_view Ip) {
 std::vector<std::string> AsyncAnswer::segmentNameList() const {
     std::unique_lock lk(lock_);
     std::vector<std::string> list;
-    for (const auto& s : segments_) list.emplace_back(s.name_);
+    list.reserve(segments_.size());
+    for (const auto &s : segments_) {
+        list.emplace_back(s.name_);
+    }
     lk.unlock();
-    std::sort(list.begin(), list.end());
+    std::ranges::sort(list);
     return list;
 }
 
-// Reporting Function, which called by the section plugins and providers
-// Thread safe!
 bool AsyncAnswer::addSegment(
-    const std::string& section_name,  // name
-    const AnswerId answer_id,         // "password"
-    const std::vector<uint8_t>& data  // data for section
+    const std::string &section_name,  // name
+    const AnswerId &answer_id,        // "password"
+    const std::vector<uint8_t> &data  // data for section
 ) {
     std::lock_guard lk(lock_);
     if (answer_id != tp_id_) {
@@ -133,11 +131,11 @@ bool AsyncAnswer::addSegment(
         return false;
     }
 
-    for (const auto& s : segments_) {
+    for (const auto &s : segments_) {
         if (s.name_ == section_name) {
             XLOG::l("Section '{}' tries to store data twice. F-f",
                     section_name);
-            return false;  // duplicated section run
+            return false;
         }
     }
 
@@ -154,7 +152,7 @@ bool AsyncAnswer::addSegment(
         } else if (!data.empty()) {
             if (!AddVectorGracefully(data_, data)) segments_.back().length_ = 0;
         }
-    } catch (const std::exception& e) {
+    } catch (const std::exception &e) {
         // not possible, but we have to check
         XLOG::l(XLOG_FLINE + "-exception '{}'", e.what());
     }

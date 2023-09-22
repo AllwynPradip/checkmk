@@ -1,23 +1,15 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 from cmk.gui.i18n import _
-from cmk.gui.valuespec import (
-    Dictionary,
-    Percentage,
-    TextInput,
-    Transform,
-    Tuple,
-)
-
-from cmk.gui.plugins.wato import (
+from cmk.gui.plugins.wato.utils import (
     CheckParameterRulespecWithItem,
     rulespec_registry,
     RulespecGroupCheckParametersEnvironment,
 )
+from cmk.gui.valuespec import Dictionary, Percentage, TextInput, Tuple
 
 
 def transform_humidity(p):
@@ -36,31 +28,32 @@ def _item_spec_humidity():
     )
 
 
-def _parameter_valuespec_humidity():
-    return Transform(
-        Dictionary(
-            help=_("This Ruleset sets the threshold limits for humidity sensors"),
-            elements=[
-                ("levels",
-                 Tuple(
-                     title=_("Upper levels"),
-                     elements=[
-                         Percentage(title=_("Warning at")),
-                         Percentage(title=_("Critical at")),
-                     ],
-                 )),
-                ("levels_lower",
-                 Tuple(
-                     title=_("Lower levels"),
-                     elements=[
-                         Percentage(title=_("Warning below")),
-                         Percentage(title=_("Critical below")),
-                     ],
-                 )),
-            ],
-            ignored_keys=['_item_key'],
-        ),
-        forth=transform_humidity,
+def _parameter_valuespec_humidity() -> Dictionary:
+    return Dictionary(
+        help=_("This Ruleset sets the threshold limits for humidity sensors"),
+        elements=[
+            (
+                "levels",
+                Tuple(
+                    title=_("Upper levels"),
+                    elements=[
+                        Percentage(title=_("Warning at")),
+                        Percentage(title=_("Critical at")),
+                    ],
+                ),
+            ),
+            (
+                "levels_lower",
+                Tuple(
+                    title=_("Lower levels"),
+                    elements=[
+                        Percentage(title=_("Warning below")),
+                        Percentage(title=_("Critical below")),
+                    ],
+                ),
+            ),
+        ],
+        ignored_keys=["_item_key"],
     )
 
 
@@ -72,4 +65,5 @@ rulespec_registry.register(
         match_type="dict",
         parameter_valuespec=_parameter_valuespec_humidity,
         title=lambda: _("Humidity Levels"),
-    ))
+    )
+)

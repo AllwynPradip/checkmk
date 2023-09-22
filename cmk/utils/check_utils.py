@@ -1,25 +1,14 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Any, Mapping, NamedTuple, Sequence
+from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Any
 
-def section_name_of(check_plugin_name: str) -> str:
-    return check_plugin_name.split(".")[0]
-
-
-def maincheckify(subcheck_name: str) -> str:
-    """Get new plugin name
-
-    The new API does not know about "subchecks", so drop the dot notation.
-    The validation step will prevent us from having colliding plugins.
-    """
-    return (subcheck_name.replace('.', '_')  # subchecks don't exist anymore
-            .replace('-', '_')  # "sap.value-groups"
-           )
+ParametersTypeAlias = Mapping[str, Any]  # Modification may result in an incompatible API change.
 
 
 def worst_service_state(*states: int, default: int) -> int:
@@ -37,25 +26,43 @@ def worst_service_state(*states: int, default: int) -> int:
         OK -> WARN -> UNKNOWN -> CRIT
 
     That's why this function is just not quite `max`.
+
+    Examples:
+
+    >>> worst_service_state(0, 0, default=0)  # OK
+    0
+    >>> worst_service_state(0, 1, default=0)  # WARN
+    1
+    >>> worst_service_state(0, 1, 2, 3, default=0)  # CRIT
+    2
+    >>> worst_service_state(0, 1, 3, default=0)  # UNKNOWN
+    3
+    >>> worst_service_state(default=0)
+    0
+    >>> worst_service_state(default=1)
+    1
+    >>> worst_service_state(default=2)
+    2
+    >>> worst_service_state(default=3)
+    3
+
     """
     return 2 if 2 in states else max(states, default=default)
 
 
-class ActiveCheckResult(NamedTuple):
-    state: int
-    summaries: Sequence[str]
-    details: Sequence[str]
-    metrics: Sequence[str]
+def section_name_of(check_plugin_name: str) -> str:
+    return check_plugin_name.split(".")[0]
 
-    @classmethod
-    def from_subresults(cls, *subresults: 'ActiveCheckResult') -> 'ActiveCheckResult':
-        states_iter, summaries_iter, details_iter, metrics_iter = zip(*subresults)
-        return cls(
-            state=worst_service_state(*states_iter, default=0),
-            summaries=sum((list(s) for s in summaries_iter), []),
-            details=sum((list(d) for d in details_iter), []),
-            metrics=sum((list(m) for m in metrics_iter), []),
-        )
+
+def maincheckify(subcheck_name: str) -> str:
+    """Get new plugin name
+
+    The new API does not know about "subchecks", so drop the dot notation.
+    The validation step will prevent us from having colliding plugins.
+    """
+    return subcheck_name.replace(".", "_").replace(  # subchecks don't exist anymore
+        "-", "_"
+    )  # "sap.value-groups"
 
 
 # (un)wrap_parameters:
@@ -73,17 +80,18 @@ class ActiveCheckResult(NamedTuple):
 _PARAMS_WRAPPER_KEY = "auto-migration-wrapper-key"
 
 
-# keep return type in sync with ParametersTypeAlias
-def wrap_parameters(parameters: Any) -> Mapping[str, Any]:
+def wrap_parameters(parameters: Any) -> ParametersTypeAlias:
     """wrap the passed data structure in a dictionary, if it isn't one itself"""
     if isinstance(parameters, dict):
         return parameters
     return {_PARAMS_WRAPPER_KEY: parameters}
 
 
-# keep argument parameters in sync with ParametersTypeAlias
-def unwrap_parameters(parameters: Mapping[str, Any]) -> Any:
-    try:
+def unwrap_parameters(parameters: ParametersTypeAlias) -> Any:
+    if set(parameters) == {_PARAMS_WRAPPER_KEY}:
         return parameters[_PARAMS_WRAPPER_KEY]
-    except KeyError:
-        return parameters
+    # Note: having *both* the wrapper key and other keys can only happen, if we
+    # merge wrapped (non dict) legacy parameters with newer configured (dict) parameters.
+    # In this case the the plugin can deal with dicts, and will ignore the wrapper key anyway.
+    # Still: cleaning it up here is less confusing.
+    return {k: v for k, v in parameters.items() if k != _PARAMS_WRAPPER_KEY}

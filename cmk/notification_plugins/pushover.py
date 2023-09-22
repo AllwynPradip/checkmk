@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import sys
+
 import requests
+
 from cmk.notification_plugins import utils
 
 api_url = "https://api.pushover.net/1/messages.json"
 
 
-def main():
+def main() -> int:
     context = utils.collect_context()
     subject = get_subject(context)
     text = get_text(context)
@@ -22,7 +23,7 @@ def main():
     return send_push_notification(api_key, recipient_key, subject, text, context)
 
 
-def get_subject(context):
+def get_subject(context: dict[str, str]) -> str:
     s = context["HOSTNAME"]
 
     if context["WHAT"] != "HOST":
@@ -31,7 +32,7 @@ def get_subject(context):
 
     notification_type = context["NOTIFICATIONTYPE"]
     if notification_type in ["PROBLEM", "RECOVERY"]:
-        s += u"$PREVIOUS@HARDSHORTSTATE$ \u2192 $@SHORTSTATE$"
+        s += "$PREVIOUS@HARDSHORTSTATE$ \u2192 $@SHORTSTATE$"
 
     elif notification_type.startswith("FLAP"):
         if "START" in notification_type:
@@ -55,24 +56,30 @@ def get_subject(context):
     return utils.substitute_context(s.replace("@", context["WHAT"]), context)
 
 
-def get_text(context):
+def get_text(context: dict[str, str]) -> str:
     s = ""
 
     s += "$@OUTPUT$"
 
     if "PARAMETER_URL_PREFIX" in context:
         s += " <i>Link: </i>"
-        s += utils.format_link('<a href="%s">%s</a>', utils.host_url_from_context(context),
-                               context["HOSTNAME"])
+        s += utils.format_link(
+            '<a href="%s">%s</a>', utils.host_url_from_context(context), context["HOSTNAME"]
+        )
         if context["WHAT"] != "HOST":
-            s += utils.format_link('<a href="%s">%s</a>', utils.service_url_from_context(context),
-                                   context["SERVICEDESC"])
+            s += utils.format_link(
+                '<a href="%s">%s</a>',
+                utils.service_url_from_context(context),
+                context["SERVICEDESC"],
+            )
 
     return utils.substitute_context(s.replace("@", context["WHAT"]), context)
 
 
-def send_push_notification(api_key, recipient_key, subject, text, context):
-    params = [
+def send_push_notification(
+    api_key: str, recipient_key: str, subject: str, text: str, context: dict[str, str]
+) -> int:
+    params: list[tuple[str, str | int | bytes]] = [
         ("token", api_key),
         ("user", recipient_key),
         ("title", subject.encode("utf-8")),
@@ -114,8 +121,9 @@ def send_push_notification(api_key, recipient_key, subject, text, context):
         return 1
 
     if response.status_code != 200:
-        sys.stdout.write("Failed to send notification. Status: %s, Response: %s\n" %
-                         (response.status_code, response.text))
+        sys.stdout.write(
+            f"Failed to send notification. Status: {response.status_code}, Response: {response.text}\n"
+        )
         return 1
 
     try:

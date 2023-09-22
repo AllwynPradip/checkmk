@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """Helper functions for executing GUI code in external scripts.
@@ -8,71 +7,60 @@
 The intended use is for scripts such as cmk-update-config or init-redis.
 """
 
+import typing
+import warnings
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import (
-    Any,
-    Iterator,
-    Mapping,
-    Optional,
-)
+from functools import cache
+from typing import Any
 
+from flask import Flask
+from flask.ctx import RequestContext
 from werkzeug.test import create_environ
 
-from cmk.gui.config import (
-    load_config,
-    set_super_user,
-)
-from cmk.gui.display_options import DisplayOptions
-from cmk.gui.utils.theme import Theme
-from cmk.gui.globals import (
-    AppContext,
-    RequestContext,
-)
-from cmk.gui.htmllib import html
-from cmk.gui.http import Request, Response
-from cmk.gui.utils.output_funnel import OutputFunnel
-from cmk.gui.modules import load_all_plugins
+from cmk.gui.http import Response
+
+Environments = typing.Literal["production", "testing", "development"]
 
 
-# TODO: Better make our application available?
-class DummyApplication:
-    def __init__(self, environ, start_response):
-        self._environ = environ
-        self._start_response = start_response
+@cache
+def session_wsgi_app(debug: bool = False, testing: bool = False) -> Flask:
+    # TODO: Temporary hack. Can be removed once #12954 has been ported from 2.0.0
+    from cmk.gui.wsgi.app import make_wsgi_app
+
+    return make_wsgi_app(debug=debug, testing=testing)
 
 
-@contextmanager
-def application_context(environ: Mapping[str, Any]) -> Iterator[None]:
-    with AppContext(DummyApplication(environ, None)):
-        yield
-
-
-@contextmanager
-def request_context(environ: Mapping[str, Any]) -> Iterator[None]:
-    req = Request(environ)
-    resp = Response(mimetype="text/html")
-    funnel = OutputFunnel(resp)
-    with RequestContext(
-            req=req,
-            resp=resp,
-            funnel=funnel,
-            html_obj=html(req, resp, funnel, output_format="html"),
-            display_options=DisplayOptions(),
-            theme=Theme(),
-            prefix_logs_with_url=False,
-    ):
-        yield
-
-
-@contextmanager
-def application_and_request_context(environ: Optional[Mapping[str, Any]] = None) -> Iterator[None]:
+def make_request_context(app: Flask, environ: dict[str, Any] | None = None) -> RequestContext:
     if environ is None:
-        environ = dict(create_environ(), REQUEST_URI='')
-    with application_context(environ), request_context(environ):
+        environ = create_environ()
+    return app.request_context(environ)
+
+
+@contextmanager
+def request_context(app: Flask, environ: dict[str, Any] | None = None) -> Iterator[None]:
+    with make_request_context(app, environ):
+        app.preprocess_request()
+        yield
+        app.process_response(Response())
+
+
+@contextmanager
+def application_and_request_context(environ: dict[str, Any] | None = None) -> Iterator[None]:
+    warnings.warn(
+        "Please either use the `request_context` fixture or the `flask_app` fixture from now "
+        "on. Using `flask_app` you can have access to the test client as well. "
+        "See https://flask.palletsprojects.com/en/latest/testing/ and examples in our tests.",
+        DeprecationWarning,
+    )
+
+    app = session_wsgi_app(testing=True)
+    with app.app_context(), request_context(app, environ):
         yield
 
 
-def initialize_gui_environment() -> None:
-    load_config()
-    load_all_plugins()
-    set_super_user()
+@contextmanager
+def gui_context(environ: dict[str, Any] | None = None) -> Iterator[None]:
+    app = session_wsgi_app(testing=True)
+    with app.app_context(), make_request_context(app, environ):
+        yield

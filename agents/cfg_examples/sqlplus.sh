@@ -1,5 +1,5 @@
 #!/bin/sh
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -15,7 +15,7 @@
 # result on stdout. Error messages goes to stderr.
 
 ORACLE_SID=$1
-if [ -z "$ORACLE_SID" ] ; then
+if [ -z "$ORACLE_SID" ]; then
     echo "Usage: $0 ORACLE_SID" >&2
     exit 1
 fi

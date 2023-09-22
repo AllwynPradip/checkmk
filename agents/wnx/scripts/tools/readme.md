@@ -1,0 +1,21 @@
+Assorted potentially useful scripts 
+
+Verified:
+
+1. is_installed,cmd - check that msi is installed: is_installed /path/to/check_mk_agent.msi
+2. rebuild_wmi.cmd - repair
+3. openhardwaremonitor-clean.cmd - OHM kill, clean and restart
+
+
+Reference only:
+
+1. determine_encod.cmdm needs crlf python
+2. update_product_version.cmd needs wirunsql vbs
+
+Some file tools:
+
+* clean_files.bat    - removes all files after uninstallation
+* lwa_enable.cmd     - switches ON Legacy agent and OFF New one
+* wnx_enable.cmd     - switches ON New agent and OFF Legacy one
+* openfirewall.cmd   - opens firewall for the agent
+* closefirewall.cmd  - closes firewall back

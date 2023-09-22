@@ -1,17 +1,19 @@
 #!/bin/sh
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 HOST=$1
 SVC=$2
 
-cat <<EOF | unixcat tmp/run/live | { IFS='|' read state output perfdata ; echo "$output|$perfdata" ; exit $state ; }
+cat <<EOF | unixcat tmp/run/live | {
 GET services
 Filter: host_name = $HOST
 Filter: description = $SVC
 Columns: state plugin_output perf_data
 Separators: 10 124 124 124
 EOF
-
-
+    IFS='|' read -r state output perfdata
+    echo "$output|$perfdata"
+    exit "$state"
+}

@@ -1,29 +1,27 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# type: ignore[list-item,import,assignment,misc,operator]  # TODO: see which are needed in this file
 # pylint: disable=consider-using-in
 
 from .temperature import check_temperature
 
 hp_proliant_status_map = {
-    1: 'unknown',
-    2: 'ok',
-    3: 'degraded',
-    4: 'failed',
-    5: 'disabled',
+    1: "unknown",
+    2: "ok",
+    3: "degraded",
+    4: "failed",
+    5: "disabled",
 }
 
 hp_proliant_status2nagios_map = {
-    'unknown': 3,
-    'other': 3,
-    'ok': 0,
-    'degraded': 2,
-    'failed': 2,
-    'disabled': 1
+    "unknown": 3,
+    "other": 3,
+    "ok": 0,
+    "degraded": 2,
+    "failed": 2,
+    "disabled": 1,
 }
 
 hp_proliant_locale = {
@@ -57,31 +55,32 @@ hp_proliant_locale = {
 #   '----------------------------------------------------------------------'
 
 hp_proliant_da_cntlr_cond_map = {
-    '1': (3, 'other'),
-    '2': (0, 'ok'),
-    '3': (1, 'degraded'),
-    '4': (2, 'failed'),
+    "1": (3, "other"),
+    "2": (0, "ok"),
+    "3": (1, "degraded"),
+    "4": (2, "failed"),
 }
 
 hp_proliant_da_cntlr_role_map = {
-    '1': 'other',
-    '2': 'notDuplexed',
-    '3': 'active',
-    '4': 'backup',
+    "1": "other",
+    "2": "notDuplexed",
+    "3": "active",
+    "4": "backup",
 }
 
 hp_proliant_da_cntlr_state_map = {
-    '1': (3, 'other'),
-    '2': (0, 'ok'),
-    '3': (2, 'generalFailure'),
-    '4': (2, 'cableProblem'),
-    '5': (2, 'poweredOff'),
+    "1": (3, "other"),
+    "2": (0, "ok"),
+    "3": (2, "generalFailure"),
+    "4": (2, "cableProblem"),
+    "5": (2, "poweredOff"),
 }
 
 
 def inventory_hp_proliant_da_cntlr(info):
     if info:
         return [(line[0], None) for line in info]
+    return []
 
 
 def check_hp_proliant_da_cntlr(item, params, info):
@@ -91,26 +90,31 @@ def check_hp_proliant_da_cntlr(item, params, info):
             sum_state = 0
             output = []
 
-            for val, label, map_ in [(cond, 'Condition', hp_proliant_da_cntlr_cond_map),
-                                     (b_cond, 'Board-Condition', hp_proliant_da_cntlr_cond_map),
-                                     (b_status, 'Board-Status', hp_proliant_da_cntlr_state_map)]:
+            for val, label, map_ in [
+                (cond, "Condition", hp_proliant_da_cntlr_cond_map),
+                (b_cond, "Board-Condition", hp_proliant_da_cntlr_cond_map),
+                (b_status, "Board-Status", hp_proliant_da_cntlr_state_map),
+            ]:
                 this_state = map_[val][0]
-                state_txt = ''
+                state_txt = ""
                 if this_state == 1:
-                    state_txt = ' (!)'
+                    state_txt = " (!)"
                 elif this_state == 2:
-                    state_txt = ' (!!)'
+                    state_txt = " (!!)"
                 sum_state = max(sum_state, this_state)
-                output.append('%s: %s%s' % (label, map_[val][1], state_txt))
+                output.append(f"{label}: {map_[val][1]}{state_txt}")
 
-            output.append('(Role: %s, Model: %s, Slot: %s, Serial: %s)' %
-                          (hp_proliant_da_cntlr_role_map.get(role, 'unknown'), model, slot, serial))
+            output.append(
+                "(Role: {}, Model: {}, Slot: {}, Serial: {})".format(
+                    hp_proliant_da_cntlr_role_map.get(role, "unknown"), model, slot, serial
+                )
+            )
 
-            return (sum_state, ', '.join(output))
+            return (sum_state, ", ".join(output))
     return (3, "Controller not found in snmp data")
 
 
-#.
+# .
 #   .--cpu-----------------------------------------------------------------.
 #   |                                                                      |
 #   |                           ___ _ __  _   _                            |
@@ -122,17 +126,18 @@ def check_hp_proliant_da_cntlr(item, params, info):
 
 hp_proliant_cpu_status_map = {1: "unknown", 2: "ok", 3: "degraded", 4: "failed", 5: "disabled"}
 hp_proliant_cpu_status2nagios_map = {
-    'unknown': 3,
-    'ok': 0,
-    'degraded': 2,
-    'failed': 2,
-    'disabled': 1
+    "unknown": 3,
+    "ok": 0,
+    "degraded": 2,
+    "failed": 2,
+    "disabled": 1,
 }
 
 
 def inventory_hp_proliant_cpu(info):
     if len(info) > 0:
         return [(line[0], None) for line in info]
+    return []
 
 
 def check_hp_proliant_cpu(item, params, info):
@@ -142,12 +147,14 @@ def check_hp_proliant_cpu(item, params, info):
             snmp_status = hp_proliant_cpu_status_map[int(status)]
             status = hp_proliant_cpu_status2nagios_map[snmp_status]
 
-            return (status,
-                    'CPU%s "%s" in slot %s is in state "%s"' % (index, name, slot, snmp_status))
+            return (
+                status,
+                f'CPU{index} "{name}" in slot {slot} is in state "{snmp_status}"',
+            )
     return (3, "item not found in snmp data")
 
 
-#.
+# .
 #   .--fans----------------------------------------------------------------.
 #   |                          __                                          |
 #   |                         / _| __ _ _ __  ___                          |
@@ -157,8 +164,8 @@ def check_hp_proliant_cpu(item, params, info):
 #   |                                                                      |
 #   '----------------------------------------------------------------------'
 
-hp_proliant_fans_status_map = {1: 'other', 2: 'ok', 3: 'degraded', 4: 'failed'}
-hp_proliant_speed_map = {1: 'other', 2: 'normal', 3: 'high'}
+hp_proliant_fans_status_map = {1: "other", 2: "ok", 3: "degraded", 4: "failed"}
+hp_proliant_speed_map = {1: "other", 2: "normal", 3: "high"}
 hp_proliant_fans_locale = {
     1: "other",
     2: "unknown",
@@ -179,38 +186,41 @@ hp_proliant_fans_locale = {
 def inventory_hp_proliant_fans(info):
     if len(info) > 0:
         items = []
-        for line in [l for l in info if l[2] == '3']:
-            label = 'other'
+        for line in [l for l in info if l[2] == "3"]:
+            label = "other"
             if int(line[1]) in hp_proliant_fans_locale:
                 label = hp_proliant_fans_locale[int(line[1])]
-            items.append(("%s (%s)" % (line[0], label), None))
+            items.append((f"{line[0]} ({label})", None))
         return items
+    return []
 
 
 def check_hp_proliant_fans(item, params, info):
     for line in info:
-        label = 'other'
+        label = "other"
         if len(line) > 1 and int(line[1]) in hp_proliant_fans_locale:
             label = hp_proliant_fans_locale[int(line[1])]
 
-        if "%s (%s)" % (line[0], label) == item:
+        if f"{line[0]} ({label})" == item:
             index, _name, _present, speed, status, currentSpeed = line
             snmp_status = hp_proliant_fans_status_map[int(status)]
             status = hp_proliant_status2nagios_map[snmp_status]
 
-            detailOutput = ''
+            detailOutput = ""
             perfdata = []
-            if currentSpeed != '':
-                detailOutput = ', RPM: %s' % currentSpeed
-                perfdata = [('temp', int(currentSpeed))]
+            if currentSpeed != "":
+                detailOutput = ", RPM: %s" % currentSpeed
+                perfdata = [("temp", int(currentSpeed))]
 
-            return (status, 'FAN Sensor %s "%s", Speed is %s, State is %s%s' %
-                    (index, label, hp_proliant_speed_map[int(speed)], snmp_status, detailOutput),
-                    perfdata)
+            return (
+                status,
+                f'FAN Sensor {index} "{label}", Speed is {hp_proliant_speed_map[int(speed)]}, State is {snmp_status}{detailOutput}',
+                perfdata,
+            )
     return (3, "item not found in snmp data")
 
 
-#.
+# .
 #   .--temperature---------------------------------------------------------.
 #   |      _                                      _                        |
 #   |     | |_ ___ _ __ ___  _ __   ___ _ __ __ _| |_ _   _ _ __ ___       |
@@ -222,7 +232,7 @@ def check_hp_proliant_fans(item, params, info):
 
 
 def format_hp_proliant_name(line):
-    return "%s (%s)" % (line[0], hp_proliant_locale[int(line[1])])
+    return f"{line[0]} ({hp_proliant_locale[int(line[1])]})"
 
 
 def inventory_hp_proliant_temp(info):
@@ -247,32 +257,15 @@ def check_hp_proliant_temp(item, params, info):
 
             snmp_status = hp_proliant_status_map[int(status)]
 
-            return check_temperature(float(value),
-                                     params,
-                                     "hp_proliant_temp_%s" % item,
-                                     dev_levels=devlevels,
-                                     dev_status=hp_proliant_status2nagios_map[snmp_status],
-                                     dev_status_name="Unit: %s" % snmp_status)
+            return check_temperature(
+                float(value),
+                params,
+                "hp_proliant_temp_%s" % item,
+                dev_levels=devlevels,
+                dev_status=hp_proliant_status2nagios_map[snmp_status],
+                dev_status_name="Unit: %s" % snmp_status,
+            )
     return 3, "item not found in snmp data"
 
 
-#.
-#   .--scan function-------------------------------------------------------.
-#   |                           __                  _   _                  |
-#   |    ___  ___ __ _ _ __    / _|_   _ _ __   ___| |_(_) ___  _ __       |
-#   |   / __|/ __/ _` | '_ \  | |_| | | | '_ \ / __| __| |/ _ \| '_ \      |
-#   |   \__ \ (_| (_| | | | | |  _| |_| | | | | (__| |_| | (_) | | | |     |
-#   |   |___/\___\__,_|_| |_| |_|  \__,_|_| |_|\___|\__|_|\___/|_| |_|     |
-#   |                                                                      |
-#   +----------------------------------------------------------------------+
-#   |                                                                      |
-#   '----------------------------------------------------------------------'
-
-
-def hp_proliant_scan_function(oid):
-    # migrated!
-    return ("proliant" in oid(".1.3.6.1.4.1.232.2.2.4.2.0", "").lower() or
-            "storeeasy" in oid(".1.3.6.1.4.1.232.2.2.4.2.0", "").lower())
-
-
-#.
+# .

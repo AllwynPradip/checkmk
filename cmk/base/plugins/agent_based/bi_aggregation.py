@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
-from typing import Any, Dict
 import ast
+from collections.abc import Mapping
+from typing import Any
 
-from cmk.utils.type_defs import state_markers  # pylint: disable=cmk-module-layer-violation
+from cmk.checkengine.checkresults import state_markers  # pylint: disable=cmk-module-layer-violation
 
+from .agent_based_api.v1 import register, Result, Service, State
 from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult, StringTable
-from .agent_based_api.v1 import register, Result, State, Service
 
-Section = Dict[str, Any]
+Section = Mapping[str, Any]
 
 
 def parse_bi_aggregation(string_table: StringTable) -> Section:
@@ -32,20 +32,22 @@ def discover_bi_aggregation(section: Section) -> DiscoveryResult:
         yield Service(item=aggr_name)
 
 
-def render_bi_infos(infos):
+def render_bi_infos(infos) -> None | list[str]:  # type: ignore[no-untyped-def]
     if not infos:
         return None
 
     own_infos, nested_infos = infos
     lines = []
     if "error" in own_infos:
-        lines.append("%s %s" %
-                     (state_markers[own_infos["error"]["state"]], own_infos["error"]["output"]))
+        lines.append(
+            "{} {}".format(state_markers[own_infos["error"]["state"]], own_infos["error"]["output"])
+        )
     if "custom" in own_infos:
         lines.append(own_infos["custom"]["output"])
 
     for nested_info in nested_infos:
         nested_lines = render_bi_infos(nested_info)
+        assert nested_lines is not None
         for idx, line in enumerate(nested_lines):
             if idx == 0:
                 lines.append("+-- %s" % line)
@@ -56,14 +58,13 @@ def render_bi_infos(infos):
 
 
 def check_bi_aggregation(item: str, section: Section) -> CheckResult:
-    bi_data = section.get(item)
-    if not bi_data:
+    if not (bi_data := section.get(item)):
         return
 
     overall_state = bi_data["state_computed_by_agent"]
     yield Result(
         state=State(overall_state),
-        summary="Aggregation state: %s" % ['Ok', 'Warning', 'Critical', 'Unknown'][overall_state],
+        summary="Aggregation state: %s" % ["Ok", "Warning", "Critical", "Unknown"][overall_state],
     )
 
     yield Result(
@@ -77,7 +78,9 @@ def check_bi_aggregation(item: str, section: Section) -> CheckResult:
 
     if bi_data["infos"]:
         infos = ["", "Aggregation Errors"]
-        infos.extend(render_bi_infos(bi_data["infos"]))
+        info = render_bi_infos(bi_data["infos"])
+        assert info is not None
+        infos.extend(info)
         yield Result(state=State.OK, notice="\n".join(infos))
 
 

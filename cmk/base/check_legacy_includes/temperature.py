@@ -1,32 +1,39 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# type: ignore[list-item,import,assignment,misc,operator]  # TODO: see which are needed in this file
+# pylint: disable=unused-import
+
 import time
-from typing import Union, Tuple, Optional, AnyStr, List
+from typing import AnyStr
 
-from cmk.base.check_api import check_levels
-from cmk.base.check_api import MKCounterWrapped
-from cmk.base.check_api import get_average
-from cmk.base.check_api import get_rate
-from cmk.base.check_api import state_markers
-from cmk.base.plugins.agent_based.utils.temperature import (  # pylint: disable=unused-import
-    to_celsius, render_temp, fahrenheit_to_celsius,  # reimported from checks!
-    temp_unitsym, _migrate_params,  # See warning below
-    StatusType, TwoLevelsType, TempParamType,
+from cmk.base.check_api import check_levels, state_markers
+from cmk.base.plugins.agent_based.agent_based_api.v1 import (
+    get_average,
+    get_rate,
+    get_value_store,
+    IgnoreResultsError,
 )
+from cmk.base.plugins.agent_based.utils.temperature import _migrate_params
+from cmk.base.plugins.agent_based.utils.temperature import (
+    fahrenheit_to_celsius as fahrenheit_to_celsius,
+)
+from cmk.base.plugins.agent_based.utils.temperature import render_temp as render_temp
+from cmk.base.plugins.agent_based.utils.temperature import StatusType as StatusType
+from cmk.base.plugins.agent_based.utils.temperature import temp_unitsym as temp_unitsym
+from cmk.base.plugins.agent_based.utils.temperature import TempParamType as TempParamType
+from cmk.base.plugins.agent_based.utils.temperature import to_celsius as to_celsius
+from cmk.base.plugins.agent_based.utils.temperature import TwoLevelsType as TwoLevelsType
 
-Number = Union[int, float]
+Number = int | float
 
 # ('foo', 5), ('foo', 5, 2, 7), ('foo', 5, None, None)
-PerfDataEntryType = Union[Tuple[AnyStr, Number], Tuple[AnyStr, Number, Optional[Number]]]
-PerfDataType = List[PerfDataEntryType]
+PerfDataEntryType = tuple[AnyStr, Number] | tuple[AnyStr, Number, Number | None]
+PerfDataType = list[PerfDataEntryType]
 
 # Generic Check Type. Can be used elsewhere too.
-CheckType = Tuple[StatusType, AnyStr, PerfDataType]
+CheckType = tuple[StatusType, AnyStr, PerfDataType]
 
 #################################################################################################
 #
@@ -76,9 +83,17 @@ def _normalize_level(entry):
     return entry
 
 
-def check_temperature_determine_levels(dlh, usr_warn, usr_crit, usr_warn_lower, usr_crit_lower,
-                                       dev_warn, dev_crit, dev_warn_lower, dev_crit_lower):
-
+def check_temperature_determine_levels(  # pylint: disable=too-many-branches
+    dlh,
+    usr_warn,
+    usr_crit,
+    usr_warn_lower,
+    usr_crit_lower,
+    dev_warn,
+    dev_crit,
+    dev_warn_lower,
+    dev_crit_lower,
+):
     # Default values if none of the branches will match.
     warn = crit = warn_lower = crit_lower = None
 
@@ -98,14 +113,16 @@ def check_temperature_determine_levels(dlh, usr_warn, usr_crit, usr_warn_lower, 
     # minn is a min that deals with None in the way we want here.
     elif dlh == "best":
         warn, crit = maxx(usr_warn, dev_warn), maxx(usr_crit, dev_crit)
-        warn_lower, crit_lower = minn(usr_warn_lower,
-                                      dev_warn_lower), minn(usr_crit_lower, dev_crit_lower)
+        warn_lower, crit_lower = minn(usr_warn_lower, dev_warn_lower), minn(
+            usr_crit_lower, dev_crit_lower
+        )
 
     # Use most critical of your and device's levels
     elif dlh == "worst":
         warn, crit = minn(usr_warn, dev_warn), minn(usr_crit, dev_crit)
-        warn_lower, crit_lower = maxx(usr_warn_lower,
-                                      dev_warn_lower), maxx(usr_crit_lower, dev_crit_lower)
+        warn_lower, crit_lower = maxx(usr_warn_lower, dev_warn_lower), maxx(
+            usr_crit_lower, dev_crit_lower
+        )
 
     # Use user's levels if present, otherwise the device's
     elif dlh == "usrdefault":
@@ -134,33 +151,48 @@ def check_temperature_determine_levels(dlh, usr_warn, usr_crit, usr_warn_lower, 
 
 
 # determine temperature trends. This is a private function, not to be called by checks
-def check_temperature_trend(temp, params, output_unit, crit, crit_lower, unique_name):
+def check_temperature_trend(  # pylint: disable=too-many-branches
+    temp,
+    params,
+    output_unit,
+    crit,
+    crit_lower,
+    unique_name,
+):
+    value_store = get_value_store()
+
     def combiner(status, infotext):
         if "status" in dir(combiner):
-            combiner.status = max(combiner.status, status)
+            combiner.status = max(combiner.status, status)  # type: ignore[attr-defined]
         else:
-            combiner.status = status
+            combiner.status = status  # type: ignore[attr-defined]
 
         if "infotext" in dir(combiner):
-            combiner.infotext += ", " + infotext
+            combiner.infotext += ", " + infotext  # type: ignore[attr-defined]
         else:
-            combiner.infotext = infotext
+            combiner.infotext = infotext  # type: ignore[attr-defined]
 
     try:
         trend_range_min = params["period"]
         this_time = time.time()
 
         # first compute current rate in C/s by computing delta since last check
-        rate = get_rate("temp.%s.delta" % unique_name, this_time, temp, allow_negative=True)
+        rate = get_rate(
+            get_value_store(),
+            "temp.%s.delta" % unique_name,
+            this_time,
+            temp,
+        )
 
         # average trend, initialize with zero (by default), rate_avg is in C/s
-        rate_avg = get_average("temp.%s.trend" % unique_name, this_time, rate, trend_range_min)
+        rate_avg = get_average(
+            value_store, f"temp.{unique_name}.trend", this_time, rate, trend_range_min
+        )
 
         # rate_avg is growth in C/s, trend is in C per trend range minutes
         trend = float(rate_avg * trend_range_min * 60.0)
         sign = "+" if trend > 0 else ""
-        combiner(
-            0, "rate: %s%s/%g min" % (sign, render_temp(trend, output_unit, True), trend_range_min))
+        combiner(0, f"rate: {sign}{render_temp(trend, output_unit, True)}/{trend_range_min:g} min")
 
         if "trend_levels" in params:
             warn_upper_trend, crit_upper_trend = params["trend_levels"]
@@ -170,27 +202,30 @@ def check_temperature_trend(temp, params, output_unit, crit, crit_lower, unique_
         # number or positive. This works either way. Having a positive lower bound makes no
         # sense anyway.
         if "trend_levels_lower" in params:
-            warn_lower_trend, crit_lower_trend =\
-                [abs(x) * -1 for x in params["trend_levels_lower"]]
+            warn_lower_trend, crit_lower_trend = (abs(x) * -1 for x in params["trend_levels_lower"])
         else:
             warn_lower_trend = crit_lower_trend = None
 
         if crit_upper_trend is not None and trend > crit_upper_trend:
             combiner(
-                2, u"rising faster than %s/%g min(!!)" %
-                (render_temp(crit_upper_trend, output_unit, True), trend_range_min))
+                2,
+                f"rising faster than {render_temp(crit_upper_trend, output_unit, True)}/{trend_range_min:g} min(!!)",
+            )
         elif warn_upper_trend is not None and trend > warn_upper_trend:
             combiner(
-                1, u"rising faster than %s/%g min(!)" %
-                (render_temp(warn_upper_trend, output_unit, True), trend_range_min))
+                1,
+                f"rising faster than {render_temp(warn_upper_trend, output_unit, True)}/{trend_range_min:g} min(!)",
+            )
         elif crit_lower_trend is not None and trend < crit_lower_trend:
             combiner(
-                2, u"falling faster than %s/%g min(!!)" %
-                (render_temp(crit_lower_trend, output_unit, True), trend_range_min))
+                2,
+                f"falling faster than {render_temp(crit_lower_trend, output_unit, True)}/{trend_range_min:g} min(!!)",
+            )
         elif warn_lower_trend is not None and trend < warn_lower_trend:
             combiner(
-                1, u"falling faster than %s/%g min(!)" %
-                (render_temp(warn_lower_trend, output_unit, True), trend_range_min))
+                1,
+                f"falling faster than {render_temp(warn_lower_trend, output_unit, True)}/{trend_range_min:g} min(!)",
+            )
 
         if "trend_timeleft" in params:
             # compute time until temperature limit is reached
@@ -217,20 +252,20 @@ def check_temperature_trend(temp, params, output_unit, crit, crit_lower, unique_
                     combiner(2, "%s until temp limit reached(!!)" % format_minutes(minutes_left))
                 elif minutes_left <= warn:
                     combiner(1, "%s until temp limit reached(!)" % format_minutes(minutes_left))
-    except MKCounterWrapped:
+    except IgnoreResultsError:
         pass
-    return combiner.status, combiner.infotext
+    return combiner.status, combiner.infotext  # type: ignore[attr-defined]
 
 
-def check_temperature(
+def check_temperature(  # pylint: disable=too-many-branches
     reading: Number,
     params: TempParamType,
-    unique_name: Optional[AnyStr],
-    dev_unit: AnyStr = "c",
-    dev_levels: Optional[TwoLevelsType] = None,
-    dev_levels_lower: Optional[TwoLevelsType] = None,
-    dev_status: Optional[StatusType] = None,
-    dev_status_name: AnyStr = None,
+    unique_name: AnyStr | None,
+    dev_unit: AnyStr = "c",  # type: ignore[assignment]
+    dev_levels: TwoLevelsType | None = None,
+    dev_levels_lower: TwoLevelsType | None = None,
+    dev_status: StatusType | None = None,
+    dev_status_name: AnyStr = None,  # type: ignore[assignment]
 ) -> CheckType:
     """Check temperature levels and trends.
 
@@ -242,10 +277,10 @@ def check_temperature(
         params (dict): A dictionary giving the user's configuration. See below.
         unique_name (str): The name under which to track perf-data.
         dev_unit (str): The unit. May be one of 'c', 'f' or 'k'. Default is 'c'.
-        dev_levels (Optional[LevelsType]): The upper levels (warn, crit)
-        dev_levels_lower (Optional[LevelsType]): The lower levels (warn, crit)
-        dev_status (Optional[Number]): The status according to the device itself.
-        dev_status_name (Optional[AnyStr]): What the device thinks the status should be called.
+        dev_levels (LevelsType | None): The upper levels (warn, crit)
+        dev_levels_lower (LevelsType | None): The lower levels (warn, crit)
+        dev_status (Number | None): The status according to the device itself.
+        dev_status_name (AnyStr | None): What the device thinks the status should be called.
 
     Configuration:
         The parameter `params` may contain user configurable settings with the following keys:
@@ -301,59 +336,66 @@ def check_temperature(
     # "device_levels_handling". Result is four variables: {warn,crit}{,_lower}
     dlh = params.get("device_levels_handling", "usrdefault")
 
-    effective_levels = check_temperature_determine_levels(dlh, usr_warn, usr_crit, usr_warn_lower,
-                                                          usr_crit_lower, dev_warn, dev_crit,
-                                                          dev_warn_lower, dev_crit_lower)
+    effective_levels = check_temperature_determine_levels(
+        dlh,
+        usr_warn,
+        usr_crit,
+        usr_warn_lower,
+        usr_crit_lower,
+        dev_warn,
+        dev_crit,
+        dev_warn_lower,
+        dev_crit_lower,
+    )
 
     if dlh == "usr" or (dlh == "usrdefault" and usr_levels):
         # ignore device status if user-levels are used
         dev_status = None
 
     # infotext does some device/user specifics
-    status, _, perfdata = check_levels(  # type: ignore[name-defined]
+    status, _, perfdata = check_levels(
         temp,
         "temp",
         effective_levels,
     )
 
-    if dev_status is not None:
-        if dlh == "best":
-            status = min(status, dev_status)
-        else:
-            status = max(status, dev_status)
-
     # Render actual temperature, e.g. "17.8 °F"
-    infotext = "%s %s" % (render_temp(temp, output_unit), temp_unitsym[output_unit])
-
-    if dev_status is not None and dev_status != 0 and dev_status_name:  # omit status in OK case
-        infotext += ", %s" % dev_status_name
+    infotext = f"{render_temp(temp, output_unit)} {temp_unitsym[output_unit]}"
 
     # In case of a non-OK status output the information about the levels
     if status != 0:
-        usr_levelstext = u""
-        usr_levelstext_lower = u""
-        dev_levelstext = u""
-        dev_levelstext_lower = u""
+        usr_levelstext = ""
+        usr_levelstext_lower = ""
+        dev_levelstext = ""
+        dev_levelstext_lower = ""
 
         if usr_warn is not None and usr_crit is not None:
-            usr_levelstext = " (warn/crit at %s/%s %s)" % (render_temp(
-                usr_warn, output_unit), render_temp(usr_crit,
-                                                    output_unit), temp_unitsym[output_unit])
+            usr_levelstext = " (warn/crit at {}/{} {})".format(
+                render_temp(usr_warn, output_unit),
+                render_temp(usr_crit, output_unit),
+                temp_unitsym[output_unit],
+            )
 
         if usr_warn_lower is not None and usr_crit_lower is not None:
-            usr_levelstext_lower = " (warn/crit below %s/%s %s)" % (render_temp(
-                usr_warn_lower, output_unit), render_temp(usr_crit_lower,
-                                                          output_unit), temp_unitsym[output_unit])
+            usr_levelstext_lower = " (warn/crit below {}/{} {})".format(
+                render_temp(usr_warn_lower, output_unit),
+                render_temp(usr_crit_lower, output_unit),
+                temp_unitsym[output_unit],
+            )
 
         if dev_levels:
-            dev_levelstext = " (device warn/crit at %s/%s %s)" % (render_temp(
-                dev_warn, output_unit), render_temp(dev_crit,
-                                                    output_unit), temp_unitsym[output_unit])
+            dev_levelstext = " (device warn/crit at {}/{} {})".format(
+                render_temp(dev_warn, output_unit),
+                render_temp(dev_crit, output_unit),
+                temp_unitsym[output_unit],
+            )
 
         if dev_levels_lower:
-            dev_levelstext_lower = " (device warn/crit below %s/%s %s)" % (render_temp(
-                dev_warn_lower, output_unit), render_temp(dev_crit_lower,
-                                                          output_unit), temp_unitsym[output_unit])
+            dev_levelstext_lower = " (device warn/crit below {}/{} {})".format(
+                render_temp(dev_warn_lower, output_unit),
+                render_temp(dev_crit_lower, output_unit),
+                temp_unitsym[output_unit],
+            )
 
         # Output only levels that are relevant when computing the state
         if dlh == "usr":
@@ -363,7 +405,9 @@ def check_temperature(
             infotext += dev_levelstext + dev_levelstext_lower
 
         elif dlh in ("best", "worst"):
-            infotext += usr_levelstext + usr_levelstext_lower + dev_levelstext + dev_levelstext_lower
+            infotext += (
+                usr_levelstext + usr_levelstext_lower + dev_levelstext + dev_levelstext_lower
+            )
 
         elif dlh == "devdefault":
             infotext += dev_levelstext + dev_levelstext_lower
@@ -379,6 +423,15 @@ def check_temperature(
             if not usr_levels_lower:
                 infotext += dev_levelstext_lower
 
+    if dev_status is not None:
+        if dlh == "best":
+            status = min(status, dev_status)
+        else:
+            status = max(status, dev_status)
+
+    if dev_status is not None and dev_status != 0 and dev_status_name:  # omit status in OK case
+        infotext += ", State on device: %s" % dev_status_name  # type: ignore[str-bytes-safe]
+
     # all checks specify a unique_name but when multiple sensors are handled through
     #   check_temperature_list, trend is only calculated for the average and then the individual
     #   calls to check_temperate receive no unique_name
@@ -387,17 +440,17 @@ def check_temperature(
     #   the trend_compute dictionary. But a check may want to specify default levels for trends
     #   without activating them. In this case they can leave period unset to deactivate the
     #   feature.
-    if unique_name and params.get("trend_compute", {}).get('period') is not None:
+    if unique_name and params.get("trend_compute", {}).get("period") is not None:
         crit = effective_levels[1]
         crit_lower = effective_levels[3]
-        trend_status, trend_infotext =\
-            check_temperature_trend(temp, params["trend_compute"], output_unit,
-                                    crit, crit_lower, unique_name)
+        trend_status, trend_infotext = check_temperature_trend(
+            temp, params["trend_compute"], output_unit, crit, crit_lower, unique_name
+        )
         status = max(status, trend_status)
         if trend_infotext:
             infotext += ", " + trend_infotext
 
-    return status, infotext, perfdata
+    return status, infotext, perfdata  # type: ignore[return-value]
 
 
 # Wraps around check_temperature to check a list of sensors.
@@ -421,7 +474,7 @@ def check_temperature_list(sensorlist, params, unique_name):
         return 2
 
     if sensorlist == []:
-        return
+        return None
 
     sensor_count = len(sensorlist)
     tempsum = 0
@@ -430,7 +483,6 @@ def check_temperature_list(sensorlist, params, unique_name):
     status = 0
     detailtext = ""
     for entry in sensorlist:
-
         if len(entry) == 2:
             sub_item, temp = entry
             kwargs = {}
@@ -445,34 +497,37 @@ def check_temperature_list(sensorlist, params, unique_name):
         sub_status, sub_infotext, _sub_perfdata = check_temperature(temp, params, None, **kwargs)
         status = worststate(status, sub_status)
         if status != 0:
-            detailtext += (sub_item + ": " + sub_infotext + state_markers[sub_status] + ", ")
+            detailtext += sub_item + ": " + sub_infotext + state_markers[sub_status] + ", "
     if detailtext:
         detailtext = " " + detailtext[:-2]  # Drop trailing ", ", add space to join with summary
 
     unitsym = temp_unitsym[output_unit]
     tempavg = tempsum / float(sensor_count)
     summarytext = "%d Sensors; Highest: %s %s, Average: %s %s, Lowest: %s %s" % (
-        sensor_count, render_temp(tempmax, output_unit), unitsym, render_temp(
-            tempavg, output_unit), unitsym, render_temp(tempmin, output_unit), unitsym)
+        sensor_count,
+        render_temp(tempmax, output_unit),
+        unitsym,
+        render_temp(tempavg, output_unit),
+        unitsym,
+        render_temp(tempmin, output_unit),
+        unitsym,
+    )
     infotext = summarytext + detailtext
     perfdata = [("temp", tempmax)]
 
-    if "trend_compute" in params and\
-            "period" in params["trend_compute"]:
+    if "trend_compute" in params and "period" in params["trend_compute"]:
         usr_warn, usr_crit = params.get("levels") or (None, None)
         usr_warn_lower, usr_crit_lower = params.get("levels_lower") or (None, None)
 
         # no support for dev_unit or dev_levels in check_temperature_list so
         # this ignores the device level handling set in params
-        _warn, crit, _warn_lower, crit_lower =\
-            check_temperature_determine_levels("usr", usr_warn, usr_crit,
-                                               usr_warn_lower, usr_crit_lower,
-                                               None, None,
-                                               None, None)
+        _warn, crit, _warn_lower, crit_lower = check_temperature_determine_levels(
+            "usr", usr_warn, usr_crit, usr_warn_lower, usr_crit_lower, None, None, None, None
+        )
 
-        trend_status, trend_infotext =\
-            check_temperature_trend(tempavg, params["trend_compute"], output_unit,
-                                    crit, crit_lower, unique_name)
+        trend_status, trend_infotext = check_temperature_trend(
+            tempavg, params["trend_compute"], output_unit, crit, crit_lower, unique_name
+        )
         status = max(status, trend_status)
         if trend_infotext:
             infotext += ", " + trend_infotext

@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2020 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2020 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 from cmk.utils.livestatus_helpers.types import Column, Table
 
-# yapf: disable
+# fmt: off
 
 
 class Servicegroups(Table):
@@ -14,9 +13,9 @@ class Servicegroups(Table):
     action_url = Column(
         'action_url',
         col_type='string',
-        description='An optional URL to custom notes or actions on the service group, not supported by Check_MK Micro Core',
+        description='An optional URL to custom notes or actions on the service group',
     )
-    """An optional URL to custom notes or actions on the service group, not supported by Check_MK Micro Core"""
+    """An optional URL to custom notes or actions on the service group"""
 
     alias = Column(
         'alias',
@@ -49,16 +48,16 @@ class Servicegroups(Table):
     notes = Column(
         'notes',
         col_type='string',
-        description='Optional additional notes about the service group, not supported by Check_MK Micro Core',
+        description='Optional additional notes about the service group',
     )
-    """Optional additional notes about the service group, not supported by Check_MK Micro Core"""
+    """Optional additional notes about the service group"""
 
     notes_url = Column(
         'notes_url',
         col_type='string',
-        description='An optional URL to further notes on the service group, not supported by Check_MK Micro Core',
+        description='An optional URL to further notes on the service group',
     )
-    """An optional URL to further notes on the service group, not supported by Check_MK Micro Core"""
+    """An optional URL to further notes on the service group"""
 
     num_services = Column(
         'num_services',

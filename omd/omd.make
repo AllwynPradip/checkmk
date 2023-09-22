@@ -1,4 +1,4 @@
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
@@ -38,8 +38,9 @@ PACKAGE_WORK_DIR := $(BUILD_BASE_DIR)/package_work
 # /opt/omd/versions/[version]/bin/python.
 INTERMEDIATE_INSTALL_BASE := $(BUILD_BASE_DIR)/intermediate_install
 # Results of intermediate install will be stored in package specific archives
-# that are stored in this directory
-PACKAGE_CACHE_BASE := $(BUILD_BASE_DIR)/package_cache
+# that are stored in the global cache directory.
+XDG_CACHE_HOME     ?= $(HOME)/.cache
+PACKAGE_CACHE_BASE := $(XDG_CACHE_HOME)/checkmk/packages
 
 CMK_VERSION        := $(VERSION)
 OMD_SERIAL         := 38
@@ -76,6 +77,10 @@ NEXUS_BUILD_CACHE_URL ?=
 NEXUS_USERNAME ?=
 NEXUS_PASSWORD ?=
 
+define log_time
+	@echo "+++ [$(shell date +%s)] Build step '$1': $2" | tee --append omd_build_times.log
+endef
+
 define cache_pkg_name
 $1_$2_$(BRANCH_VERSION)_$(DISTRO_NAME)_$(DISTRO_VERSION).tar.gz
 endef
@@ -90,7 +95,7 @@ endef
 define pack_pkg_archive
 	@mkdir -p $(PACKAGE_CACHE_BASE)
 	@echo "+++ Load or build $1 to create local build package..."
-	@if [ -z "$(NEXUS_BUILD_CACHE_URL)" ] || ! curl -sSf -o "$1" "$(NEXUS_BUILD_CACHE_URL)/$(call cache_pkg_name,$2,$3)"; then \
+	@if [ -z "$(NEXUS_BUILD_CACHE_URL)" ] || ! curl -sSf -u "$(NEXUS_USERNAME):$(NEXUS_PASSWORD)" -o "$1" "$(NEXUS_BUILD_CACHE_URL)/$(call cache_pkg_name,$2,$3)"; then \
 	    if [ -z "$(NEXUS_BUILD_CACHE_URL)" ]; then \
 	        echo "+++ Nexus URL not configured. Building..." ; \
 	    else \
@@ -117,7 +122,7 @@ endef
 # $2: Directory name produced by the "intermediate install" target
 # $3: BUILD_ID of the given package
 define upload_pkg_archive
-	if [ -n "$(NEXUS_BUILD_CACHE_URL)" ] && ! curl -sf --head "$(NEXUS_BUILD_CACHE_URL)/$(call cache_pkg_name,$2,$3)" >/dev/null; then \
+	if [ -n "$(NEXUS_BUILD_CACHE_URL)" ] && ! curl -sf -u "$(NEXUS_USERNAME):$(NEXUS_PASSWORD)" --head "$(NEXUS_BUILD_CACHE_URL)/$(call cache_pkg_name,$2,$3)" >/dev/null; then \
 	    echo "+++ Package not found on nexus. Upload package..." && \
 	    if ! curl -sSf -u "$(NEXUS_USERNAME):$(NEXUS_PASSWORD)" --upload-file "$1" "$(NEXUS_BUILD_CACHE_URL)/" ; then \
                 echo "+++ ERROR: Upload failed. Continuing with build..." ; \
@@ -125,8 +130,19 @@ define upload_pkg_archive
 	fi
 endef
 
+# $1: Build ID that may be changed manually to enforce a cache invalidation
+# $2: List of file paths to have a look at for file changes
+define cache_pkg_build_id
+$(shell echo -n "$(1)" ; \
+    if [ -n "$(2)" ]; then \
+	echo -n "-" ; \
+	md5sum $(2) | cut -d' ' -f1 | md5sum | cut -d' ' -f1 ; \
+    fi \
+)
+endef
+
 ifeq (0,$(shell gcc -Xlinker --help | grep -e "-plugin" > /dev/null; echo $$?))
-PYTHON_ENABLE_OPTIMIZATIONS ?= --enable-optimizations
+PYTHON_ENABLE_OPTIMIZATIONS ?= --enable-optimizations --with-lto
 else
 PYTHON_ENABLE_OPTIMIZATIONS ?=
 endif

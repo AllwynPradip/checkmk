@@ -1,0 +1,13 @@
+Title: Warn user when number of checkers exceeds number of available CPUs
+Level: 1
+Component: cmc
+Compatible: compat
+Edition: cee
+Version: 2.2.0b1
+Date: 1659087985
+Class: feature
+
+When the global setting "Maximum concurrent Checkmk checkers" (topic "Monitoring core") is set to
+a value greater than the number of available CPUs, users are now warned on the "Activate pending
+changes" page. This is done because the checker processes are most effective when each checker
+gets a dedicated CPU. Users can, however, ignore this warning and keep their setting.

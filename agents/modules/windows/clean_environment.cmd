@@ -18,6 +18,7 @@ del /Q ar.zip
 :: root files 
 powershell Write-Host "Cleaning environment phase 1" -foreground Cyan
 powershell Write-Host "cabs" -foreground white
+del /Q python-3.cab
 del /Q python-3.8.cab
 del /Q python-3.4.cab
 powershell Write-Host "root files" -foreground white
@@ -26,7 +27,9 @@ powershell Write-Host "root folders" -foreground white
 rd /q /s libs
 rd /q /s tools
 rd /q /s include
-rd /q /s DLLs
+del /Q DLLs/*.ico
+del /Q DLLs/*.cat
+del /Q DLLs/*.cat
 rd /q /s scripts
 powershell Write-Host "pycaches" -foreground white
 del /Q Lib\__pycache__\*.*
@@ -47,7 +50,6 @@ del /Q .venv\Scripts\pythonw.exe
 powershell Write-Host "pip, pipenv, virtualenv" -foreground white
 for /f %%i in ('dir /a:d /s /b pipenv*') do rd /s /q %%i
 for /f %%i in ('dir /a:d /s /b virtualenv*') do rd /s /q %%i
-for /f %%i in ('dir /a:d /s /b pip*') do rd /s /q %%i
 
 powershell Write-Host "Cleaning environment phase 2" -foreground Cyan
 :: Agressive cleaning phase

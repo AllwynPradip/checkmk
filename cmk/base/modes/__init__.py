@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-import textwrap
-from typing import Callable, Dict, List, Optional, Set, Tuple, Union
+from __future__ import annotations
 
-from cmk.utils.log import console
-from cmk.utils.plugin_loader import load_plugins
+import textwrap
+from collections.abc import Callable, Sequence
+
 from cmk.utils.exceptions import MKBailOut, MKGeneralException
-from cmk.utils.type_defs import HostName
+from cmk.utils.hostaddress import HostName
+from cmk.utils.log import console
+from cmk.utils.plugin_loader import import_plugins
+from cmk.utils.tags import TagID
 
 import cmk.base.config as config
 
@@ -20,18 +22,18 @@ OptionName = str
 OptionFunction = Callable
 ModeFunction = Callable
 ConvertFunction = Callable
-Options = List[Tuple[OptionSpec, Argument]]
-Arguments = List[str]
+Options = list[tuple[OptionSpec, Argument]]
+Arguments = list[str]
 
 
 class Modes:
     def __init__(self) -> None:
         super().__init__()
-        self._mode_map: Dict[OptionName, Mode] = {}
-        self._modes: List[Mode] = []
-        self._general_options: List[Option] = []
+        self._mode_map: dict[OptionName, Mode] = {}
+        self._modes: list[Mode] = []
+        self._general_options: list[Option] = []
 
-    def register(self, mode: 'Mode') -> None:
+    def register(self, mode: Mode) -> None:
         self._modes.append(mode)
 
         self._mode_map[mode.long_option] = mode
@@ -47,12 +49,11 @@ class Modes:
         except KeyError:
             return False
 
-    def call(self, opt: str, arg: Optional[Argument], all_opts: Options,
-             all_args: Arguments) -> int:
+    def call(self, opt: str, arg: Argument | None, all_opts: Options, all_args: Arguments) -> int:
         mode = self._get(opt)
         sub_options = mode.get_sub_options(all_opts)
 
-        handler_args: List = []
+        handler_args: list = []
         if mode.sub_options:
             handler_args.append(sub_options)
 
@@ -67,7 +68,7 @@ class Modes:
 
         return handler(*handler_args)
 
-    def _get(self, opt: str) -> 'Mode':
+    def _get(self, opt: str) -> Mode:
         opt_name = self._strip_dashes(opt)
         return self._mode_map[opt_name]
 
@@ -78,7 +79,7 @@ class Modes:
             return opt[1:]
         raise NotImplementedError()
 
-    def get(self, name: OptionName) -> 'Mode':
+    def get(self, name: OptionName) -> Mode:
         return self._mode_map[name]
 
     def short_getopt_specs(self) -> str:
@@ -89,8 +90,8 @@ class Modes:
             options += "".join(option.short_getopt_specs())
         return options
 
-    def long_getopt_specs(self) -> List[str]:
-        options: List[str] = []
+    def long_getopt_specs(self) -> list[str]:
+        options: list[str] = []
         for mode in self._modes:
             options += mode.long_getopt_specs()
         for option in self._general_options:
@@ -113,24 +114,23 @@ class Modes:
                 texts.append(text)
         return "\n\n".join(sorted(texts, key=lambda x: x.lstrip(" -").lower()))
 
-    def non_config_options(self) -> List[str]:
-        options: List[str] = []
+    def non_config_options(self) -> list[str]:
+        options: list[str] = []
         for mode in self._modes:
             if not mode.needs_config:
                 options += mode.options()
         return options
 
-    def non_checks_options(self) -> List[str]:
-        options: List[str] = []
+    def non_checks_options(self) -> list[str]:
+        options: list[str] = []
         for mode in self._modes:
             if not mode.needs_checks:
                 options += mode.options()
         return options
 
-    def parse_hostname_list(self,
-                            args: List[str],
-                            with_clusters: bool = True,
-                            with_foreign_hosts: bool = False) -> List[HostName]:
+    def parse_hostname_list(
+        self, args: list[str], with_clusters: bool = True, with_foreign_hosts: bool = False
+    ) -> Sequence[HostName]:
         config_cache = config.get_config_cache()
         if with_foreign_hosts:
             valid_hosts = config_cache.all_configured_realhosts()
@@ -140,31 +140,33 @@ class Modes:
         if with_clusters:
             valid_hosts = valid_hosts.union(config_cache.all_active_clusters())
 
-        hostlist = []
+        hostlist: list[HostName] = []
         for arg in args:
-            if arg[0] != '@' and arg in valid_hosts:
-                hostlist.append(arg)
+            if arg[0] != "@" and arg in valid_hosts:
+                hostlist.append(HostName(arg))
             else:
-                if arg[0] == '@':
+                if arg[0] == "@":
                     arg = arg[1:]
-                tagspec = arg.split(',')
+                tagspec = arg.split(",")
 
                 num_found = 0
                 for hostname in valid_hosts:
-                    if config.hosttags_match_taglist(config_cache.tag_list_of_host(hostname),
-                                                     tagspec):
+                    if config.hosttags_match_taglist(
+                        config_cache.tag_list(hostname), (TagID(_) for _ in tagspec)
+                    ):
                         hostlist.append(hostname)
                         num_found += 1
                 if num_found == 0:
-                    raise MKBailOut("Hostname or tag specification '%s' does "
-                                    "not match any host." % arg)
+                    raise MKBailOut(
+                        "Hostname or tag specification '%s' does " "not match any host." % arg
+                    )
         return hostlist
 
     #
     # GENERAL OPTIONS
     #
 
-    def register_general_option(self, option: 'Option') -> None:
+    def register_general_option(self, option: Option) -> None:
         self._general_options.append(option)
 
     def process_general_options(self, all_opts: Options) -> None:
@@ -189,7 +191,7 @@ class Modes:
                 texts.append("%s" % text)
         return "\n".join(sorted(texts, key=lambda x: x.lstrip(" -").lower()))
 
-    def _get_general_option(self, opt: str) -> 'Optional[Option]':
+    def _get_general_option(self, opt: str) -> Option | None:
         opt_name = self._strip_dashes(opt)
         for option in self._general_options:
             if opt_name in [option.long_option, option.short_option]:
@@ -198,18 +200,20 @@ class Modes:
 
 
 class Option:
-    def __init__(self,
-                 long_option: str,
-                 short_help: str,
-                 short_option: Optional[str] = None,
-                 argument: bool = False,
-                 argument_descr: Optional[str] = None,
-                 argument_conv: Optional[ConvertFunction] = None,
-                 argument_optional: bool = False,
-                 count: bool = False,
-                 handler_function: Optional[OptionFunction] = None,
-                 *,
-                 deprecated_long_options: Optional[Set[str]] = None) -> None:
+    def __init__(
+        self,
+        long_option: str,
+        short_help: str,
+        short_option: str | None = None,
+        argument: bool = False,
+        argument_descr: str | None = None,
+        argument_conv: ConvertFunction | None = None,
+        argument_optional: bool = False,
+        count: bool = False,
+        handler_function: OptionFunction | None = None,
+        *,
+        deprecated_long_options: set[str] | None = None,
+    ) -> None:
         super().__init__()
         self.long_option = long_option
         self.short_help = short_help
@@ -230,7 +234,7 @@ class Option:
     def name(self) -> str:
         return self.long_option
 
-    def options(self) -> List[str]:
+    def options(self) -> list[str]:
         options = []
         if self.short_option:
             options.append(f"-{self.short_option}")
@@ -239,7 +243,7 @@ class Option:
         return options
 
     def is_deprecated_option(self, opt_str: str) -> bool:
-        return opt_str.lstrip('-') in self._deprecated_long_options
+        return opt_str.lstrip("-") in self._deprecated_long_options
 
     def has_short_option(self) -> bool:
         return self.short_option is not None
@@ -247,7 +251,7 @@ class Option:
     def takes_argument(self) -> bool:
         return self.argument
 
-    def short_help_text(self, fmt: str) -> Optional[str]:
+    def short_help_text(self, fmt: str) -> str | None:
         if self.short_help is None:
             return None
 
@@ -270,7 +274,7 @@ class Option:
         )
         return wrapper.fill(self.short_help)
 
-    def short_getopt_specs(self) -> List[str]:
+    def short_getopt_specs(self) -> list[str]:
         if not self.has_short_option():
             return []
 
@@ -281,7 +285,7 @@ class Option:
             spec += ":"
         return [spec]
 
-    def long_getopt_specs(self) -> List[str]:
+    def long_getopt_specs(self) -> list[str]:
         specs = [self.long_option]
         specs.extend(self._deprecated_long_options)
         if self.argument and not self.argument_optional:
@@ -290,39 +294,43 @@ class Option:
 
 
 class Mode(Option):
-    def __init__(self,
-                 long_option: OptionName,
-                 handler_function: ModeFunction,
-                 short_help: str,
-                 short_option: Optional[OptionName] = None,
-                 argument: bool = False,
-                 argument_descr: Optional[str] = None,
-                 argument_conv: Optional[ConvertFunction] = None,
-                 argument_optional: bool = False,
-                 long_help: Optional[List[str]] = None,
-                 needs_config: bool = True,
-                 needs_checks: bool = True,
-                 sub_options: Optional[List[Option]] = None) -> None:
-        super().__init__(long_option,
-                         short_help,
-                         short_option,
-                         argument,
-                         argument_descr,
-                         argument_conv,
-                         argument_optional,
-                         handler_function=handler_function)
+    def __init__(
+        self,
+        long_option: OptionName,
+        handler_function: ModeFunction,
+        short_help: str,
+        short_option: OptionName | None = None,
+        argument: bool = False,
+        argument_descr: str | None = None,
+        argument_conv: ConvertFunction | None = None,
+        argument_optional: bool = False,
+        long_help: list[str] | None = None,
+        needs_config: bool = True,
+        needs_checks: bool = True,
+        sub_options: list[Option] | None = None,
+    ) -> None:
+        super().__init__(
+            long_option,
+            short_help,
+            short_option,
+            argument,
+            argument_descr,
+            argument_conv,
+            argument_optional,
+            handler_function=handler_function,
+        )
         self.long_help = long_help
         self.needs_config = needs_config
         self.needs_checks = needs_checks
         self.sub_options = sub_options or []
 
-    def short_getopt_specs(self) -> List[str]:
+    def short_getopt_specs(self) -> list[str]:
         specs = super().short_getopt_specs()
         for option in self.sub_options:
             specs += option.short_getopt_specs()
         return specs
 
-    def long_getopt_specs(self) -> List[str]:
+    def long_getopt_specs(self) -> list[str]:
         specs = super().long_getopt_specs()
         for option in self.sub_options:
             specs += option.long_getopt_specs()
@@ -332,11 +340,11 @@ class Mode(Option):
     #  -i, --inventory does a HW/SW-Inventory for all, one or several
     #  hosts. If you add the option -f, --force then persisted sections
     #  will be used even if they are outdated.
-    def long_help_text(self) -> Optional[str]:
+    def long_help_text(self) -> str | None:
         if not self.long_help and not self.sub_options:
             return None
 
-        text: List[str] = []
+        text: list[str] = []
 
         option_text = "  "
         if self.short_option:
@@ -369,12 +377,11 @@ class Mode(Option):
 
         return "\n\n".join(text)
 
-    def get_sub_options(
-            self, all_opts: Options) -> Optional[Dict[OptionName, Union[Argument, int, bool]]]:
+    def get_sub_options(self, all_opts: Options) -> dict[OptionName, Argument | int | bool] | None:
         if not self.sub_options:
             return None
 
-        options: Dict[OptionName, Union[Argument, int, bool]] = {}
+        options: dict[OptionName, Argument | int | bool] = {}
 
         for o, a in all_opts:
             for option in self.sub_options:
@@ -387,7 +394,7 @@ class Mode(Option):
                 if a and not option.takes_argument():
                     raise MKGeneralException("No argument to %s expected." % o)
 
-                val: Union[Argument, bool] = a
+                val: Argument | bool = a
                 if not option.takes_argument():
                     if option.count:
                         value = options.setdefault(option.name(), 0)
@@ -419,4 +426,4 @@ keepalive_option = Option(
 
 modes = Modes()
 
-load_plugins(__file__, __package__)
+import_plugins(__file__, __package__)

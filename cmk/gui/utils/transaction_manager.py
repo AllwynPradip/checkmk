@@ -1,31 +1,48 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-import time
-import random
-from typing import List, Optional
+from __future__ import annotations
 
-import cmk.gui.config as config
-from cmk.gui.http import Request
+import random
+import time
+from collections.abc import Callable
+from typing import Protocol
+
+from cmk.gui.ctx_stack import session_attr
+from cmk.gui.http import request
+
+
+class ReaderProtocol(Protocol):
+    def __call__(self, lock: bool) -> list[str]:
+        ...
 
 
 class TransactionManager:
     """Manages the handling of transaction IDs used by the GUI to prevent against
     performing the same action multiple times."""
-    def __init__(self, request: Request) -> None:
-        super(TransactionManager, self).__init__()
-        self._request = request
 
-        self._new_transids: List[str] = []
+    def __init__(
+        self,
+        reader: ReaderProtocol,
+        writer: Callable[[list[str]], None],
+    ) -> None:
+        self._reader = reader
+        self._writer = writer
+
+        self._new_transids: list[str] = []
         self._ignore_transids = False
-        self._current_transid: Optional[str] = None
+        self._current_transid: str | None = None
 
     def ignore(self) -> None:
         """Makes the GUI skip all transaction validation steps"""
         self._ignore_transids = True
+
+    def unignore(self) -> None:
+        # Not sure what this is all about, but some test apparently requires it to be false after
+        # the request is over, so we make it false after the request is over.
+        self._ignore_transids = False
 
     def get(self) -> str:
         """Returns a transaction ID that can be used during a subsequent action"""
@@ -49,20 +66,20 @@ class TransactionManager:
     def store_new(self) -> None:
         """All generated transids are saved per user.
 
-        They are stored in the transids.mk.  Per user only up to 20 transids of
+        They are stored in the transids.mk. Per user only up to 30 transids of
         the already existing ones are kept. The transids generated on the
         current page are all kept. IDs older than one day are deleted."""
         if not self._new_transids:
             return
 
-        valid_ids = config.user.transids(lock=True)
+        valid_ids = self._reader(lock=True)
         cleared_ids = []
         now = time.time()
         for valid_id in valid_ids:
             timestamp = valid_id.split("/")[0]
             if now - int(timestamp) < 86400:  # one day
                 cleared_ids.append(valid_id)
-        config.user.save_transids((cleared_ids[-20:] + self._new_transids))
+        self._writer(cleared_ids[-30:] + self._new_transids)
 
     def transaction_valid(self) -> bool:
         """Checks if the current transaction is valid
@@ -75,32 +92,37 @@ class TransactionManager:
         or -1, then it's always valid (this is used for webservice calls).
         This was also possible for normal users, but has been removed to preven
         security related issues."""
-        if not self._request.has_var("_transid"):
+        if not request.has_var("_transid"):
             return False
 
-        transid = self._request.get_str_input_mandatory("_transid", "")
-        if self._ignore_transids and (not transid or transid == '-1'):
+        transid = request.get_str_input_mandatory("_transid", "")
+        if self._ignore_transids and (not transid or transid == "-1"):
             return True  # automation
 
-        if '/' not in transid:
+        if "/" not in transid:
             return False
 
         # Normal user/password auth user handling
-        timestamp = transid.split("/", 1)[0]
+        timestamp_str = transid.split("/", 1)[0]
+
+        try:
+            timestamp = int(timestamp_str)
+        except ValueError:
+            return False
 
         # If age is too old (one week), it is always
         # invalid:
         now = time.time()
-        if now - int(timestamp) >= 604800:  # 7 * 24 hours
+        if now - timestamp >= 604800:  # 7 * 24 hours
             return False
 
         # Now check, if this transid is a valid one
-        return transid in config.user.transids(lock=False)
+        return transid in self._reader(lock=False)
 
     def is_transaction(self) -> bool:
         """Checks, if the current page is a transation, i.e. something that is secured by
         a transid (such as a submitted form)"""
-        return self._request.has_var("_transid")
+        return request.has_var("_transid")
 
     def check_transaction(self) -> bool:
         """called by page functions in order to check, if this was a reload or the original form submission.
@@ -114,7 +136,7 @@ class TransactionManager:
         None:  -> a browser reload or a negative confirmation
         """
         if self.transaction_valid():
-            transid = self._request.var("_transid")
+            transid = request.var("_transid")
             if transid and transid != "-1":
                 self._invalidate(transid)
             return True
@@ -122,9 +144,12 @@ class TransactionManager:
 
     def _invalidate(self, used_id: str) -> None:
         """Remove the used transid from the list of valid ones"""
-        valid_ids = config.user.transids(lock=True)
+        valid_ids = self._reader(lock=True)
         try:
             valid_ids.remove(used_id)
         except ValueError:
             return
-        config.user.save_transids(valid_ids)
+        self._writer(valid_ids)
+
+
+transactions: TransactionManager = session_attr(("user", "transactions"), TransactionManager)

@@ -1,19 +1,13 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# yapf: disable
-# type: ignore
-
-
-
+# fmt: off
+# mypy: disable-error-code=var-annotated
 checkname = "netapp_api_vs_traffic"
 
-
 freeze_time = "2001-09-09T01:46:40"
-
 
 mock_item_state = {
     "": {
@@ -163,24 +157,16 @@ checks = {
             "flvs0",
             {},
             [
+                (0, "FCP avg. Read latency: -", []),
+                (0, "FCP avg. Write latency: -", []),
                 (
                     0,
-                    "FCP avg. Read latency: 0.00 ms",
-                    [("fcp_read_latency", 0.0, None, None, None, None)],
-                ),
-                (
-                    0,
-                    "FCP avg. Write latency: 0.00 ms",
-                    [("fcp_write_latency", 0.0, None, None, None, None)],
-                ),
-                (
-                    0,
-                    "FCP read data: 0.00 B",
+                    "FCP read data: 0 B",
                     [("fcp_read_data", 9.000180003600072e-06, None, None, None, None)],
                 ),
                 (
                     0,
-                    "FCP write data: 0.00 B",
+                    "FCP write data: 0 B",
                     [("fcp_write_data", 9.000180003600072e-06, None, None, None, None)],
                 ),
             ],
@@ -189,24 +175,16 @@ checks = {
             "flvs0_norefs",
             {},
             [
+                (0, "FCP avg. Read latency: -", []),
+                (0, "FCP avg. Write latency: -", []),
                 (
                     0,
-                    "FCP avg. Read latency: 0.00 ms",
-                    [("fcp_read_latency", 0.0, None, None, None, None)],
-                ),
-                (
-                    0,
-                    "FCP avg. Write latency: 0.00 ms",
-                    [("fcp_write_latency", 0.0, None, None, None, None)],
-                ),
-                (
-                    0,
-                    "FCP read data: 0.00 B",
+                    "FCP read data: 0 B",
                     [("fcp_read_data", 9.000180003600072e-06, None, None, None, None)],
                 ),
                 (
                     0,
-                    "FCP write data: 0.00 B",
+                    "FCP write data: 0 B",
                     [("fcp_write_data", 9.000180003600072e-06, None, None, None, None)],
                 ),
             ],
@@ -215,43 +193,17 @@ checks = {
             "ilvs0",
             {},
             [
+                (0, "iSCSI avg. Read latency: -", []),
+                (0, "iSCSI avg. Write latency: -", []),
                 (
                     0,
-                    "iSCSI avg. Read latency: 0.00 ms",
-                    [("iscsi_read_latency", 0.0, None, None, None, None)],
+                    "iSCSI read data: 0 B",
+                    [("iscsi_read_data", 9.000180003600072e-06, None, None, None, None)],
                 ),
                 (
                     0,
-                    "iSCSI avg. Write latency: 0.00 ms",
-                    [("iscsi_write_latency", 0.0, None, None, None, None)],
-                ),
-                (
-                    0,
-                    "iSCSI read data: 0.00 B",
-                    [
-                        (
-                            "iscsi_read_data",
-                            9.000180003600072e-06,
-                            None,
-                            None,
-                            None,
-                            None,
-                        )
-                    ],
-                ),
-                (
-                    0,
-                    "iSCSI write data: 0.00 B",
-                    [
-                        (
-                            "iscsi_write_data",
-                            9.000180003600072e-06,
-                            None,
-                            None,
-                            None,
-                            None,
-                        )
-                    ],
+                    "iSCSI write data: 0 B",
+                    [("iscsi_write_data", 9.000180003600072e-06, None, None, None, None)],
                 ),
             ],
         ),
@@ -259,43 +211,17 @@ checks = {
             "ilvs0_norefs",
             {},
             [
+                (0, "iSCSI avg. Read latency: -", []),
+                (0, "iSCSI avg. Write latency: -", []),
                 (
                     0,
-                    "iSCSI avg. Read latency: 0.00 ms",
-                    [("iscsi_read_latency", 0.0, None, None, None, None)],
+                    "iSCSI read data: 0 B",
+                    [("iscsi_read_data", 9.000180003600072e-06, None, None, None, None)],
                 ),
                 (
                     0,
-                    "iSCSI avg. Write latency: 0.00 ms",
-                    [("iscsi_write_latency", 0.0, None, None, None, None)],
-                ),
-                (
-                    0,
-                    "iSCSI read data: 0.00 B",
-                    [
-                        (
-                            "iscsi_read_data",
-                            9.000180003600072e-06,
-                            None,
-                            None,
-                            None,
-                            None,
-                        )
-                    ],
-                ),
-                (
-                    0,
-                    "iSCSI write data: 0.00 B",
-                    [
-                        (
-                            "iscsi_write_data",
-                            9.000180003600072e-06,
-                            None,
-                            None,
-                            None,
-                            None,
-                        )
-                    ],
+                    "iSCSI write data: 0 B",
+                    [("iscsi_write_data", 9.000180003600072e-06, None, None, None, None)],
                 ),
             ],
         ),
@@ -305,12 +231,12 @@ checks = {
             [
                 (
                     0,
-                    "Ethernet received data: 0.00 B",
+                    "Ethernet received data: 0 B",
                     [("if_in_octets", 9.000180003600072e-06, None, None, None, None)],
                 ),
                 (
                     0,
-                    "Ethernet sent data: 0.00 B",
+                    "Ethernet sent data: 0 B",
                     [("if_out_octets", 9.000180003600072e-06, None, None, None, None)],
                 ),
                 (
@@ -352,36 +278,14 @@ checks = {
                 (
                     0,
                     "NFS read throughput: 0.00 B/s",
-                    [
-                        (
-                            "nfs_read_throughput",
-                            9.000180003600072e-06,
-                            None,
-                            None,
-                            None,
-                            None,
-                        )
-                    ],
+                    [("nfs_read_throughput", 9.000180003600072e-06, None, None, None, None)],
                 ),
                 (
                     0,
                     "NFS write throughput: 0.00 B/s",
-                    [
-                        (
-                            "nfs_write_throughput",
-                            9.000180003600072e-06,
-                            None,
-                            None,
-                            None,
-                            None,
-                        )
-                    ],
+                    [("nfs_write_throughput", 9.000180003600072e-06, None, None, None, None)],
                 ),
-                (
-                    0,
-                    "NFS OPs: 0",
-                    [("nfs_ios", 9.000180003600072e-06, None, None, None, None)],
-                ),
+                (0, "NFS OPs: 0", [("nfs_ios", 9.000180003600072e-06, None, None, None, None)]),
             ],
         ),
         (
@@ -396,22 +300,9 @@ checks = {
                 (
                     0,
                     "NFSv4 write OPs: 0",
-                    [
-                        (
-                            "nfsv4_write_ios",
-                            9.000180003600072e-06,
-                            None,
-                            None,
-                            None,
-                            None,
-                        )
-                    ],
+                    [("nfsv4_write_ios", 9.000180003600072e-06, None, None, None, None)],
                 ),
-                (
-                    0,
-                    "NFSv4 OPs: 0",
-                    [("nfsv4_ios", 9.000180003600072e-06, None, None, None, None)],
-                ),
+                (0, "NFSv4 OPs: 0", [("nfsv4_ios", 9.000180003600072e-06, None, None, None, None)]),
             ],
         ),
         (
@@ -421,30 +312,12 @@ checks = {
                 (
                     0,
                     "NFSv4.1 read throughput: 0.00 B/s",
-                    [
-                        (
-                            "nfsv4_1_read_throughput",
-                            9.000180003600072e-06,
-                            None,
-                            None,
-                            None,
-                            None,
-                        )
-                    ],
+                    [("nfsv4_1_read_throughput", 9.000180003600072e-06, None, None, None, None)],
                 ),
                 (
                     0,
                     "NFSv4.1 write throughput: 0.00 B/s",
-                    [
-                        (
-                            "nfsv4_1_write_throughput",
-                            9.000180003600072e-06,
-                            None,
-                            None,
-                            None,
-                            None,
-                        )
-                    ],
+                    [("nfsv4_1_write_throughput", 9.000180003600072e-06, None, None, None, None)],
                 ),
             ],
         ),
@@ -452,16 +325,8 @@ checks = {
             "pcvs0",
             {},
             [
-                (
-                    0,
-                    "CIFS read latency: 0.00 ms",
-                    [("cifs_read_latency", 0.0, None, None, None, None)],
-                ),
-                (
-                    0,
-                    "CIFS write latency: 0.00 ms",
-                    [("cifs_write_latency", 0.0, None, None, None, None)],
-                ),
+                (0, "CIFS read latency: -", []),
+                (0, "CIFS write latency: -", []),
                 (
                     0,
                     "CIFS read OPs: 0",
@@ -474,21 +339,6 @@ checks = {
                 ),
             ],
         ),
-        (
-            "pcvs0_norefs",
-            {},
-            [
-                (
-                    0,
-                    "CIFS read latency: 0.00 ms",
-                    [("cifs_read_latency", 0.0, None, None, None, None)],
-                ),
-                (
-                    0,
-                    "CIFS write latency: 0.00 ms",
-                    [("cifs_write_latency", 0.0, None, None, None, None)],
-                ),
-            ],
-        ),
+        ("pcvs0_norefs", {}, [(0, "CIFS read latency: -", []), (0, "CIFS write latency: -", [])]),
     ]
 }

@@ -1,19 +1,12 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import Mapping
+from collections.abc import Mapping
 
+from .agent_based_api.v1 import IgnoreResults, register, Result, Service, State
 from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult
-from .agent_based_api.v1 import (
-    IgnoreResults,
-    register,
-    Result,
-    Service,
-    State,
-)
 from .utils import postgres
 
 # <<<postgres_query_duration>>>
@@ -72,21 +65,27 @@ def check_postgres_query_duration(item: str, section: postgres.Section) -> Check
 
 def cluster_check_postgres_query_duration(
     item: str,
-    section: Mapping[str, postgres.Section],
+    section: Mapping[str, postgres.Section | None],
 ) -> CheckResult:
     data = [
-        d for d in (node_section.get(item) for node_section in section.values()) if d is not None
+        d
+        for d in (
+            node_section.get(item) for node_section in section.values() if node_section is not None
+        )
+        if d is not None
     ]
-    yield from check_postgres_query_duration(item, {item: sum(data, [])} if data else {})
+    yield from check_postgres_query_duration(
+        item, {item: [x for d in data for x in d]} if data else {}
+    )
 
 
 register.agent_section(
-    name='postgres_query_duration',
+    name="postgres_query_duration",
     parse_function=postgres.parse_dbs,
 )
 
 register.check_plugin(
-    name='postgres_query_duration',
+    name="postgres_query_duration",
     service_name="PostgreSQL Query Duration %s",
     discovery_function=discover_postgres_query_duration,
     check_function=check_postgres_query_duration,

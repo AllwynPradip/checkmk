@@ -1,27 +1,28 @@
 #!/usr/bin/env python3
-# -*- encoding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-# yapf: disable
-# type: ignore
-checkname = 'pulse_secure_log_util'
+# fmt: off
+# mypy: disable-error-code=var-annotated
+checkname = "pulse_secure_log_util"
 
-info = [['19']]
+info = [["19"]]
 
-discovery = {'': [(None, {})]}
+discovery = {"": [(None, {})]}
 
 checks = {
-    '': [
+    "": [
         (
-            None, {}, [
+            None,
+            {},
+            [
                 (
-                    0, 'Percentage of log file used: 19.0%', [
-                        ('log_file_utilization', 19, None, None, None, None)
-                    ]
+                    0,
+                    "Percentage of log file used: 19.00%",
+                    [("log_file_utilization", 19, None, None, None, None)],
                 )
-            ]
+            ],
         )
     ]
 }

@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import os
 
+from tests.testlib.site import Site
 
-def test_hooks(site):
+
+def test_hooks(site: Site) -> None:
     hooks = [
         "ADMIN_MAIL",
         "APACHE_MODE",
@@ -19,20 +20,23 @@ def test_hooks(site):
         "LIVESTATUS_TCP_ONLY_FROM",
         "LIVESTATUS_TCP_PORT",
         "LIVESTATUS_TCP_TLS",
+        "AGENT_RECEIVER",
+        "AGENT_RECEIVER_PORT",
         "MKEVENTD",
         "MKEVENTD_SNMPTRAP",
         "MKEVENTD_SYSLOG",
         "MKEVENTD_SYSLOG_TCP",
         "MULTISITE_AUTHORISATION",
         "MULTISITE_COOKIE_AUTH",
-        "NAGIOS_THEME",
-        "NSCA",
-        "NSCA_TCP_PORT",
         "PNP4NAGIOS",
         "TMPFS",
     ]
 
-    if site.version.edition() == "enterprise":
+    if (
+        site.version.is_enterprise_edition()
+        or site.version.is_cloud_edition()
+        or site.version.is_saas_edition()
+    ):
         hooks += [
             "LIVEPROXYD",
         ]

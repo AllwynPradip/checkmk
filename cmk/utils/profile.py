@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 """A helper module to implement profiling functionalitiy. The main part
@@ -8,38 +7,60 @@ is to provide a contextmanager that can be added to existing code with
 minimal changes."""
 
 import cProfile
-from pathlib import Path
 import time
-from types import TracebackType
-from typing import Callable, Type, Union, Any, Optional
+from collections.abc import Callable
+from pathlib import Path
+from typing import ParamSpec, TypeVar
 
 import cmk.utils.log
 
 
 class Profile:
-    def __init__(self,
-                 enabled: bool = True,
-                 profile_file: Union[Path, str, None] = None,
-                 **kwargs: Any) -> None:
-
-        if profile_file is None or isinstance(profile_file, Path):
-            self._profile_file = profile_file
-        else:
-            self._profile_file = Path(profile_file)
-
+    def __init__(
+        self,
+        *,
+        enabled: bool = True,
+        profile_file: Path | str | None = None,
+        # cProfile.Profile arguments, avoids the need for Any
+        timer: Callable[[], float] | None = None,
+        timeunit: float = 0.0,
+        subcalls: bool = True,
+        builtins: bool = True,
+    ) -> None:
         self._enabled = enabled
-        self._kwargs = kwargs
-        self._profile: Optional[cProfile.Profile] = None
+        self._profile_file = (
+            profile_file
+            if profile_file is None or isinstance(profile_file, Path)
+            else Path(profile_file)
+        )
+        self._timer = timer
+        self._timeunit = timeunit
+        self._subcalls = subcalls
+        self._builtins = builtins
+        self._profile: cProfile.Profile | None = None
 
-    def __enter__(self) -> 'Profile':
+    def __enter__(self) -> "Profile":
         if self._enabled:
             cmk.utils.log.logger.info("Recording profile")
-            self._profile = cProfile.Profile(**self._kwargs)
+            # cProfile.Profile has a slightly interesting API: None is not allowed as a timer argument. o_O
+            self._profile = (
+                cProfile.Profile(
+                    timeunit=self._timeunit,
+                    subcalls=self._subcalls,
+                    builtins=self._builtins,
+                )
+                if self._timer is None
+                else cProfile.Profile(
+                    timer=self._timer,
+                    timeunit=self._timeunit,
+                    subcalls=self._subcalls,
+                    builtins=self._builtins,
+                )
+            )
             self._profile.enable()
         return self
 
-    def __exit__(self, exc_type: Optional[Type[BaseException]], exc_val: Optional[BaseException],
-                 exc_tb: Optional[TracebackType]) -> None:
+    def __exit__(self, *exc_info: object) -> None:
         if not self._enabled:
             return
 
@@ -67,33 +88,38 @@ class Profile:
 
         script_path = self._profile_file.with_suffix(".py")
         with script_path.open("w", encoding="utf-8") as f:
-            f.write(u"#!/usr/bin/env python3\n"
-                    "import pstats\n"
-                    "stats = pstats.Stats(\"%s\")\n"
-                    "stats.sort_stats('time').print_stats()\n" % self._profile_file)
+            f.write(
+                "#!/usr/bin/env python3\n"
+                "import pstats\n"
+                'stats = pstats.Stats("%s")\n'
+                "stats.sort_stats('cumtime').print_stats()\n" % self._profile_file
+            )
         script_path.chmod(0o755)
         cmk.utils.log.logger.info("Created profile dump script: %s", script_path)
 
 
-def profile_call(base_dir: str, enabled: bool = True) -> Callable:
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def profile_call(base_dir: str, enabled: bool = True) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """
-This decorator can be used to profile single functions as a starting point.
-A directory where the file will be saved has to be stated as first argument.
-Enabling/disabling as second argument is optional. By default it's enabled.
-The name of the output file is composed of the function name itself,
-the timestamp when the function was called and the suffix '.profile'.
-Examples:
-  @cmk.utils.profile.profile_call(base_dir="/PATH/TO/DIR")
-  @cmk.utils.profile.profile_call(base_dir="/PATH/TO/DIR", enabled=True)
-  @cmk.utils.profile.profile_call(base_dir="/PATH/TO/DIR", enabled=False)
-"""
-    def decorate(f):
-        def wrapper(*args, **kwargs):
-            filepath = "%s/%s_%s.profile" % \
-                (base_dir.rstrip("/"), f.__name__, time.time())
+    This decorator can be used to profile single functions as a starting point.
+    A directory where the file will be saved has to be stated as first argument.
+    Enabling/disabling as second argument is optional. By default it's enabled.
+    The name of the output file is composed of the function name itself,
+    the timestamp when the function was called and the suffix '.profile'.
+    Examples:
+      @cmk.utils.profile.profile_call(base_dir="/PATH/TO/DIR")
+      @cmk.utils.profile.profile_call(base_dir="/PATH/TO/DIR", enabled=True)
+      @cmk.utils.profile.profile_call(base_dir="/PATH/TO/DIR", enabled=False)"""
+
+    def wrap(f: Callable[P, R]) -> Callable[P, R]:
+        def wrapped_f(*args: P.args, **kwargs: P.kwargs) -> R:
+            filepath = f"{base_dir.rstrip('/')}/{f.__name__}_{time.time()}.profile"
             with Profile(enabled=enabled, profile_file=filepath):
                 return f(*args, **kwargs)
 
-        return wrapper
+        return wrapped_f
 
-    return decorate
+    return wrap

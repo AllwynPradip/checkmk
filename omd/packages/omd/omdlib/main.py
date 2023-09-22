@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- encoding: utf-8; py-indent-offset: 4 -*-
 #
 #       U  ___ u  __  __   ____
 #        \/"_ \/U|' \/ '|u|  _"\
@@ -24,68 +23,111 @@
 # Boston, MA 02110-1301 USA.
 """The command line tool specific implementations of the omd command and main entry point"""
 
-import os
-import re
-import sys
+from __future__ import annotations
+
 import abc
-import pwd
-import time
 import errno
 import fcntl
-import random
-import shutil
-import string
-import tarfile
-import traceback
-import subprocess
-import signal
 import io
 import logging
+import os
+import pty
+import pwd
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tarfile
+import time
+import traceback
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from enum import auto, Enum
 from pathlib import Path
-from typing import NoReturn, IO, cast, Iterable, Union, Tuple, Optional, Callable, List, NamedTuple, Dict
+from typing import assert_never, BinaryIO, cast, Final, IO, Literal, NamedTuple, NoReturn
+from uuid import uuid4
 
-from passlib.hash import sha256_crypt  # type: ignore[import]
-import psutil  # type: ignore[import]
-from six import ensure_str
+import psutil
+
+import omdlib
+import omdlib.backup
+import omdlib.certs
+import omdlib.utils
+from omdlib.config_hooks import (
+    call_hook,
+    ConfigHook,
+    ConfigHookChoices,
+    ConfigHooks,
+    create_config_environment,
+    hook_exists,
+    load_config_hooks,
+    load_defaults,
+    load_hook_dependencies,
+    save_site_conf,
+    sort_hooks,
+)
+from omdlib.console import ok, show_success
+from omdlib.contexts import AbstractSiteContext, RootContext, SiteContext
+from omdlib.dialog import (
+    ask_user_choices,
+    dialog_config_choice_has_error,
+    dialog_menu,
+    dialog_message,
+    dialog_regex,
+    dialog_yesno,
+    user_confirms,
+)
+from omdlib.init_scripts import call_init_scripts, check_status
+from omdlib.skel_permissions import Permissions, read_skel_permissions, skel_permissions_file_path
+from omdlib.system_apache import (
+    delete_apache_hook,
+    has_old_apache_hook_in_site,
+    is_apache_hook_up_to_date,
+    register_with_system_apache,
+    unregister_from_system_apache,
+)
+from omdlib.tmpfs import (
+    add_to_fstab,
+    mark_tmpfs_initialized,
+    prepare_tmpfs,
+    remove_from_fstab,
+    restore_tmpfs_dump,
+    save_tmpfs_dump,
+    tmpfs_mounted,
+    unmount_tmpfs,
+)
+from omdlib.type_defs import CommandOptions, Config, ConfigChoiceHasError, Replacements
+from omdlib.users_and_groups import (
+    find_processes_of_user,
+    group_exists,
+    group_id,
+    groupdel,
+    switch_to_site_user,
+    user_exists,
+    user_id,
+    user_logged_in,
+    user_verify,
+    useradd,
+    userdel,
+)
+from omdlib.utils import chdir, delete_user_file
+from omdlib.version_info import VersionInfo
 
 import cmk.utils.log
 import cmk.utils.tty as tty
-from cmk.utils.log import VERBOSE
+from cmk.utils.certs import cert_dir, CN_TEMPLATE, root_cert_path, RootCA
+from cmk.utils.crypto.password import Password
+from cmk.utils.crypto.password_hashing import hash_password
 from cmk.utils.exceptions import MKTerminate
+from cmk.utils.licensing.helper import get_instance_id_file_path, save_instance_id
+from cmk.utils.log import VERBOSE
+from cmk.utils.paths import mkbackup_lock_dir
+from cmk.utils.resulttype import Error, OK, Result
+from cmk.utils.version import Version, versions_compatible, VersionsIncompatible
+from cmk.utils.werks.acknowledgement import unacknowledged_incompatible_werks
 
-import omdlib
-import omdlib.certs
-import omdlib.backup
-import omdlib.utils
-from omdlib.utils import chdir, ok, delete_user_file
-from omdlib.version_info import VersionInfo
-from omdlib.dialog import (
-    dialog_menu,
-    dialog_regex,
-    dialog_yesno,
-    dialog_message,
-    user_confirms,
-    ask_user_choices,
-)
-from omdlib.init_scripts import call_init_scripts, check_status
-from omdlib.contexts import AbstractSiteContext, SiteContext, RootContext
-from omdlib.type_defs import Config, CommandOptions, Replacements
-from omdlib.skel_permissions import (
-    Permissions,
-    read_skel_permissions,
-    skel_permissions_file_path,
-)
-from omdlib.config_hooks import (create_config_environment, save_site_conf, load_config_hooks,
-                                 load_hook_dependencies, sort_hooks, hook_exists, call_hook,
-                                 ConfigHook, ConfigHooks)
-from omdlib.users_and_groups import (find_processes_of_user, groupdel, useradd, userdel, user_id,
-                                     user_exists, group_exists, group_id, user_logged_in,
-                                     switch_to_site_user, user_verify)
-from omdlib.tmpfs import (tmpfs_mounted, prepare_tmpfs, mark_tmpfs_initialized, unmount_tmpfs,
-                          add_to_fstab, remove_from_fstab, restore_tmpfs_dump, save_tmpfs_dump)
-
-Arguments = List[str]
-ConfigChangeCommands = List[Tuple[str, str]]
+Arguments = list[str]
+ConfigChangeCommands = list[tuple[str, str]]
 
 cmk.utils.log.setup_console_logging()
 logger = logging.getLogger("cmk.omd")
@@ -108,7 +150,7 @@ def bail_out(message: str) -> NoReturn:
 class Log(io.StringIO):
     def __init__(self, fd: int, logfile: str) -> None:
         super().__init__()
-        self.log = open(logfile, 'a', encoding="utf-8")
+        self.log = open(logfile, "a", encoding="utf-8")  # pylint: disable=consider-using-with
         self.fd = fd
 
         if self.fd == 1:
@@ -129,9 +171,9 @@ class Log(io.StringIO):
 
     # TODO: Ensure we get Text here
     def write(self, data: str) -> int:
-        text = ensure_str(data)
+        text = data
         self.orig.write(text)
-        self.log.write(self.color_replace.sub('', text))
+        self.log.write(self.color_replace.sub("", text))
         return len(text)
 
     def flush(self) -> None:
@@ -139,8 +181,8 @@ class Log(io.StringIO):
         self.orig.flush()
 
 
-g_stdout_log: Optional[Log] = None
-g_stderr_log: Optional[Log] = None
+g_stdout_log: Log | None = None
+g_stderr_log: Log | None = None
 
 
 def start_logging(logfile: str) -> None:
@@ -155,15 +197,33 @@ def stop_logging() -> None:
     g_stderr_log = None
 
 
-def show_success(exit_code: int) -> int:
-    if exit_code is True or exit_code == 0:
-        ok()
-    else:
-        sys.stdout.write(tty.error + "\n")
-    return exit_code
+class CommandType(Enum):
+    create = auto()
+    move = auto()
+    copy = auto()
+
+    # reuse in options or not:
+    restore_existing_site = auto()
+    restore_as_new_site = auto()
+
+    @property
+    def short(self) -> str:
+        if self is CommandType.create:
+            return "create"
+
+        if self is CommandType.move:
+            return "mv"
+
+        if self is CommandType.copy:
+            return "cp"
+
+        if self in [CommandType.restore_as_new_site, CommandType.restore_existing_site]:
+            return "restore"
+
+        raise TypeError()
 
 
-#.
+# .
 #   .--Sites---------------------------------------------------------------.
 #   |                        ____  _ _                                     |
 #   |                       / ___|(_) |_ ___  ___                          |
@@ -191,7 +251,10 @@ def all_sites() -> Iterable[str]:
 
 def start_site(version_info: VersionInfo, site: SiteContext) -> None:
     prepare_and_populate_tmpfs(version_info, site)
-    call_init_scripts(site, "start")
+    call_init_scripts(site.dir, "start")
+    if not (instance_id_file_path := get_instance_id_file_path(Path(site.dir))).exists():
+        # Existing sites may not have an instance ID yet. After an update we create a new one.
+        save_instance_id(file_path=instance_id_file_path, instance_id=uuid4())
 
 
 def stop_if_not_stopped(site: SiteContext) -> None:
@@ -200,14 +263,14 @@ def stop_if_not_stopped(site: SiteContext) -> None:
 
 
 def stop_site(site: SiteContext) -> None:
-    call_init_scripts(site, "stop")
+    call_init_scripts(site.dir, "stop")
 
 
 def get_skel_permissions(skel_path: str, perms: Permissions, relpath: str) -> int:
     try:
         return perms[relpath]
     except KeyError:
-        return get_file_permissions("%s/%s" % (skel_path, relpath))
+        return get_file_permissions(f"{skel_path}/{relpath}")
 
 
 def get_file_permissions(path: str) -> int:
@@ -217,7 +280,7 @@ def get_file_permissions(path: str) -> int:
         return 0
 
 
-def get_file_owner(path: str) -> Optional[str]:
+def get_file_owner(path: str) -> str | None:
     try:
         return pwd.getpwuid(os.stat(path).st_uid)[0]
     except Exception:
@@ -231,13 +294,13 @@ def create_version_symlink(site: SiteContext, version: str) -> None:
     os.symlink("../../versions/%s" % version, linkname)
 
 
-def calculate_admin_password(options: CommandOptions) -> str:
-    if options.get("admin-password"):
-        return cast(str, options["admin-password"])
-    return random_password()
+def calculate_admin_password(options: CommandOptions) -> Password:
+    if pw := options.get("admin-password"):
+        return Password(pw)
+    return Password.random(12)
 
 
-def set_admin_password(site: SiteContext, pw: str) -> None:
+def set_admin_password(site: SiteContext, pw: Password) -> None:
     with open("%s/etc/htpasswd" % site.dir, "w") as f:
         f.write("cmkadmin:%s\n" % hash_password(pw))
 
@@ -249,8 +312,7 @@ def create_skeleton_files(site: SiteContext, directory: str) -> None:
     skelroot = "/omd/versions/%s/skel" % omdlib.__version__
     with chdir(skelroot):  # make relative paths
         for dirpath, dirnames, filenames in os.walk(directory):
-            if dirpath.startswith("./"):
-                dirpath = dirpath[2:]
+            dirpath = dirpath.removeprefix("./")
             for entry in dirnames + filenames:
                 if exclude_tmp:
                     if dirpath == "." and entry == "tmp":
@@ -263,6 +325,9 @@ def create_skeleton_files(site: SiteContext, directory: str) -> None:
 def save_version_meta_data(site: SiteContext, version: str) -> None:
     """Make meta information from the version available in the site directory
 
+    the prurpose of this metadir is to be able to upgrade without the old
+    version and the symlinks
+
     Currently it holds the following information
     A) A copy of the versions skel/ directory
     B) A copy of the skel.permissions file
@@ -270,9 +335,8 @@ def save_version_meta_data(site: SiteContext, version: str) -> None:
     """
     try:
         shutil.rmtree(site.version_meta_dir)
-    except OSError as e:
-        if e.errno != errno.ENOENT:
-            raise
+    except FileNotFoundError:
+        pass
 
     skelroot = "/omd/versions/%s/skel" % version
     shutil.copytree(skelroot, "%s/skel" % site.version_meta_dir, symlinks=True)
@@ -283,31 +347,32 @@ def save_version_meta_data(site: SiteContext, version: str) -> None:
         f.write("%s\n" % version)
 
 
-def create_skeleton_file(skelbase: str, userbase: str, relpath: str,
-                         replacements: Replacements) -> None:
-    skel_path = skelbase + "/" + relpath
-    user_path = userbase + "/" + relpath
+def create_skeleton_file(
+    skelbase: str, userbase: str, relpath: str, replacements: Replacements
+) -> None:
+    skel_path = Path(skelbase, relpath)
+    user_path = Path(userbase, relpath)
 
     # Remove old version, if existing (needed during update)
-    if os.path.exists(user_path):
-        delete_user_file(user_path)
+    if user_path.exists():
+        delete_user_file(str(user_path))
 
     # Create directories, symlinks and files
-    if os.path.islink(skel_path):
-        os.symlink(os.readlink(skel_path), user_path)
-    elif os.path.isdir(skel_path):
-        os.makedirs(user_path)
+    if skel_path.is_symlink():
+        user_path.symlink_to(skel_path.readlink())
+    elif skel_path.is_dir():
+        user_path.mkdir(parents=True)
     else:
-        open(user_path, "wb").write(replace_tags(open(skel_path, "rb").read(), replacements))
+        user_path.write_bytes(replace_tags(skel_path.read_bytes(), replacements))
 
-    if not os.path.islink(skel_path):
-        mode = read_skel_permissions().get(relpath)
+    if not skel_path.is_symlink():
+        mode = read_skel_permissions().get(relpath.removeprefix("./"))
         if mode is None:
-            if os.path.isdir(skel_path):
-                mode = 0o755
+            if skel_path.is_dir():
+                mode = 0o750
             else:
-                mode = 0o644
-        os.chmod(user_path, mode)
+                mode = 0o640
+        user_path.chmod(mode)
 
 
 def prepare_and_populate_tmpfs(version_info: VersionInfo, site: SiteContext) -> None:
@@ -338,7 +403,7 @@ def try_chown(filename: str, user: str) -> None:
             gid = pwd.getpwnam(user).pw_gid
             os.chown(filename, uid, gid)
         except Exception as e:
-            sys.stderr.write("Cannot chown %s to %s: %s\n" % (filename, user, e))
+            sys.stderr.write(f"Cannot chown {filename} to {user}: {e}\n")
 
 
 # Walks all files in the skeleton dir to execute a function for each file
@@ -349,11 +414,13 @@ def try_chown(filename: str, user: str) -> None:
 #
 # The option 'relbase' is optional. It can contain a relative path which can be used
 # as base for the walk instead of walking the whole tree.
-def walk_skel(root: str,
-              conflict_mode: str,
-              depth_first: bool,
-              exclude_if_in: Optional[str] = None,
-              relbase: str = '.') -> Iterable[str]:
+def walk_skel(
+    root: str,
+    conflict_mode: str,
+    depth_first: bool,
+    exclude_if_in: str | None = None,
+    relbase: str = ".",
+) -> Iterable[str]:
     with chdir(root):
         # Note: os.walk first finds level 1 directories, then deeper
         # layers. If we need a real depth search instead, where we first
@@ -384,7 +451,7 @@ def walk_skel(root: str,
                 yield path
 
 
-#.
+# .
 #   .--omd update----------------------------------------------------------.
 #   |                           _                   _       _              |
 #   |        ___  _ __ ___   __| |  _   _ _ __   __| | __ _| |_ ___        |
@@ -415,43 +482,46 @@ def patch_skeleton_files(conflict_mode: str, old_site: SiteContext, new_site: Si
 
                 src = dirpath + "/" + fn
                 dst = targetdir + "/" + fn
-                if os.path.isfile(src) and not os.path.islink(src) \
-                    and os.path.exists(dst):  # not deleted by user
+                if (
+                    os.path.isfile(src) and not os.path.islink(src) and os.path.exists(dst)
+                ):  # not deleted by user
                     try:
                         patch_template_file(conflict_mode, src, dst, old_site, new_site)
                     except MKTerminate:
                         raise
                     except Exception as e:
-                        sys.stderr.write("Error patching template file '%s': %s\n" % (dst, e))
+                        sys.stderr.write(f"Error patching template file '{dst}': {e}\n")
 
 
 def _is_unpatchable_file(path: str) -> bool:
     return path.endswith(".png") or path.endswith(".pdf")
 
 
-def patch_template_file(conflict_mode: str, src: str, dst: str, old_site: SiteContext,
-                        new_site: SiteContext) -> None:
+def patch_template_file(  # pylint: disable=too-many-branches
+    conflict_mode: str, src: str, dst: str, old_site: SiteContext, new_site: SiteContext
+) -> None:
     # Create patch from old instantiated skeleton file to new one
-    content = open(src, "rb").read()
+    content = Path(src).read_bytes()
     for site in [old_site, new_site]:
-        filename = "%s.skel.%s" % (dst, site.name)
-        open(filename, "wb").write(replace_tags(content, site.replacements))
-        try_chown(filename, new_site.name)
+        filename = Path(f"{dst}.skel.{site.name}")
+        filename.write_bytes(replace_tags(content, site.replacements))
+        try_chown(str(filename), new_site.name)
 
     # If old and new skeleton file are identical, then do nothing
-    old_orig_path = "%s.skel.%s" % (dst, old_site.name)
-    new_orig_path = "%s.skel.%s" % (dst, new_site.name)
-    if open(old_orig_path).read() == open(new_orig_path).read():
-        os.remove(old_orig_path)
-        os.remove(new_orig_path)
+    old_orig_path = Path(f"{dst}.skel.{old_site.name}")
+    new_orig_path = Path(f"{dst}.skel.{new_site.name}")
+    if old_orig_path.read_text() == new_orig_path.read_text():
+        old_orig_path.unlink()
+        new_orig_path.unlink()
         return
 
     # Now create a patch from old to new and immediately apply on
     # existing - possibly user modified - file.
 
-    result = os.system(  # nosec
-        "diff -u %s %s | %s/bin/patch --force --backup --forward --silent %s" %
-        (old_orig_path, new_orig_path, new_site.dir, dst))
+    result = os.system(  # nosec B605 # BNS:2b5952
+        f"diff -u {old_orig_path} {new_orig_path} | {new_site.dir}/bin/patch --force --backup --forward --silent {dst}"
+    )
+
     try_chown(dst, new_site.name)
     try_chown(dst + ".rej", new_site.name)
     try_chown(dst + ".orig", new_site.name)
@@ -467,8 +537,10 @@ def patch_template_file(conflict_mode: str, src: str, dst: str, old_site: SiteCo
             ("keep", "Keep half-converted version of the file"),
             ("restore", "Restore your original version of the file"),
             ("install", "Install the default version of the file"),
-            ("brute",
-             "Simply replace /%s/ with /%s/ in that file" % (old_site.name, new_site.name)),
+            (
+                "brute",
+                f"Simply replace /{old_site.name}/ with /{new_site.name}/ in that file",
+            ),
             ("shell", "Open a shell for looking around"),
             ("abort", "Stop here and abort!"),
         ]
@@ -483,33 +555,50 @@ def patch_template_file(conflict_mode: str, src: str, dst: str, old_site: SiteCo
                     "Conflicts in " + src + "!",
                     "I've tried to merge your changes with the renaming of %s into %s.\n"
                     "Unfortunately there are conflicts with your changes. \n"
-                    "You have the following options: " % (old_site.name, new_site.name), options)
+                    "You have the following options: " % (old_site.name, new_site.name),
+                    options,
+                )
 
             if choice == "abort":
                 bail_out("Renaming aborted.")
             elif choice == "keep":
                 break
             elif choice == "edit":
-                os.system("%s '%s'" % (get_editor(), dst))  # nosec
+                with subprocess.Popen(
+                    [get_editor(), dst],
+                ):
+                    pass
             elif choice == "diff":
-                os.system("diff -u %s %s%s" % (old_orig_path, new_orig_path, pipe_pager()))  # nosec
+                os.system(
+                    f"diff -u {old_orig_path} {new_orig_path}{pipe_pager()}"
+                )  # nosec B605 # BNS:2b5952
             elif choice == "brute":
-                os.system(  # nosec
-                    "sed 's@/%s/@/%s/@g' %s.orig > %s" % (old_site.name, new_site.name, dst, dst))
-                changed = len([
-                    l for l in os.popen("diff %s.orig %s" % (dst, dst)).readlines()  # nosec
-                    if l.startswith(">")
-                ])
+                os.system(  # nosec B605 # BNS:2b5952
+                    f"sed 's@/{old_site.name}/@/{new_site.name}/@g' {dst}.orig > {dst}"
+                )
+                changed = len(
+                    [
+                        l
+                        for l in os.popen(
+                            f"diff {dst}.orig {dst}"
+                        ).readlines()  # nosec B605 # BNS:2b5952
+                        if l.startswith(">")
+                    ]
+                )
                 if changed == 0:
                     sys.stdout.write("Found no matching line.\n")
                 else:
-                    sys.stdout.write("Did brute-force replace, changed %s%d%s lines:\n" %
-                                     (tty.bold, changed, tty.normal))
-                    os.system("diff -u %s.orig %s" % (dst, dst))  # nosec
+                    sys.stdout.write(
+                        "Did brute-force replace, changed %s%d%s lines:\n"
+                        % (tty.bold, changed, tty.normal)
+                    )
+                    with subprocess.Popen(["diff", "-u", dst + ".orig", dst]):
+                        pass
                     break
             elif choice == "you":
-                os.system(  # nosec
-                    "pwd ; diff -u %s %s.orig%s" % (old_orig_path, dst, pipe_pager()))
+                os.system(
+                    f"pwd ; diff -u {old_orig_path} {dst}.orig{pipe_pager()}"
+                )  # nosec B605 # BNS:2b5952
             elif choice == "restore":
                 os.rename(dst + ".orig", dst)
                 sys.stdout.write("Restored your version.\n")
@@ -523,15 +612,20 @@ def patch_template_file(conflict_mode: str, src: str, dst: str, old_site: SiteCo
                 sys.stdout.write(" %-35s the half-converted file\n" % (relname,))
                 sys.stdout.write(" %-35s your original version\n" % (relname + ".orig"))
                 sys.stdout.write(" %-35s the failed parts of the patch\n" % (relname + ".rej"))
-                sys.stdout.write(" %-35s default version with the old site name\n" %
-                                 (relname + ".skel.%s" % old_site.name))
-                sys.stdout.write(" %-35s default version with the new site name\n" %
-                                 (relname + ".skel.%s" % new_site.name))
+                sys.stdout.write(
+                    " %-35s default version with the old site name\n"
+                    % (relname + ".skel.%s" % old_site.name)
+                )
+                sys.stdout.write(
+                    " %-35s default version with the new site name\n"
+                    % (relname + ".skel.%s" % new_site.name)
+                )
 
                 sys.stdout.write("\n Starting BASH. Type CTRL-D to continue.\n\n")
                 thedir = "/".join(dst.split("/")[:-1])
-                os.system("su - %s -c 'cd %s ; bash -i'" % (new_site.name, thedir))  # nosec
-
+                os.system(
+                    f"su - {new_site.name} -c 'cd {thedir} ; bash -i'"
+                )  # nosec B605 # BNS:2b5952
     # remove unnecessary files
     try:
         os.remove(dst + ".skel." + old_site.name)
@@ -544,12 +638,13 @@ def patch_template_file(conflict_mode: str, src: str, dst: str, old_site: SiteCo
 
 # Try to merge changes from old->new version and
 # old->user version
-def merge_update_file(site: SiteContext, conflict_mode: str, relpath: str, old_version: str,
-                      new_version: str) -> None:
+def merge_update_file(  # pylint: disable=too-many-branches
+    site: SiteContext, conflict_mode: str, relpath: str, old_version: str, new_version: str
+) -> None:
     fn = tty.bold + relpath + tty.normal
 
-    user_path = site.dir + "/" + relpath
-    permissions = os.stat(user_path).st_mode
+    user_path = Path(site.dir, relpath)
+    permissions = user_path.stat().st_mode
 
     if _try_merge(site, conflict_mode, relpath, old_version, new_version) == 0:
         # ACHTUNG: Hier müssen die Dateien $DATEI-alt, $DATEI-neu und $DATEI.orig
@@ -559,14 +654,16 @@ def merge_update_file(site: SiteContext, conflict_mode: str, relpath: str, old_v
 
     # No success. Should we try merging the users' changes onto the new file?
     # user_patch = os.popen(
-    merge_message = ' (watch out for >>>>> and <<<<<)'
+    merge_message = " (watch out for >>>>> and <<<<<)"
     editor = get_editor()
-    reject_file = user_path + ".rej"
+    reject_file = Path(f"{user_path}.rej")
 
-    options = [("diff", "Show differences between the new default and your version"),
-               ("you", "Show your changes compared with the old default version"),
-               ("new", "Show what has changed from %s to %s" % (old_version, new_version))]
-    if os.path.exists(reject_file):  # missing if patch has --merge
+    options = [
+        ("diff", "Show differences between the new default and your version"),
+        ("you", "Show your changes compared with the old default version"),
+        ("new", f"Show what has changed from {old_version} to {new_version}"),
+    ]
+    if reject_file.exists():  # missing if patch has --merge
         options.append(("missing", "Show which changes from the update have not been merged"))
     options += [
         ("edit", "Edit half-merged file%s" % merge_message),
@@ -588,70 +685,78 @@ def merge_update_file(site: SiteContext, conflict_mode: str, relpath: str, old_v
                 "Conflicts in " + relpath + "!",
                 "I've tried to merge the changes from version %s to %s into %s.\n"
                 "Unfortunately there are conflicts with your changes. \n"
-                "You have the following options: " % (old_version, new_version, relpath), options)
+                "You have the following options: " % (old_version, new_version, relpath),
+                options,
+            )
 
         if choice == "abort":
             bail_out("Update aborted.")
         elif choice == "keep":
             break
         elif choice == "edit":
-            os.system("%s '%s'" % (editor, user_path))  # nosec
+            with subprocess.Popen([editor, user_path]):
+                pass
         elif choice == "diff":
-            os.system(  # nosec
-                "diff -u %s.orig %s-%s%s" % (user_path, user_path, new_version, pipe_pager()))
+            os.system(
+                f"diff -u {user_path}.orig {user_path}-{new_version}{pipe_pager()}"
+            )  # nosec B605 # BNS:2b5952
         elif choice == "you":
-            os.system(  # nosec
-                "diff -u %s-%s %s.orig%s" % (user_path, old_version, user_path, pipe_pager()))
+            os.system(
+                f"diff -u {user_path}-{old_version} {user_path}.orig{pipe_pager()}"
+            )  # nosec B605 # BNS:2b5952
         elif choice == "new":
-            os.system(  # nosec
-                "diff -u %s-%s %s-%s%s" %
-                (user_path, old_version, user_path, new_version, pipe_pager()))
+            os.system(  # nosec B605 # BNS:2b5952
+                f"diff -u {user_path}-{old_version} {user_path}-{new_version}{pipe_pager()}"
+            )
         elif choice == "missing":
-            if os.path.exists(reject_file):
-                sys.stdout.write(tty.bgblue + tty.white + open(reject_file).read() + tty.normal)
+            if reject_file.exists():
+                sys.stdout.write(tty.bgblue + tty.white + reject_file.read_text() + tty.normal)
             else:
                 sys.stdout.write("File %s not found.\n" % reject_file)
 
         elif choice == "shell":
             relname = relpath.split("/")[-1]
             sys.stdout.write(" %-25s: the current half-merged file\n" % relname)
-            sys.stdout.write(" %-25s: the default version of %s\n" %
-                             (relname + "." + old_version, old_version))
-            sys.stdout.write(" %-25s: the default version of %s\n" %
-                             (relname + "." + new_version, new_version))
+            sys.stdout.write(
+                " %-25s: the default version of %s\n" % (relname + "." + old_version, old_version)
+            )
+            sys.stdout.write(
+                " %-25s: the default version of %s\n" % (relname + "." + new_version, new_version)
+            )
             sys.stdout.write(" %-25s: your original version\n" % (relname + ".orig"))
-            if os.path.exists(reject_file):
+            if reject_file.exists():
                 sys.stdout.write(" %-25s: changes that haven't been merged\n" % relname + ".rej")
 
             sys.stdout.write("\n Starting BASH. Type CTRL-D to continue.\n\n")
-            thedir = "/".join(user_path.split("/")[:-1])
-            os.system("cd '%s' ; bash -i" % thedir)  # nosec
+            os.system("cd '%s' ; bash -i" % user_path.parent)  # nosec B605 # BNS:2b5952
         elif choice == "restore":
-            os.rename(user_path + ".orig", user_path)
-            os.chmod(user_path, permissions)
+            Path(f"{user_path}.orig").rename(user_path)
+            user_path.chmod(permissions)
             sys.stdout.write("Restored your version.\n")
             break
         elif choice == "try again":
-            os.rename(user_path + ".orig", user_path)
-            os.system("%s '%s'" % (editor, user_path))  # nosec
+            Path(f"{user_path}.orig").rename(user_path)
+            with subprocess.Popen([editor, user_path]):
+                pass
             if _try_merge(site, conflict_mode, relpath, old_version, new_version) == 0:
-                sys.stdout.write("Successfully merged changes from %s -> %s into %s\n" %
-                                 (old_version, new_version, fn))
+                sys.stdout.write(
+                    f"Successfully merged changes from {old_version} -> {new_version} into {fn}\n"
+                )
                 return
             sys.stdout.write(" Merge failed again.\n")
 
         else:  # install
-            os.rename("%s-%s" % (user_path, new_version), user_path)
-            os.chmod(user_path, permissions)
+            Path(f"{user_path}-{new_version}").rename(user_path)
+            user_path.chmod(permissions)
             sys.stdout.write("Installed default file of version %s.\n" % new_version)
             break
 
     # Clean up temporary files
     for p in [
-            "%s-%s" % (user_path, old_version),
-            "%s-%s" % (user_path, new_version),
-            "%s.orig" % user_path,
-            "%s.rej" % user_path
+        f"{user_path}-{old_version}",
+        f"{user_path}-{new_version}",
+        "%s.orig" % user_path,
+        "%s.rej" % user_path,
     ]:
         try:
             os.remove(p)
@@ -659,43 +764,53 @@ def merge_update_file(site: SiteContext, conflict_mode: str, relpath: str, old_v
             pass
 
 
-def _try_merge(site: SiteContext, conflict_mode: str, relpath: str, old_version: str,
-               new_version: str) -> int:
-    user_path = site.dir + "/" + relpath
+def _try_merge(
+    site: SiteContext, conflict_mode: str, relpath: str, old_version: str, new_version: str
+) -> int:
+    user_path = Path(site.dir, relpath)
 
-    for version, skelroot in [(old_version, site.version_skel_dir),
-                              (new_version, "/omd/versions/%s/skel" % new_version)]:
-        p = "%s/%s" % (skelroot, relpath)
+    for version, skelroot in [
+        (old_version, site.version_skel_dir),
+        (new_version, "/omd/versions/%s/skel" % new_version),
+    ]:
+        p = Path(skelroot, relpath)
         while True:
             try:
-                skel_content = open(p, "rb").read()
+                skel_content = p.read_bytes()
                 break
             except Exception:
                 # Do not ask the user in non-interactive mode.
                 if conflict_mode in ["abort", "install"]:
-                    bail_out("Skeleton file '%s' of version %s not readable." % (p, version))
+                    bail_out(f"Skeleton file '{p}' of version {version} not readable.")
                 elif conflict_mode == "keepold" or not user_confirms(
-                        site, conflict_mode, "Skeleton file of version %s not readable" % version,
-                        "The file '%s' is not readable for the site user. "
-                        "This is most probably due a bug in release 0.42. "
-                        "You can either fix that problem by making the file "
-                        "readable with doing as root: chmod +r '%s' "
-                        "or assume the file as empty. In that case you might "
-                        "damage your configuration file "
-                        "in case you have made changes to it in your site. What shall we do?" %
-                    (p, p), relpath, "retry", "Retry reading the file (after you've fixed it)",
-                        "ignore", "Assume the file to be empty"):
+                    site,
+                    conflict_mode,
+                    "Skeleton file of version %s not readable" % version,
+                    "The file '%s' is not readable for the site user. "
+                    "This is most probably due a bug in release 0.42. "
+                    "You can either fix that problem by making the file "
+                    "readable with doing as root: chmod +r '%s' "
+                    "or assume the file as empty. In that case you might "
+                    "damage your configuration file "
+                    "in case you have made changes to it in your site. What shall we do?" % (p, p),
+                    relpath,
+                    "retry",
+                    "Retry reading the file (after you've fixed it)",
+                    "ignore",
+                    "Assume the file to be empty",
+                ):
                     skel_content = b""
                     break
-        open("%s-%s" % (user_path, version),
-             "wb").write(replace_tags(skel_content, site.replacements))
-    version_patch = os.popen(  # nosec
-        "diff -u %s-%s %s-%s" % (user_path, old_version, user_path, new_version)).read()
+        Path(f"{user_path}-{version}").write_bytes(replace_tags(skel_content, site.replacements))
+    version_patch = os.popen(  # nosec B605 # BNS:2b5952
+        f"diff -u {user_path}-{old_version} {user_path}-{new_version}"
+    ).read()
 
     # First try to merge the changes in the version into the users' file
-    f = os.popen(  # nosec
-        "%s/bin/patch --force --backup --forward --silent --merge %s >/dev/null" %
-        (site.dir, user_path), "w")
+    f = os.popen(  # nosec B605 # BNS:2b5952
+        f"{site.dir}/bin/patch --force --backup --forward --silent --merge {user_path} >/dev/null",
+        "w",
+    )
     f.write(version_patch)
     status = f.close()
     if status:
@@ -704,7 +819,7 @@ def _try_merge(site: SiteContext, conflict_mode: str, relpath: str, old_version:
 
 
 # Compares two files and returns infos wether the file type or contants have changed """
-def file_status(site: SiteContext, source_path: str, target_path: str) -> Tuple[bool, bool, bool]:
+def file_status(site: SiteContext, source_path: str, target_path: str) -> tuple[bool, bool, bool]:
     source_type = filetype(source_path)
     target_type = filetype(target_path)
 
@@ -716,21 +831,33 @@ def file_status(site: SiteContext, source_path: str, target_path: str) -> Tuple[
 
     changed_type = source_type != target_type
     # FIXME: Was ist, wenn aus einer Datei ein Link gemacht wurde? Oder umgekehrt?
-    changed_content = ((source_type == "file" and target_type == "file" and
-                        source_content != target_content) or
-                       (source_type == "link" and target_type == "link" and
-                        os.readlink(source_path) != os.readlink(target_path)))
+    changed_content = (
+        source_type == "file" and target_type == "file" and source_content != target_content
+    ) or (
+        source_type == "link"
+        and target_type == "link"
+        and os.readlink(source_path) != os.readlink(target_path)
+    )
     changed = changed_type or changed_content
 
     return (changed_type, changed_content, changed)
 
 
-def _execute_update_file(relpath: str, site: SiteContext, conflict_mode: str, old_version: str,
-                         new_version: str, old_perms: Permissions) -> None:
+def _execute_update_file(
+    relpath: str,
+    site: SiteContext,
+    conflict_mode: str,
+    old_version: str,
+    new_version: str,
+    new_edition: str,
+    old_perms: Permissions,
+) -> None:
     todo = True
     while todo:
         try:
-            update_file(relpath, site, conflict_mode, old_version, new_version, old_perms)
+            update_file(
+                relpath, site, conflict_mode, old_version, new_version, new_edition, old_perms
+            )
             todo = False
         except MKTerminate:
             raise
@@ -738,28 +865,43 @@ def _execute_update_file(relpath: str, site: SiteContext, conflict_mode: str, ol
             todo = False
             sys.stderr.write(StateMarkers.error * 40 + "\n")
             sys.stderr.write(StateMarkers.error + " Exception      %s\n" % (relpath))
-            sys.stderr.write(StateMarkers.error + " " +
-                             traceback.format_exc().replace('\n', "\n" + StateMarkers.error + " ") +
-                             "\n")
+            sys.stderr.write(
+                StateMarkers.error
+                + " "
+                + traceback.format_exc().replace("\n", "\n" + StateMarkers.error + " ")
+                + "\n"
+            )
             sys.stderr.write(StateMarkers.error * 40 + "\n")
 
             # If running in interactive mode ask the user to terminate or retry
             # In case of non interactive mode just throw the exception
-            if conflict_mode == 'ask':
-                options = [("retry", "Retry the operation"),
-                           ("continue", "Continue with next files"),
-                           ("abort", "Stop here and abort update!")]
+            if conflict_mode == "ask":
+                options = [
+                    ("retry", "Retry the operation"),
+                    ("continue", "Continue with next files"),
+                    ("abort", "Stop here and abort update!"),
+                ]
                 choice = ask_user_choices(
-                    'Problem occured', 'We detected an exception (printed above). You have the '
-                    'chance to fix things and retry the operation now.', options)
-                if choice == 'abort':
+                    "Problem occured",
+                    "We detected an exception (printed above). You have the "
+                    "chance to fix things and retry the operation now.",
+                    options,
+                )
+                if choice == "abort":
                     bail_out("Update aborted.")
-                elif choice == 'retry':
+                elif choice == "retry":
                     todo = True  # Try again
 
 
-def update_file(relpath: str, site: SiteContext, conflict_mode: str, old_version: str,
-                new_version: str, old_perms: Permissions) -> None:
+def update_file(  # pylint: disable=too-many-branches
+    relpath: str,
+    site: SiteContext,
+    conflict_mode: str,
+    old_version: str,
+    new_version: str,
+    to_edition: str,
+    old_perms: Permissions,
+) -> None:
     old_skel = site.version_skel_dir
     new_skel = "/omd/versions/%s/skel" % new_version
 
@@ -777,6 +919,9 @@ def update_file(relpath: str, site: SiteContext, conflict_mode: str, old_version
             return
 
     replacements = site.replacements
+    # omd_version of the site still contains the old version/edition at this point, make sure new
+    # edition is provided
+    replacements["###EDITION###"] = to_edition
 
     old_path = old_skel + "/" + relpath
     new_path = new_skel + "/" + relpath
@@ -795,8 +940,9 @@ def update_file(relpath: str, site: SiteContext, conflict_mode: str, old_version
     # compare our old with our new version
     _we_changed_type, _we_changed_content, we_changed = file_status(site, old_path, new_path)
 
-    non_empty_directory = not os.path.islink(user_path) and os.path.isdir(user_path) and bool(
-        os.listdir(user_path))
+    non_empty_directory = (
+        not os.path.islink(user_path) and os.path.isdir(user_path) and bool(os.listdir(user_path))
+    )
 
     #     if global_opts.verbose:
     #         sys.stdout.write("%s%s%s:\n" % (tty.bold, relpath, tty.normal))
@@ -825,12 +971,19 @@ def update_file(relpath: str, site: SiteContext, conflict_mode: str, old_version
     # 2b) user's file has a different content or type
     elif not old_type:
         if user_confirms(
-                site, conflict_mode, "Conflict at " + relpath, "The new version ships the %s %s, "
-                "but you have created a %s in that place "
-                "yourself. Shall we keep your %s or replace "
-                "is with my %s?" % (new_type, relpath, user_type, user_type, new_type), relpath,
-                "keep", "Keep your %s" % user_type, "replace",
-                "Replace your %s with the new default %s" % (user_type, new_type)):
+            site,
+            conflict_mode,
+            "Conflict at " + relpath,
+            "The new version ships the %s %s, "
+            "but you have created a %s in that place "
+            "yourself. Shall we keep your %s or replace "
+            "is with my %s?" % (new_type, relpath, user_type, user_type, new_type),
+            relpath,
+            "keep",
+            "Keep your %s" % user_type,
+            "replace",
+            f"Replace your {user_type} with the new default {new_type}",
+        ):
             sys.stdout.write(StateMarkers.warn + " Keeping your   %s\n" % fn)
         else:
             create_skeleton_file(new_skel, site.dir, relpath, replacements)
@@ -844,44 +997,65 @@ def update_file(relpath: str, site: SiteContext, conflict_mode: str, old_version
     # 3b) same, but user has not deleted and changed type
     elif not new_type and user_changed_type:
         if user_confirms(
-                site, conflict_mode, "Obsolete file " + relpath, "The %s %s has become obsolete in "
-                "this version, but you have changed it into a "
-                "%s. Do you want to keep your %s or "
-                "may I delete it for you, please?" % (old_type, relpath, user_type, user_type),
-                relpath, "keep", "Keep your %s" % user_type, "delete", "Delete it"):
+            site,
+            conflict_mode,
+            "Obsolete file " + relpath,
+            "The %s %s has become obsolete in "
+            "this version, but you have changed it into a "
+            "%s. Do you want to keep your %s or "
+            "may I remove it for you, please?" % (old_type, relpath, user_type, user_type),
+            relpath,
+            "keep",
+            "Keep your %s" % user_type,
+            "remove",
+            "Remove it",
+        ):
             sys.stdout.write(StateMarkers.warn + " Keeping your   %s\n" % fn)
         else:
             delete_user_file(user_path)
-            sys.stdout.write(StateMarkers.warn + " Deleted        %s\n" % fn)
+            sys.stdout.write(StateMarkers.warn + " Removed        %s\n" % fn)
 
     # 3c) same, but user has changed it contents
     elif not new_type and user_changed_content:
         if user_confirms(
-                site, conflict_mode, "Changes in obsolete %s %s" % (old_type, relpath),
-                "The %s %s has become obsolete in "
-                "the new version, but you have changed its contents. "
-                "Do you want to keep your %s or "
-                "may I delete it for you, please?" % (old_type, relpath, user_type), relpath,
-                "keep", "keep your %s, though it is obsolete" % user_type, "delete",
-                "delete your %s" % user_type):
+            site,
+            conflict_mode,
+            f"Changes in obsolete {old_type} {relpath}",
+            "The %s %s has become obsolete in "
+            "the new version, but you have changed its contents. "
+            "Do you want to keep your %s or "
+            "may I remove it for you, please?" % (old_type, relpath, user_type),
+            relpath,
+            "keep",
+            "keep your %s, though it is obsolete" % user_type,
+            "remove",
+            "remove your %s" % user_type,
+        ):
             sys.stdout.write(StateMarkers.warn + " Keeping your   %s\n" % fn)
         else:
             delete_user_file(user_path)
-            sys.stdout.write(StateMarkers.warn + " Deleted        %s\n" % fn)
+            sys.stdout.write(StateMarkers.warn + " Removed        %s\n" % fn)
 
     # 3d) same, but it is a directory which is not empty
     elif not new_type and non_empty_directory:
         if user_confirms(
-                site, conflict_mode, "Non empty obsolete directory %s" % (relpath),
-                "The directory %s has become obsolete in "
-                "the new version, but you have contents in it. "
-                "Do you want to keep your directory or "
-                "may I delete it for you, please?" % (relpath), relpath, "keep",
-                "keep your directory, though it is obsolete", "delete", "delete your directory"):
+            site,
+            conflict_mode,
+            "Non empty obsolete directory %s" % (relpath),
+            "The directory %s has become obsolete in "
+            "the new version, but you have contents in it. "
+            "Do you want to keep your directory or "
+            "may I remove it for you, please?" % (relpath),
+            relpath,
+            "keep",
+            "keep your directory, though it is obsolete",
+            "remove",
+            "remove your directory",
+        ):
             sys.stdout.write(StateMarkers.warn + " Keeping your   %s\n" % fn)
         else:
             delete_user_file(user_path)
-            sys.stdout.write(StateMarkers.warn + " Deleted        %s\n" % fn)
+            sys.stdout.write(StateMarkers.warn + " Removed        %s\n" % fn)
 
     # 3e) same, but user hasn't changed anything -> silently delete
     elif not new_type:
@@ -892,8 +1066,9 @@ def update_file(relpath: str, site: SiteContext, conflict_mode: str, old_version
     #    file. We simply do nothing in that case. The user surely has
     #    a good reason why he deleted the file.
     elif not user_type and not we_changed:
-        sys.stdout.write(StateMarkers.good +
-                         " Unwanted       %s (unchanged, deleted by you)\n" % fn)
+        sys.stdout.write(
+            StateMarkers.good + " Unwanted       %s (unchanged, removed by you)\n" % fn
+        )
 
     # 4b) File changed in new version. Simply warn if user has deleted it.
     elif not user_type:
@@ -910,7 +1085,7 @@ def update_file(relpath: str, site: SiteContext, conflict_mode: str, old_version
         create_skeleton_file(new_skel, site.dir, relpath, replacements)
         sys.stdout.write(StateMarkers.good + " Updated        %s\n" % fn)
 
-    # 7) User changed, but accidentally exactly as we did -> no action neccessary
+    # 7) User changed, but accidentally exactly as we did -> no action necessary
     elif not differs:
         sys.stdout.write(StateMarkers.good + " Identical      %s\n" % fn)
 
@@ -932,22 +1107,29 @@ def update_file(relpath: str, site: SiteContext, conflict_mode: str, old_version
     # 8) all are symlinks, all changed
     elif old_type == "link" and new_type == "link" and user_type == "link":
         if user_confirms(
-                site, conflict_mode, "Symbolic link conflict at " + relpath,
-                "'%s' is a symlink that pointed to "
-                "%s in the old version and to "
-                "%s in the new version. But meanwhile you "
-                "changed to link target to %s. "
-                "Shall I keep your link or replace it with "
-                "the new default target?" %
-            (relpath, os.readlink(old_path), os.readlink(new_path), os.readlink(user_path)),
-                relpath, "keep", "Keep your symbolic link pointing to %s" % os.readlink(user_path),
-                "replace", "Change link target to %s" % os.readlink(new_path)):
+            site,
+            conflict_mode,
+            "Symbolic link conflict at " + relpath,
+            "'%s' is a symlink that pointed to "
+            "%s in the old version and to "
+            "%s in the new version. But meanwhile you "
+            "changed to link target to %s. "
+            "Shall I keep your link or replace it with "
+            "the new default target?"
+            % (relpath, os.readlink(old_path), os.readlink(new_path), os.readlink(user_path)),
+            relpath,
+            "keep",
+            "Keep your symbolic link pointing to %s" % os.readlink(user_path),
+            "replace",
+            "Change link target to %s" % os.readlink(new_path),
+        ):
             sys.stdout.write(StateMarkers.warn + " Keeping your   %s\n" % fn)
         else:
             os.remove(user_path)
             os.symlink(os.readlink(new_path), user_path)
-            sys.stdout.write(StateMarkers.warn + " Set link       %s to new target %s\n" %
-                             (fn, os.readlink(new_path)))
+            sys.stdout.write(
+                StateMarkers.warn + f" Set link       {fn} to new target {os.readlink(new_path)}\n"
+            )
 
     # E ---> FILE TYPE HAS CHANGED (NASTY)
 
@@ -959,56 +1141,78 @@ def update_file(relpath: str, site: SiteContext, conflict_mode: str, old_version
     # 9) We have changed the file type
     elif old_type != new_type:
         if user_confirms(
-                site, conflict_mode, "File type change at " + relpath,
-                "The %s %s has been changed into a %s in "
-                "the new version. Meanwhile you have changed "
-                "the %s of your copy of that %s. "
-                "Do you want to keep your version or replace "
-                "it with the new default? " %
-            (old_type, relpath, new_type, user_changed_type and "type" or "content", old_type),
-                relpath, "keep", "Keep your %s" % user_type, "replace",
-                "Replace it with the new %s" % new_type):
+            site,
+            conflict_mode,
+            "File type change at " + relpath,
+            "The %s %s has been changed into a %s in "
+            "the new version. Meanwhile you have changed "
+            "the %s of your copy of that %s. "
+            "Do you want to keep your version or replace "
+            "it with the new default? "
+            % (old_type, relpath, new_type, user_changed_type and "type" or "content", old_type),
+            relpath,
+            "keep",
+            "Keep your %s" % user_type,
+            "replace",
+            "Replace it with the new %s" % new_type,
+        ):
             sys.stdout.write(StateMarkers.warn + " Keeping your version of %s\n" % fn)
         else:
             create_skeleton_file(new_skel, site.dir, relpath, replacements)
-            sys.stdout.write(StateMarkers.warn + " Replaced your %s %s by new default %s.\n" %
-                             (user_type, relpath, new_type))
+            sys.stdout.write(
+                StateMarkers.warn
+                + f" Replaced your {user_type} {relpath} by new default {new_type}.\n"
+            )
 
     # 10) The user has changed the file type, we just the content
     elif old_type != user_type:
         if user_confirms(
-                site, conflict_mode, "Type change conflicts with content change at " + relpath,
-                "Usually %s is a %s in both the "
-                "old and new version. But you have changed it "
-                "into a %s. Do you want to keep that or may "
-                "I replace your %s with the new default "
-                "%s, please?" % (relpath, old_type, user_type, user_type, new_type), relpath,
-                "keep", "Keep your %s" % user_type, "replace",
-                "Replace it with the new %s" % new_type):
-            sys.stdout.write(StateMarkers.warn + " Keeping your %s %s.\n" % (user_type, fn))
+            site,
+            conflict_mode,
+            "Type change conflicts with content change at " + relpath,
+            "Usually %s is a %s in both the "
+            "old and new version. But you have changed it "
+            "into a %s. Do you want to keep that or may "
+            "I replace your %s with the new default "
+            "%s, please?" % (relpath, old_type, user_type, user_type, new_type),
+            relpath,
+            "keep",
+            "Keep your %s" % user_type,
+            "replace",
+            "Replace it with the new %s" % new_type,
+        ):
+            sys.stdout.write(StateMarkers.warn + f" Keeping your {user_type} {fn}.\n")
         else:
             create_skeleton_file(new_skel, site.dir, relpath, replacements)
-            sys.stdout.write(StateMarkers.warn +
-                             " Delete your %s and created new default %s %s.\n" %
-                             (user_type, new_type, fn))
+            sys.stdout.write(
+                StateMarkers.warn
+                + f" Delete your {user_type} and created new default {new_type} {fn}.\n"
+            )
 
     # 11) This case should never happen, if I've not lost something
     else:
         if user_confirms(
-                site, conflict_mode, "Something nasty happened at " + relpath,
-                "You somehow fiddled along with "
-                "%s, and I do not have the "
-                "slightest idea what's going on here. May "
-                "I please install the new default %s "
-                "here, or do you want to keep your %s?" % (relpath, new_type, user_type), relpath,
-                "keep", "Keep your %s" % user_type, "replace",
-                "Replace it with the new %s" % new_type):
-            sys.stdout.write(StateMarkers.warn + " Keeping your %s %s.\n" % (user_type, fn))
+            site,
+            conflict_mode,
+            "Something nasty happened at " + relpath,
+            "You somehow fiddled along with "
+            "%s, and I do not have the "
+            "slightest idea what's going on here. May "
+            "I please install the new default %s "
+            "here, or do you want to keep your %s?" % (relpath, new_type, user_type),
+            relpath,
+            "keep",
+            "Keep your %s" % user_type,
+            "replace",
+            "Replace it with the new %s" % new_type,
+        ):
+            sys.stdout.write(StateMarkers.warn + f" Keeping your {user_type} {fn}.\n")
         else:
             create_skeleton_file(new_skel, site.dir, relpath, replacements)
-            sys.stdout.write(StateMarkers.warn +
-                             " Delete your %s and created new default %s %s.\n" %
-                             (user_type, new_type, fn))
+            sys.stdout.write(
+                StateMarkers.warn
+                + f" Delete your {user_type} and created new default {new_type} {fn}.\n"
+            )
 
     # Now the new file/link/directory is in place, deleted or whatever. The
     # user might have interferred and changed things. We need to make sure
@@ -1021,61 +1225,122 @@ def update_file(relpath: str, site: SiteContext, conflict_mode: str, old_version
     user_perm = get_file_permissions(user_path)
 
     # Fix permissions not for links and only if the new type is as expected
-    # and the current permissions are not as the should be
-    what = None
-    if new_type != "link" \
-        and user_type == new_type \
-        and user_perm != new_perm:
+    # and the current permissions are not as they should be
+    what = permission_action(
+        site=site,
+        conflict_mode=conflict_mode,
+        relpath=relpath,
+        old_type=old_type,
+        new_type=new_type,
+        user_type=user_type,
+        old_perm=old_perm,
+        new_perm=new_perm,
+        user_perm=user_perm,
+    )
 
-        # Permissions have changed, but file type not
-        if old_type == new_type \
-            and user_perm != old_perm \
-            and old_perm != new_perm:
-            if user_confirms(
-                    site, conflict_mode, "Permission conflict at " + relpath,
-                    "The proposed permissions of %s have changed from %04o "
-                    "to %04o in the new version, but you have set %04o. "
-                    "May I use the new default permissions or do "
-                    "you want to keep yours?" % (relpath, old_perm, new_perm, user_perm), relpath,
-                    "keep", "Keep permissions at %04o" % user_perm, "default",
-                    "Set permission to %04o" % new_perm):
-                what = "keep"
-            else:
-                what = "default"
-
-        # Permissions have changed, no conflict with user
-        elif old_type == new_type \
-            and user_perm == old_perm:
-            what = "default"
-
-        # Permissions are not correct: all other cases (where type is as expected)
-        elif old_perm != new_perm:
-            if user_confirms(
-                    site, conflict_mode, "Wrong permission of " + relpath,
-                    "The proposed permissions of %s are %04o, but currently are "
-                    "%04o. May I use the new default "
-                    "permissions or keep yours?" % (relpath, new_perm, user_perm), relpath, "keep",
-                    "Keep permissions at %04o" % user_perm, "default",
-                    "Set permission to %04o" % new_perm):
-                what = "keep"
-            else:
-                what = "default"
-
-        if what == "keep":
-            sys.stdout.write(StateMarkers.warn + " Permissions    %04o %s (unchanged)\n" %
-                             (user_perm, fn))
-        elif what == "default":
-            try:
-                os.chmod(user_path, new_perm)
-                sys.stdout.write(StateMarkers.good + " Permissions    %04o -> %04o %s\n" %
-                                 (user_perm, new_perm, fn))
-            except Exception as e:
-                sys.stdout.write(StateMarkers.error +
-                                 " Permission:    cannot change %04o -> %04o %s: %s\n" %
-                                 (user_perm, new_perm, fn, e))
+    if what == "keep":
+        sys.stdout.write(StateMarkers.warn + f" Permissions    {user_perm:04o} {fn} (unchanged)\n")
+    elif what == "default":
+        try:
+            os.chmod(user_path, new_perm)
+            sys.stdout.write(
+                StateMarkers.good + f" Permissions    {user_perm:04o} -> {new_perm:04o} {fn}\n"
+            )
+        except Exception as e:
+            sys.stdout.write(
+                StateMarkers.error
+                + f" Permission:    cannot change {user_perm:04o} -> {new_perm:04o} {fn}: {e}\n"
+            )
 
 
-def filetype(p: str) -> Optional[str]:
+def permission_action(
+    *,
+    site: SiteContext,
+    conflict_mode: str,
+    relpath: str,
+    old_type: str | None,
+    new_type: str | None,
+    user_type: str | None,
+    old_perm: int,
+    new_perm: int,
+    user_perm: int,
+) -> str | None:
+    if new_type == "link":
+        return None  # Do not touch symlinks
+
+    if user_type != new_type:
+        return None  # Do not touch when type changed by the user
+
+    if user_perm == new_perm:
+        return None  # Is already in correct state
+
+    # Special handling to prevent questions about standard situations (CMK-12090)
+    if old_perm != new_perm and relpath in (
+        "local/share/nagvis/htdocs/userfiles/images/maps",
+        "local/share/nagvis/htdocs/userfiles/images/shapes",
+        "etc/check_mk/multisite.d",
+        "etc/check_mk/conf.d",
+        "etc/check_mk/conf.d/wato",
+        "etc/ssl/private",
+        "etc/ssl/certs",
+    ):
+        return "default"
+
+    # Permissions have changed in all places, but file type not
+    if old_type == new_type and user_perm != old_perm and old_perm != new_perm:
+        if user_confirms(
+            site,
+            conflict_mode,
+            "Permission conflict at " + relpath,
+            "The proposed permissions of %s have changed from %04o "
+            "to %04o in the new version, but you have set %04o. "
+            "May I use the new default permissions or do "
+            "you want to keep yours?" % (relpath, old_perm, new_perm, user_perm),
+            relpath,
+            "keep",
+            "Keep permissions at %04o" % user_perm,
+            "default",
+            "Set permission to %04o" % new_perm,
+        ):
+            return "keep"
+        return "default"
+
+    # Permissions have changed, no conflict with user
+    if old_type == new_type and user_perm == old_perm:
+        return "default"
+
+    # Permissions are not correct: all other cases (where type is as expected)
+    if old_perm != new_perm:
+        if old_perm == user_perm:
+            # The skel permissions are changed but the old skel permissions
+            # are still in place. In 2.2 the permissions for other were
+            # removed (Werk #15062). This results in a lot of questions for
+            # the user. If the user has not adjusted the permissions from
+            # the previous default, let's not ask so much questions, just
+            # adjust it, a info that the permissions were adjusted will be
+            # logged anyways
+            return "default"
+
+        if user_confirms(
+            site,
+            conflict_mode,
+            "Wrong permission of " + relpath,
+            "The proposed permissions of %s are %04o, but currently are "
+            "%04o. May I use the new default "
+            "permissions or keep yours?" % (relpath, new_perm, user_perm),
+            relpath,
+            "keep",
+            "Keep permissions at %04o" % user_perm,
+            "default",
+            "Set permission to %04o" % new_perm,
+        ):
+            return "keep"
+        return "default"
+
+    return None
+
+
+def filetype(p: str) -> str | None:
     # check for symlinks first. Might be dangling. In that
     # case os.path.exists checks the links target for existance
     # and reports it is non-existing.
@@ -1090,7 +1355,7 @@ def filetype(p: str) -> Optional[str]:
 
 def file_contents(site: SiteContext, path: str) -> bytes:
     """Returns the file contents of a site file or a skel file"""
-    if '/skel/' in path and not _is_unpatchable_file(path):
+    if "/skel/" in path and not _is_unpatchable_file(path):
         return _instantiate_skel(site, path)
 
     with open(path, "rb") as f:
@@ -1109,16 +1374,40 @@ def _instantiate_skel(site: SiteContext, path: str) -> bytes:
 def initialize_site_ca(site: SiteContext) -> None:
     """Initialize the site local CA and create the default site certificate
     This will be used e.g. for serving SSL secured livestatus"""
+    ca_path = cert_dir(Path(site.dir))
     ca = omdlib.certs.CertificateAuthority(
-        ca_path=Path(site.dir) / "etc" / "ssl",
-        ca_name="Site '%s' local CA" % site.name,
+        root_ca=RootCA.load_or_create(root_cert_path(ca_path), CN_TEMPLATE.format(site.name)),
+        ca_path=ca_path,
     )
-    ca.initialize()
-    if not ca.site_certificate_path(site.name).exists():
+    if not ca.site_certificate_exists(site.name):
         ca.create_site_certificate(site.name)
 
 
-def config_change(version_info: VersionInfo, site: SiteContext, config_hooks: ConfigHooks) -> None:
+def agent_ca_existing(site: SiteContext) -> bool:
+    return root_cert_path(cert_dir(Path(site.dir)) / "agents").exists()
+
+
+def initialize_agent_ca(site: SiteContext) -> None:
+    """Initialize the agents CA folder alongside a default agent signing CA.
+    The default CA shall be used for issuing certificates for requesting agent controllers.
+    Additional CAs/root certs that may be placed at the agent CA folder shall be used as additional
+    root certs for agent receiver certificate verification (either as client or server cert)
+    """
+    ca_path = cert_dir(Path(site.dir)) / "agents"
+    RootCA.load_or_create(root_cert_path(ca_path), f"Site '{site.name}' agent signing CA")
+
+
+def link_legacy_agent_ca(site: SiteContext) -> None:
+    """If there are agent controller certificates that are signed with the site CA, we have to
+    maintain them (at least for a while)."""
+    site_ca_path = root_cert_path(cert_dir(Path(site.dir)))
+    agent_ca_dir = cert_dir(Path(site.dir)) / "agents"
+    (agent_ca_dir / "legacy_ca.pem").symlink_to(site_ca_path)
+
+
+def config_change(
+    version_info: VersionInfo, site: SiteContext, config_hooks: ConfigHooks
+) -> list[str]:
     # Check whether or not site needs to be stopped. Stop and remember to start again later
     site_was_stopped = False
     if not site.is_stopped():
@@ -1133,10 +1422,13 @@ def config_change(version_info: VersionInfo, site: SiteContext, config_hooks: Co
 
         validate_config_change_commands(config_hooks, settings)
 
+        changed: list[str] = []
         for key, value in settings:
-            config_set_value(site, config_hooks, key, value, save=False)
+            config_set_value(site, key, value, save=False)
+            changed.append(key)
 
         save_site_conf(site)
+        return changed
     finally:
         if site_was_stopped:
             start_site(version_info, site)
@@ -1157,65 +1449,63 @@ def read_config_change_commands() -> ConfigChangeCommands:
     return settings
 
 
-def validate_config_change_commands(config_hooks: ConfigHooks,
-                                    settings: ConfigChangeCommands) -> None:
+def validate_config_change_commands(
+    config_hooks: ConfigHooks, settings: ConfigChangeCommands
+) -> None:
     # Validate the provided commands
     for key, value in settings:
         hook = config_hooks.get(key)
         if not hook:
             bail_out("Invalid config option: %r" % key)
 
-        # Check if value is valid. Choices are either a list of allowed
-        # keys or a regular expression
-        if isinstance(hook["choices"], list):
-            choices = [var for (var, _descr) in hook["choices"]]
-            if value not in choices:
-                bail_out("Invalid value %r for %r. Allowed are: %s\n" %
-                         (value, key, ", ".join(choices)))
-        elif isinstance(hook["choices"], re.Pattern):
-            if not hook["choices"].match(value):
-                bail_out("Invalid value %r for %r. Does not match allowed pattern.\n" %
-                         (value, key))
-        else:
-            raise NotImplementedError()
+        error_from_config_choice = _error_from_config_choice(hook.choices, value)
+        if error_from_config_choice.is_error():
+            bail_out(f"Invalid value for '{value} for {key}'. {error_from_config_choice.error}\n")
 
 
-def config_set(site: SiteContext, config_hooks: ConfigHooks, args: Arguments) -> None:
+def config_set(site: SiteContext, config_hooks: ConfigHooks, args: Arguments) -> list[str]:
     if len(args) != 2:
         sys.stderr.write("Please specify variable name and value\n")
         config_usage()
-        return
+        return []
 
     if not site.is_stopped():
         sys.stderr.write("Cannot change config variables while site is running.\n")
-        return
+        return []
 
     hook_name = args[0]
     value = args[1]
     hook = config_hooks.get(hook_name)
     if not hook:
         sys.stderr.write("No such variable '%s'\n" % hook_name)
-        return
+        return []
 
-    # Check if value is valid. Choices are either a list of allowed
-    # keys or a regular expression
-    if isinstance(hook["choices"], list):
-        choices = [var for (var, _descr) in hook["choices"]]
-        if value not in choices:
-            sys.stderr.write("Invalid value for '%s'. Allowed are: %s\n" %
-                             (value, ", ".join(choices)))
-            return
-    elif isinstance(hook["choices"], re.Pattern):
-        if not hook["choices"].match(value):
-            sys.stderr.write("Invalid value for '%s'. Does not match allowed pattern.\n" % value)
-            return
+    error_from_config_choice = _error_from_config_choice(hook.choices, value)
+    if error_from_config_choice.is_error():
+        sys.stderr.write(f"Invalid value for '{value}'. {error_from_config_choice.error}\n")
+        return []
+
+    config_set_value(site, hook_name, value)
+    return [hook_name]
+
+
+def _error_from_config_choice(choices: ConfigHookChoices, value: str) -> Result[None, str]:
+    # Check if value is valid. Choices are either a list of allowed keys or a
+    # regular expression
+    if isinstance(choices, list):
+        if all(value != var for var, _descr in choices):
+            return Error("Allowed are: " + ", ".join(var for var, _ in choices))
+    elif isinstance(choices, re.Pattern):
+        if not choices.match(value):
+            return Error("Does not match allowed pattern.")
+    elif isinstance(choices, ConfigChoiceHasError):
+        return choices(value)
     else:
-        raise NotImplementedError()
+        assert_never(choices)
+    return OK(None)
 
-    config_set_value(site, config_hooks, hook_name, value)
 
-
-def config_set_all(site: SiteContext, ignored_hooks: Optional[list] = None) -> None:
+def config_set_all(site: SiteContext, ignored_hooks: list | None = None) -> None:
     if ignored_hooks is None:
         ignored_hooks = []
 
@@ -1243,11 +1533,7 @@ def _config_set(site: SiteContext, hook_name: str) -> None:
     putenv("CONFIG_" + hook_name, site.conf[hook_name])
 
 
-def config_set_value(site: SiteContext,
-                     config_hooks: ConfigHooks,
-                     hook_name: str,
-                     value: str,
-                     save: bool = True) -> None:
+def config_set_value(site: SiteContext, hook_name: str, value: str, save: bool = True) -> None:
     site.conf[hook_name] = value
     _config_set(site, hook_name)
 
@@ -1259,7 +1545,8 @@ def config_set_value(site: SiteContext,
 
 
 def config_usage() -> None:
-    sys.stdout.write("""Usage of config command:
+    sys.stdout.write(
+        """Usage of config command:
 
 omd config               - interactive configuration menu
 omd config show          - show current settings of all configuration variables
@@ -1268,17 +1555,18 @@ omd config set VAR VALUE - set VAR to VALUE
 omd config change        - change multiple at once. Provide newline separated
                            KEY=value pairs via stdin. The site is restarted
                            automatically once in case it's currently runnig.
-""")
+"""
+    )
 
 
 def config_show(site: SiteContext, config_hooks: ConfigHooks, args: Arguments) -> None:
-    hook: Optional[ConfigHook] = {}
+    hook: ConfigHook | None
     if len(args) == 0:
         hook_names = sorted(config_hooks.keys())
         for hook_name in hook_names:
             hook = config_hooks[hook_name]
-            if hook["active"] and not hook["deprecated"]:
-                sys.stdout.write("%s: %s\n" % (hook_name, site.conf[hook_name]))
+            if hook.unstructured["active"] and not hook.unstructured["deprecated"]:
+                sys.stdout.write(f"{hook_name}: {site.conf[hook_name]}\n")
     else:
         output = []
         for hook_name in args:
@@ -1292,10 +1580,11 @@ def config_show(site: SiteContext, config_hooks: ConfigHooks, args: Arguments) -
         sys.stdout.write("\n")
 
 
-def config_configure(site: SiteContext, global_opts: 'GlobalOptions',
-                     config_hooks: ConfigHooks) -> None:
+def config_configure(
+    site: SiteContext, global_opts: GlobalOptions, config_hooks: ConfigHooks
+) -> Iterator[str]:
     hook_names = sorted(config_hooks.keys())
-    current_hook_name: Optional[str] = ""
+    current_hook_name: str | None = ""
     menu_open = False
     current_menu = "Basic"
 
@@ -1304,11 +1593,11 @@ def config_configure(site: SiteContext, global_opts: 'GlobalOptions',
 
     while True:
         # Rebuild hook information (values possible changed)
-        menu: Dict[str, List[Tuple[str, str]]] = {}
+        menu: dict[str, list[tuple[str, str]]] = {}
         for hook_name in hook_names:
             hook = config_hooks[hook_name]
-            if hook["active"] and not hook["deprecated"]:
-                mp = cast(str, hook.get("menu", "Other"))
+            if hook.unstructured["active"] and not hook.unstructured["deprecated"]:
+                mp = hook.menu
                 entries = menu.get(mp, [])
                 entries.append((hook_name, site.conf[hook_name]))
                 menu[mp] = entries
@@ -1321,59 +1610,77 @@ def config_configure(site: SiteContext, global_opts: 'GlobalOptions',
                 "Configuration of site %s" % site.name,
                 "Interactive setting of site configuration variables. You "
                 "can change values only while the site is stopped.",
-                [(e, "") for e in menu_choices], current_menu, "Enter", "Exit")
+                [(e, "") for e in menu_choices],
+                current_menu,
+                "Enter",
+                "Exit",
+            )
             if not change:
                 return
             current_hook_name = None
             menu_open = True
 
         else:
-            change, current_hook_name = dialog_menu(current_menu, "", menu[current_menu],
-                                                    current_hook_name, "Change", "Main menu")
+            change, current_hook_name = dialog_menu(
+                current_menu, "", menu[current_menu], current_hook_name, "Change", "Main menu"
+            )
             if change:
                 try:
-                    config_configure_hook(site, global_opts, config_hooks, current_hook_name)
+                    yield from config_configure_hook(
+                        site, global_opts, config_hooks, current_hook_name
+                    )
                 except MKTerminate:
                     raise
                 except Exception as e:
-                    bail_out("Error in hook %s: %s" % (current_hook_name, e))
+                    bail_out(f"Error in hook {current_hook_name}: {e}")
             else:
                 menu_open = False
 
 
-def config_configure_hook(site: SiteContext, global_opts: 'GlobalOptions',
-                          config_hooks: ConfigHooks, hook_name: str) -> None:
+def config_configure_hook(
+    site: SiteContext, global_opts: GlobalOptions, config_hooks: ConfigHooks, hook_name: str
+) -> Iterator[str]:
     if not site.is_stopped():
-        if not dialog_yesno("You cannot change configuration value while the "
-                            "site is running. Do you want me to stop the site now?"):
+        if not dialog_yesno(
+            "You cannot change configuration value while the "
+            "site is running. Do you want me to stop the site now?"
+        ):
             return
         stop_site(site)
         dialog_message("The site has been stopped.")
 
     hook = config_hooks[hook_name]
-    title = cast(str, hook["alias"])
-    descr = cast(str, hook["description"]).replace("\n\n",
-                                                   "\001").replace("\n",
-                                                                   " ").replace("\001", "\n\n")
+    title = hook.alias
+    descr = hook.description.replace("\n\n", "\001").replace("\n", " ").replace("\001", "\n\n")
     value = site.conf[hook_name]
-    choices = hook["choices"]
+    choices = hook.choices
 
     if isinstance(choices, list):
         change, new_value = dialog_menu(title, descr, choices, value, "Change", "Cancel")
     elif isinstance(choices, re.Pattern):
         change, new_value = dialog_regex(title, descr, choices, value, "Change", "Cancel")
+    elif isinstance(choices, ConfigChoiceHasError):
+        change, new_value = dialog_config_choice_has_error(
+            title, descr, choices, value, "Change", "Cancel"
+        )
     else:
-        raise NotImplementedError()
+        assert_never(choices)
 
     if change:
-        config_set_value(site, config_hooks, cast(str, hook["name"]), new_value)
-        site.conf[hook_name] = new_value
+        config_set_value(site, hook.name, new_value)
         save_site_conf(site)
         config_hooks = load_hook_dependencies(site, config_hooks)
+        yield hook_name
 
 
-def init_action(version_info: VersionInfo, site: SiteContext, global_opts: 'GlobalOptions',
-                command: str, args: Arguments, options: CommandOptions) -> int:
+def init_action(
+    version_info: VersionInfo,
+    site: SiteContext,
+    global_opts: GlobalOptions,
+    command: str,
+    args: Arguments,
+    options: CommandOptions,
+) -> int:
     if site.is_disabled():
         bail_out("This site is disabled.")
 
@@ -1382,18 +1689,18 @@ def init_action(version_info: VersionInfo, site: SiteContext, global_opts: 'Glob
 
     if len(args) > 0:
         # restrict to this daemon
-        daemon: Optional[str] = args[0]
+        daemon: str | None = args[0]
     else:
         daemon = None
 
     # OMD guarantees that we are in OMD_ROOT
     with chdir(site.dir):
         if command == "status":
-            return check_status(site, display=True, daemon=daemon, bare="bare" in options)
-        return call_init_scripts(site, command, daemon)
+            return check_status(site.dir, display=True, daemon=daemon, bare="bare" in options)
+        return call_init_scripts(site.dir, command, daemon)
 
 
-#.
+# .
 #   .--Helpers-------------------------------------------------------------.
 #   |                  _   _      _                                        |
 #   |                 | | | | ___| |_ __   ___ _ __ ___                    |
@@ -1410,14 +1717,14 @@ def fstab_verify(site: SiteContext) -> bool:
     """Ensure that there is an fstab entry for the tmpfs of the site.
     In case there is no fstab (seen in some containers) assume everything
     is OK without fstab entry."""
-
-    if not os.path.exists("/etc/fstab"):
+    if not (fstab_path := Path("/etc", "fstab")).exists():
         return True
 
     mountpoint = site.tmp_dir
-    for line in open("/etc/fstab"):
-        if "uid=%s," % site.name in line and mountpoint in line:
-            return True
+    with fstab_path.open() as opened_file:
+        for line in opened_file:
+            if "uid=%s," % site.name in line and mountpoint in line:
+                return True
     bail_out(tty.error + ": fstab entry for %s does not exist" % mountpoint)
 
 
@@ -1436,15 +1743,17 @@ def putenv(key: str, value: str) -> None:
     os.environ[key] = value
 
 
-def getenv(key: str, default: Optional[str] = None) -> Optional[str]:
+def getenv(key: str, default: str | None = None) -> str | None:
     if key not in os.environ:
         return default
     return os.environ[key]
 
 
 def clear_environment() -> None:
-    # first remove *all* current environment variables
-    keep = ["TERM"]
+    # first remove *all* current environment variables, except:
+    # TERM
+    # CMK_CONTAINERIZED: To better detect when running inside container (e.g. used for omd update)
+    keep = ["TERM", "CMK_CONTAINERIZED"]
     for key in os.environ:
         if key not in keep:
             del os.environ[key]
@@ -1455,93 +1764,57 @@ def set_environment(site: SiteContext) -> None:
     putenv("OMD_ROOT", site.dir)
     putenv(
         "PATH",
-        "%s/local/bin:%s/bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin" % (site.dir, site.dir))
+        f"{site.dir}/local/bin:{site.dir}/bin:/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin",
+    )
     putenv("USER", site.name)
 
-    putenv("LD_LIBRARY_PATH", "%s/local/lib:%s/lib" % (site.dir, site.dir))
+    putenv("LD_LIBRARY_PATH", f"{site.dir}/local/lib:{site.dir}/lib")
     putenv("HOME", site.dir)
 
     # allow user to define further environment variable in ~/etc/environment
-    envfile = site.dir + "/etc/environment"
-    if os.path.exists(envfile):
+    envfile = Path(site.dir, "etc", "environment")
+    if envfile.exists():
         lineno = 0
-        for line in open(envfile):
-            lineno += 1
-            line = line.strip()
-            if line == "" or line[0] == "#":
-                continue  # allow empty lines and comments
-            parts = line.split("=")
-            if len(parts) != 2:
-                bail_out("%s: syntax error in line %d" % (envfile, lineno))
-            varname = parts[0]
-            value = parts[1]
-            if value.startswith('"'):
-                value = value.strip('"')
+        with envfile.open() as opened_file:
+            for line in opened_file:
+                lineno += 1
+                line = line.strip()
+                if line == "" or line[0] == "#":
+                    continue  # allow empty lines and comments
+                parts = line.split("=")
+                if len(parts) != 2:
+                    bail_out("%s: syntax error in line %d" % (envfile, lineno))
+                varname = parts[0]
+                value = parts[1]
+                if value.startswith('"'):
+                    value = value.strip('"')
 
-            # Add the present environment when someone wants to append some
-            if value.startswith("$%s:" % varname):
-                before = getenv(varname, None)
-                if before:
-                    value = before + ":" + value.replace("$%s:" % varname, '')
+                # Add the present environment when someone wants to append some
+                if value.startswith("$%s:" % varname):
+                    before = getenv(varname, None)
+                    if before:
+                        value = before + ":" + value.replace("$%s:" % varname, "")
 
-            if value.startswith("'"):
-                value = value.strip("'")
-            putenv(varname, value)
+                if value.startswith("'"):
+                    value = value.strip("'")
+                putenv(varname, value)
 
     create_config_environment(site)
 
 
 def hostname() -> str:
     try:
-        p = subprocess.Popen(["hostname"],
-                             shell=False,
-                             close_fds=True,
-                             stdout=subprocess.PIPE,
-                             encoding="utf-8")
+        completed_process = subprocess.run(
+            ["hostname"],
+            shell=False,
+            close_fds=True,
+            stdout=subprocess.PIPE,
+            encoding="utf-8",
+            check=False,
+        )
     except OSError:
         return "localhost"
-    return p.communicate()[0].strip()
-
-
-def create_apache_hook(site: SiteContext) -> None:
-    with open("/omd/apache/%s.conf" % site.name, "w") as f:
-        f.write("Include %s/etc/apache/mode.conf\n" % site.dir)
-
-
-def delete_apache_hook(sitename: str) -> None:
-    hook_path = "/omd/apache/%s.conf" % sitename
-    if not os.path.exists(hook_path):
-        return
-
-    try:
-        os.remove(hook_path)
-    except Exception as e:
-        sys.stderr.write("Cannot remove apache hook %s: %s\n" % (hook_path, e))
-
-
-def init_cmd(version_info: VersionInfo, name: str, action: str) -> str:
-    return version_info.INIT_CMD % {
-        'name': name,
-        'action': action,
-    }
-
-
-def reload_apache(version_info: VersionInfo) -> None:
-    sys.stdout.write("Reloading Apache...")
-    sys.stdout.flush()
-    show_success(subprocess.call([version_info.APACHE_CTL, "graceful"]) >> 8)
-
-
-def restart_apache(version_info: VersionInfo) -> None:
-    if os.system(  # nosec
-            init_cmd(version_info, version_info.APACHE_INIT_NAME, 'status') +
-            ' >/dev/null 2>&1') >> 8 == 0:
-        sys.stdout.write("Restarting Apache...")
-        sys.stdout.flush()
-        show_success(
-            os.system(
-                init_cmd(version_info, version_info.APACHE_INIT_NAME, 'restart') + ' >/dev/null') >>
-            8)  # nosec
+    return completed_process.stdout.strip()
 
 
 def replace_tags(content: bytes, replacements: Replacements) -> bytes:
@@ -1556,7 +1829,7 @@ def get_editor() -> str:
         editor = "/usr/bin/vi"
 
     if not os.path.exists(editor):
-        editor = 'vi'
+        editor = "vi"
 
     return editor
 
@@ -1571,38 +1844,77 @@ def pipe_pager() -> str:
     return ""
 
 
-def call_scripts(site: SiteContext, phase: str) -> None:
-    path = site.dir + "/lib/omd/scripts/" + phase
-    if os.path.exists(path):
-        putenv("OMD_ROOT", site.dir)
-        putenv("OMD_SITE", site.name)
-        for f in os.listdir(path):
-            if f[0] == '.':
-                continue
-            sys.stdout.write('Executing %s script "%s"...' % (phase, f))
-            p = subprocess.Popen(  # nosec
-                '%s/%s' % (path, f),
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                encoding="utf-8")
-            if p.stdout is None:
-                raise Exception("stdout needs to be set")
+def call_scripts(
+    site: SiteContext, phase: str, open_pty: bool, add_env: Mapping[str, str] | None = None
+) -> None:
+    """Calls hook scripts in defined directories."""
+    path = Path(site.dir, "lib", "omd", "scripts", phase)
+    if not path.exists():
+        return
 
-            wrote_output = False
-            for line in p.stdout:
+    env = {
+        **os.environ,
+        "OMD_ROOT": site.dir,
+        "OMD_SITE": site.name,
+        **(add_env if add_env else {}),
+    }
+
+    # NOTE: scripts have an order!
+    for file in sorted(path.iterdir()):
+        if file.name[0] == ".":
+            continue
+        _call_script(phase, open_pty, env, file)
+
+
+def _call_script(  # pylint: disable=too-many-branches
+    phase: str, open_pty: bool, env: Mapping[str, str], file: Path
+) -> None:
+    sys.stdout.write(f'Executing {phase} script "{file.name}"...')
+    if open_pty:
+        fd_parent, fd_child = pty.openpty()
+        stdout = stderr = fd_child
+    else:
+        stdout = subprocess.PIPE
+        stderr = subprocess.STDOUT
+
+    with subprocess.Popen(  # nosec B602 # BNS:2b5952
+        str(file),  # path-like args is not allowed when shell is true
+        shell=True,
+        stdout=stdout,
+        stderr=stderr,
+        encoding="utf-8",
+        env=env,
+    ) as proc:
+        if open_pty:
+            os.close(fd_child)
+            parent: IO[str] = os.fdopen(fd_parent, buffering=1)
+        else:
+            assert proc.stdout is not None
+            parent = proc.stdout
+
+        wrote_output = False
+        try:
+            while True:
+                line = parent.readline()
+                if not line:
+                    break
                 if not wrote_output:
                     sys.stdout.write("\n")
                     wrote_output = True
 
                 sys.stdout.write(f"-| {line}")
                 sys.stdout.flush()
+        except OSError:
+            pass
+        finally:
+            if not pty:
+                parent.close()
 
-            exitcode = p.wait()
-            if exitcode == 0:
-                sys.stdout.write(tty.ok + '\n')
-            else:
-                sys.stdout.write(tty.error + ' (exit code: %d)\n' % exitcode)
+    if not proc.returncode:
+        sys.stdout.write(tty.ok + "\n")
+    else:
+        sys.stdout.write(tty.error + " (exit code: %d)\n" % proc.returncode)
+        raise SystemExit(1)
 
 
 def check_site_user(site: AbstractSiteContext, site_must_exist: int) -> None:
@@ -1613,11 +1925,13 @@ def check_site_user(site: AbstractSiteContext, site_must_exist: int) -> None:
         return
 
     if not site.exists():
-        bail_out("omd: The site '%s' does not exist. You need to execute "
-                 "omd as root or site user." % site.name)
+        bail_out(
+            "omd: The site '%s' does not exist. You need to execute "
+            "omd as root or site user." % site.name
+        )
 
 
-#.
+# .
 #   .--Commands------------------------------------------------------------.
 #   |         ____                                          _              |
 #   |        / ___|___  _ __ ___  _ __ ___   __ _ _ __   __| |___          |
@@ -1630,24 +1944,40 @@ def check_site_user(site: AbstractSiteContext, site_must_exist: int) -> None:
 #   '----------------------------------------------------------------------'
 
 
-def main_help(version_info: VersionInfo,
-              site: AbstractSiteContext,
-              global_opts: Optional['GlobalOptions'] = None,
-              args: Optional[Arguments] = None,
-              options: Optional[CommandOptions] = None) -> None:
+def main_help(
+    version_info: VersionInfo,
+    site: AbstractSiteContext,
+    global_opts: GlobalOptions | None = None,
+    args: Arguments | None = None,
+    options: CommandOptions | None = None,
+) -> None:
     if args is None:
         args = []
     if options is None:
         options = {}
-    sys.stdout.write("Manage multiple monitoring sites comfortably with OMD. "
-                     "The Open Monitoring Distribution.\n")
+    sys.stdout.write(
+        "Manage multiple monitoring sites comfortably with OMD. "
+        "The Open Monitoring Distribution.\n"
+    )
 
     if is_root():
         sys.stdout.write("Usage (called as root):\n\n")
     else:
         sys.stdout.write("Usage (called as site user):\n\n")
 
-    for command, only_root, _no_suid, needs_site, _site_must_exist, _confirm, synopsis, _command_function, _command_options, descr, _confirm_text in commands:
+    for (
+        command,
+        only_root,
+        _no_suid,
+        needs_site,
+        _site_must_exist,
+        _confirm,
+        synopsis,
+        _command_function,
+        _command_options,
+        descr,
+        _confirm_text,
+    ) in COMMANDS:
         if only_root and not is_root():
             continue
 
@@ -1657,31 +1987,42 @@ def main_help(version_info: VersionInfo,
             elif needs_site == 1:
                 synopsis = "SITE " + synopsis
 
-        synopsis_width = '23' if is_root() else '16'
+        synopsis_width = "23" if is_root() else "16"
         sys.stdout.write((" omd %-10s %-" + synopsis_width + "s %s\n") % (command, synopsis, descr))
     sys.stdout.write(
         "\nGeneral Options:\n"
         " -V <version>                    set specific version, useful in combination with update/create\n"
-        " omd COMMAND -h, --help          show available options of COMMAND\n")
+        " omd COMMAND -h, --help          show available options of COMMAND\n"
+    )
 
 
-def main_setversion(version_info: VersionInfo, site: SiteContext, global_opts: 'GlobalOptions',
-                    args: Arguments, options: CommandOptions) -> None:
+def main_setversion(
+    version_info: VersionInfo,
+    site: SiteContext,
+    global_opts: GlobalOptions,
+    args: Arguments,
+    options: CommandOptions,
+) -> None:
     if len(args) == 0:
         versions = [(v, "Version %s" % v) for v in omd_versions() if not v == default_version()]
 
         if use_update_alternatives():
-            versions = [('auto', 'Auto (Update-Alternatives)')] + versions
+            versions = [("auto", "Auto (Update-Alternatives)")] + versions
 
-        success, version = dialog_menu("Choose new default",
-                                       "Please choose the version to make the new default",
-                                       versions, None, "Make default", "Cancel")
+        success, version = dialog_menu(
+            "Choose new default",
+            "Please choose the version to make the new default",
+            versions,
+            None,
+            "Make default",
+            "Cancel",
+        )
         if not success:
             bail_out("Aborted.")
     else:
         version = args[0]
 
-    if version != 'auto' and not version_exists(version):
+    if version != "auto" and not version_exists(version):
         bail_out("The given version does not exist.")
     if version == default_version():
         bail_out("The given version is already default.")
@@ -1689,10 +2030,14 @@ def main_setversion(version_info: VersionInfo, site: SiteContext, global_opts: '
     # Special handling for debian based distros which use update-alternatives
     # to control the path to the omd binary, manpage and so on
     if use_update_alternatives():
-        if version == 'auto':
-            os.system("update-alternatives --auto omd")  # nosec
+        if version == "auto":
+            with subprocess.Popen(["update-alternatives", "--auto", "omd"]):
+                pass
         else:
-            os.system("update-alternatives --set omd /omd/versions/%s" % version)  # nosec
+            with subprocess.Popen(
+                ["update-alternatives", "--set", "omd", "/omd/versions/" + version]
+            ):
+                pass
     else:
         if os.path.islink("/omd/versions/default"):
             os.remove("/omd/versions/default")
@@ -1703,8 +2048,13 @@ def use_update_alternatives() -> bool:
     return os.path.exists("/var/lib/dpkg/alternatives/omd")
 
 
-def main_version(version_info: VersionInfo, site: AbstractSiteContext, global_opts: 'GlobalOptions',
-                 args: Arguments, options: CommandOptions) -> None:
+def main_version(
+    version_info: VersionInfo,
+    site: AbstractSiteContext,
+    global_opts: GlobalOptions,
+    args: Arguments,
+    options: CommandOptions,
+) -> None:
     if len(args) > 0:
         site = SiteContext(args[0])
         if not site.exists():
@@ -1722,8 +2072,13 @@ def main_version(version_info: VersionInfo, site: AbstractSiteContext, global_op
         sys.stdout.write("OMD - Open Monitoring Distribution Version %s\n" % version)
 
 
-def main_versions(version_info: VersionInfo, site: AbstractSiteContext,
-                  global_opts: 'GlobalOptions', args: Arguments, options: CommandOptions) -> None:
+def main_versions(
+    version_info: VersionInfo,
+    site: AbstractSiteContext,
+    global_opts: GlobalOptions,
+    args: Arguments,
+    options: CommandOptions,
+) -> None:
     for v in omd_versions():
         if v == default_version() and "bare" not in options:
             sys.stdout.write("%s (default)\n" % v)
@@ -1733,27 +2088,34 @@ def main_versions(version_info: VersionInfo, site: AbstractSiteContext,
 
 def default_version() -> str:
     return os.path.basename(
-        os.path.realpath(os.path.join(omdlib.utils.omd_base_path(), "omd/versions/default")))
+        os.path.realpath(os.path.join(omdlib.utils.omd_base_path(), "omd/versions/default"))
+    )
 
 
 def omd_versions() -> Iterable[str]:
     try:
-        return sorted([
-            v for v in os.listdir(os.path.join(omdlib.utils.omd_base_path(), "omd/versions"))
-            if v != "default"
-        ])
-    except OSError as e:
-        if e.errno == errno.ENOENT:
-            return []
-        raise
+        return sorted(
+            [
+                v
+                for v in os.listdir(os.path.join(omdlib.utils.omd_base_path(), "omd/versions"))
+                if v != "default"
+            ]
+        )
+    except FileNotFoundError:
+        return []
 
 
 def version_exists(v: str) -> bool:
     return v in omd_versions()
 
 
-def main_sites(version_info: VersionInfo, site: AbstractSiteContext, global_opts: 'GlobalOptions',
-               args: Arguments, options: CommandOptions) -> None:
+def main_sites(
+    version_info: VersionInfo,
+    site: AbstractSiteContext,
+    global_opts: GlobalOptions,
+    args: Arguments,
+    options: CommandOptions,
+) -> None:
     if sys.stdout.isatty() and "bare" not in options:
         sys.stdout.write("SITE             VERSION          COMMENTS\n")
     for sitename in all_sites():
@@ -1793,8 +2155,13 @@ def sitename_must_be_valid(site, reuse=False):
         bail_out("User '%s' already existing." % site.name)
 
 
-def main_create(version_info: VersionInfo, site: SiteContext, global_opts: 'GlobalOptions',
-                args: Arguments, options: CommandOptions) -> None:
+def main_create(
+    version_info: VersionInfo,
+    site: SiteContext,
+    global_opts: GlobalOptions,
+    args: Arguments,
+    options: CommandOptions,
+) -> None:
     reuse = False
     if "reuse" in options:
         reuse = True
@@ -1813,7 +2180,7 @@ def main_create(version_info: VersionInfo, site: SiteContext, global_opts: 'Glob
         fstab_verify(site)
     else:
         create_site_dir(site)
-        add_to_fstab(site, tmpfs_size=options.get('tmpfs-size'))
+        add_to_fstab(site, tmpfs_size=options.get("tmpfs-size"))
 
     config_settings: Config = {}
     if "no-autostart" in options:
@@ -1829,42 +2196,56 @@ def main_create(version_info: VersionInfo, site: SiteContext, global_opts: 'Glob
         welcome_message(site, admin_password)
 
     else:
-        sys.stdout.write("Create new site %s in disabled state and with empty %s.\n" %
-                         (site.name, site.dir))
+        sys.stdout.write(
+            f"Create new site {site.name} in disabled state and with empty {site.dir}.\n"
+        )
         sys.stdout.write("You can now mount a filesystem to %s.\n" % (site.dir))
         sys.stdout.write("Afterwards you can initialize the site with 'omd init'.\n")
 
 
-def welcome_message(site: SiteContext, admin_password: str) -> None:
-    sys.stdout.write("Created new site %s with version %s.\n\n" % (site.name, omdlib.__version__))
-    sys.stdout.write("  The site can be started with %somd start %s%s.\n" %
-                     (tty.bold, site.name, tty.normal))
-    sys.stdout.write("  The default web UI is available at %shttp://%s/%s/%s\n" %
-                     (tty.bold, hostname(), site.name, tty.normal))
+def welcome_message(site: SiteContext, admin_password: Password) -> None:
+    sys.stdout.write(f"Created new site {site.name} with version {omdlib.__version__}.\n\n")
+    sys.stdout.write(
+        f"  The site can be started with {tty.bold}omd start {site.name}{tty.normal}.\n"
+    )
+    sys.stdout.write(
+        f"  The default web UI is available at {tty.bold}http://{hostname()}/{site.name}/{tty.normal}\n"
+    )
     sys.stdout.write("\n")
     sys.stdout.write(
-        "  The admin user for the web applications is %scmkadmin%s with password: %s%s%s\n" %
-        (tty.bold, tty.normal, tty.bold, admin_password, tty.normal))
+        f"  The admin user for the web applications is {tty.bold}cmkadmin{tty.normal} with password: {tty.bold}{admin_password.raw}{tty.normal}\n"
+    )
     sys.stdout.write(
-        "  For command line administration of the site, log in with %s'omd su %s'%s.\n" %
-        (tty.bold, site.name, tty.normal))
-    sys.stdout.write("  After logging in, you can change the password for cmkadmin with "
-                     "%s'htpasswd etc/htpasswd cmkadmin'%s.\n" % (tty.bold, tty.normal))
+        f"  For command line administration of the site, log in with {tty.bold}'omd su {site.name}'{tty.normal}.\n"
+    )
+    sys.stdout.write(
+        "  After logging in, you can change the password for cmkadmin with "
+        "%s'cmk-passwd cmkadmin'%s.\n" % (tty.bold, tty.normal)
+    )
     sys.stdout.write("\n")
 
 
-def main_init(version_info: VersionInfo, site: SiteContext, global_opts: 'GlobalOptions',
-              args: Arguments, options: CommandOptions) -> None:
+def main_init(
+    version_info: VersionInfo,
+    site: SiteContext,
+    global_opts: GlobalOptions,
+    args: Arguments,
+    options: CommandOptions,
+) -> None:
     if not site.is_disabled():
-        bail_out("Cannot initialize site that is not disabled.\n"
-                 "Please call 'omd disable %s' first." % site.name)
+        bail_out(
+            "Cannot initialize site that is not disabled.\n"
+            "Please call 'omd disable %s' first." % site.name
+        )
 
     is_verbose = logger.isEnabledFor(VERBOSE)
 
     if not site.is_empty():
         if not global_opts.force:
-            bail_out("The site's home directory is not empty. Please add use\n"
-                     "'omd --force init %s' if you want to erase all data." % site.name)
+            bail_out(
+                "The site's home directory is not empty. Please add use\n"
+                "'omd --force init %s' if you want to erase all data." % site.name
+            )
 
         # We must not delete the directory itself, just its contents.
         # The directory might be a separate filesystem. This is not quite
@@ -1873,7 +2254,7 @@ def main_init(version_info: VersionInfo, site: SiteContext, global_opts: 'Global
         # each site.
         sys.stdout.write("Wiping the contents of %s..." % site.dir)
         for entry in os.listdir(site.dir):
-            if entry not in ['.', '..']:
+            if entry not in [".", ".."]:
                 path = site.dir + "/" + entry
                 if is_verbose:
                     sys.stdout.write("\n   deleting %s..." % path)
@@ -1888,8 +2269,13 @@ def main_init(version_info: VersionInfo, site: SiteContext, global_opts: 'Global
     welcome_message(site, admin_password)
 
 
-def init_site(version_info: VersionInfo, site: SiteContext, global_opts: 'GlobalOptions',
-              config_settings: Config, options: CommandOptions) -> str:
+def init_site(
+    version_info: VersionInfo,
+    site: SiteContext,
+    global_opts: GlobalOptions,
+    config_settings: Config,
+    options: CommandOptions,
+) -> Password:
     apache_reload = "apache-reload" in options
 
     # Create symbolic link to version
@@ -1897,11 +2283,11 @@ def init_site(version_info: VersionInfo, site: SiteContext, global_opts: 'Global
 
     # Build up directory structure with symbolic links relative to
     # the version link we just create
-    for d in ['bin', 'include', 'lib', 'share']:
+    for d in ["bin", "include", "lib", "share"]:
         os.symlink("version/" + d, site.dir + "/" + d)
 
     # Create skeleton files of non-tmp directories
-    create_skeleton_files(site, '.')
+    create_skeleton_files(site, ".")
 
     # Save the skeleton files used to initialize this site
     save_version_meta_data(site, omdlib.__version__)
@@ -1913,7 +2299,7 @@ def init_site(version_info: VersionInfo, site: SiteContext, global_opts: 'Global
     # Change ownership of all files and dirs to site user
     chown_tree(site.dir, site.name)
 
-    site.load_config()  # load default values from all hooks
+    site.load_config(load_defaults(site))  # load default values from all hooks
     if config_settings:  # add specific settings
         for hook_name, value in config_settings.items():
             site.conf[hook_name] = value
@@ -1922,7 +2308,7 @@ def init_site(version_info: VersionInfo, site: SiteContext, global_opts: 'Global
     # Change the few files that config save as created as root
     chown_tree(site.dir, site.name)
 
-    finalize_site(version_info, site, "create", apache_reload)
+    finalize_site(version_info, site, CommandType.create, apache_reload)
 
     return admin_password
 
@@ -1930,9 +2316,9 @@ def init_site(version_info: VersionInfo, site: SiteContext, global_opts: 'Global
 # Is being called at the end of create, cp and mv.
 # What is "create", "mv" or "cp". It is used for
 # running the appropriate hooks.
-def finalize_site(version_info: VersionInfo, site: SiteContext, what: str,
-                  apache_reload: bool) -> None:
-
+def finalize_site(
+    version_info: VersionInfo, site: SiteContext, command_type: CommandType, apache_reload: bool
+) -> None:
     # Now we need to do a few things as site user. Note:
     # - We cannot use setuid() here, since we need to get back to root.
     # - We cannot use seteuid() here, since the id command call will then still
@@ -1948,7 +2334,7 @@ def finalize_site(version_info: VersionInfo, site: SiteContext, what: str,
 
             # avoid executing hook 'TMPFS' and cleaning an initialized tmp directory
             # see CMK-3067
-            finalize_site_as_user(version_info, site, what, ignored_hooks=["TMPFS"])
+            finalize_site_as_user(version_info, site, command_type, ignored_hooks=["TMPFS"])
             sys.exit(0)
         except Exception as e:
             bail_out("Failed to finalize site: %s" % e)
@@ -1957,19 +2343,19 @@ def finalize_site(version_info: VersionInfo, site: SiteContext, what: str,
         if status:
             bail_out("Error in non-priviledged sub-process.")
 
-    # Finally reload global apache - with root permissions - and
-    # create include-hook for Apache and reload apache
-    create_apache_hook(site)
-    if apache_reload:
-        reload_apache(version_info)
-    else:
-        restart_apache(version_info)
+    # The config changes above, made with the site user, have to be also available for
+    # the root user, so load the site config again. Otherwise e.g. changed
+    # APACHE_TCP_PORT would not be recognized
+    site.load_config(load_defaults(site))
+    register_with_system_apache(version_info, site, apache_reload)
 
 
-def finalize_site_as_user(version_info: VersionInfo,
-                          site: SiteContext,
-                          what: str,
-                          ignored_hooks: Optional[List[str]] = None) -> None:
+def finalize_site_as_user(
+    version_info: VersionInfo,
+    site: SiteContext,
+    command_type: CommandType,
+    ignored_hooks: list[str] | None = None,
+) -> None:
     # Mount and create contents of tmpfs. This must be done as normal
     # user. We also could do this at 'omd start', but this might confuse
     # users. They could create files below tmp which would be shadowed
@@ -1981,19 +2367,28 @@ def finalize_site_as_user(version_info: VersionInfo,
     config_set_all(site, ignored_hooks)
     _update_cmk_core_config(site)
     initialize_site_ca(site)
+    initialize_agent_ca(site)
     save_site_conf(site)
 
-    call_scripts(site, 'post-' + what)
+    if command_type in [CommandType.create, CommandType.copy, CommandType.restore_as_new_site]:
+        save_instance_id(file_path=get_instance_id_file_path(Path(site.dir)), instance_id=uuid4())
+
+    call_scripts(site, "post-" + command_type.short, open_pty=sys.stdout.isatty())
 
 
-def main_rm(version_info: VersionInfo, site: SiteContext, global_opts: 'GlobalOptions',
-            args: Arguments, options: CommandOptions) -> None:
-
+def main_rm(
+    version_info: VersionInfo,
+    site: SiteContext,
+    global_opts: GlobalOptions,
+    args: Arguments,
+    options: CommandOptions,
+) -> None:
     # omd rm is called as root but the init scripts need to be called as
     # site user but later steps need root privilegies. So a simple user
     # switch to the site user would not work. Better create a subprocess
     # for this dedicated action and switch to the user in that subprocess
-    os.system('omd stop %s' % site.name)  # nosec
+    with subprocess.Popen(["omd", "stop", site.name]):
+        pass
 
     reuse = "reuse" in options
     kill = "kill" in options
@@ -2011,7 +2406,7 @@ def main_rm(version_info: VersionInfo, site: SiteContext, global_opts: 'GlobalOp
     # Needs to be cleaned up before removing the site directory. Otherwise a
     # parallel restart / reload of the apache may fail, because the apache hook
     # refers to a not existing site apache config.
-    delete_apache_hook(site.name)
+    unregister_from_system_apache(version_info, site, apache_reload="apache-reload" in options)
 
     if not reuse:
         remove_from_fstab(site)
@@ -2030,11 +2425,6 @@ def main_rm(version_info: VersionInfo, site: SiteContext, global_opts: 'GlobalOp
         os.mkdir(site.tmp_dir)
         os.chown(site.tmp_dir, user_id(site.name), group_id(site.name))
 
-    if "apache-reload" in options:
-        reload_apache(version_info)
-    else:
-        restart_apache(version_info)
-
 
 def create_site_dir(site: SiteContext) -> None:
     try:
@@ -2043,11 +2433,17 @@ def create_site_dir(site: SiteContext) -> None:
         if e.errno != errno.EEXIST:
             raise
     os.chown(site.dir, user_id(site.name), group_id(site.name))
+    # If the site-dir is not world executable files in the site are all not readable/writeable
+    os.chmod(site.dir, 0o751)  # nosec B103 # BNS:7e6b08
 
 
-def main_disable(version_info: VersionInfo, site: SiteContext, global_opts: 'GlobalOptions',
-                 args: Arguments, options: CommandOptions) -> None:
-
+def main_disable(
+    version_info: VersionInfo,
+    site: SiteContext,
+    global_opts: GlobalOptions,
+    args: Arguments,
+    options: CommandOptions,
+) -> None:
     if site.is_disabled():
         sys.stderr.write("This site is already disabled.\n")
         sys.exit(0)
@@ -2055,21 +2451,39 @@ def main_disable(version_info: VersionInfo, site: SiteContext, global_opts: 'Glo
     stop_if_not_stopped(site)
     unmount_tmpfs(site, kill="kill" in options)
     sys.stdout.write("Disabling Apache configuration for this site...")
-    delete_apache_hook(site.name)
-    ok()
-    restart_apache(version_info)
+    unregister_from_system_apache(version_info, site, apache_reload=False)
 
 
-def main_enable(version_info: VersionInfo, site: SiteContext, global_opts: 'GlobalOptions',
-                args: Arguments, options: CommandOptions) -> None:
-
+def main_enable(
+    version_info: VersionInfo,
+    site: SiteContext,
+    global_opts: GlobalOptions,
+    args: Arguments,
+    options: CommandOptions,
+) -> None:
     if not site.is_disabled():
         sys.stderr.write("This site is already enabled.\n")
         sys.exit(0)
     sys.stdout.write("Re-enabling Apache configuration for this site...")
-    create_apache_hook(site)
-    ok()
-    restart_apache(version_info)
+    register_with_system_apache(version_info, site, apache_reload=False)
+
+
+def main_update_apache_config(
+    version_info: VersionInfo,
+    site: SiteContext,
+    global_opts: GlobalOptions,
+    args: Arguments,
+    options: CommandOptions,
+) -> None:
+    site.load_config(load_defaults(site))
+    if _is_apache_enabled(site):
+        register_with_system_apache(version_info, site, apache_reload=True)
+    else:
+        unregister_from_system_apache(version_info, site, apache_reload=True)
+
+
+def _is_apache_enabled(site: SiteContext) -> bool:
+    return site.conf["APACHE_MODE"] != "none"
 
 
 def _get_conflict_mode(options: CommandOptions) -> str:
@@ -2081,14 +2495,19 @@ def _get_conflict_mode(options: CommandOptions) -> str:
     return conflict_mode
 
 
-def main_mv_or_cp(version_info: VersionInfo, old_site: SiteContext, global_opts: 'GlobalOptions',
-                  what: str, args: Arguments, options: CommandOptions) -> None:
-
+def main_mv_or_cp(  # pylint: disable=too-many-branches
+    version_info: VersionInfo,
+    old_site: SiteContext,
+    global_opts: GlobalOptions,
+    command_type: CommandType,
+    args: Arguments,
+    options: CommandOptions,
+) -> None:
     conflict_mode = _get_conflict_mode(options)
-    action = 'rename' if what == 'mv' else 'copy'
+    action = "rename" if command_type is CommandType.move else "copy"
 
     if len(args) != 1:
-        bail_out("omd: Usage: omd %s oldname newname" % what)
+        bail_out("omd: Usage: omd %s oldname newname" % command_type.short)
     new_site = SiteContext(args[0])
 
     reuse = False
@@ -2101,20 +2520,25 @@ def main_mv_or_cp(version_info: VersionInfo, old_site: SiteContext, global_opts:
     sitename_must_be_valid(new_site, reuse)
 
     if not old_site.is_stopped():
-        bail_out("Cannot %s site '%s' while it is running." % (action, old_site.name))
+        bail_out(f"Cannot {action} site '{old_site.name}' while it is running.")
 
     pids = find_processes_of_user(old_site.name)
     if pids:
-        bail_out("Cannot %s site '%s' while there are processes owned by %s.\n"
-                 "PIDs: %s" % (action, old_site.name, old_site.name, " ".join(pids)))
+        bail_out(
+            "Cannot %s site '%s' while there are processes owned by %s.\n"
+            "PIDs: %s" % (action, old_site.name, old_site.name, " ".join(pids))
+        )
 
-    if what == "mv":
+    if command_type is CommandType.move:
         unmount_tmpfs(old_site, kill="kill" in options)
         if not reuse:
             remove_from_fstab(old_site)
 
-    sys.stdout.write("%sing site %s to %s..." %
-                     (what == "mv" and "Mov" or "Copy", old_site.name, new_site.name))
+    sys.stdout.write(
+        "{}ing site {} to {}...".format(
+            command_type is CommandType.move and "Mov" or "Copy", old_site.name, new_site.name
+        )
+    )
     sys.stdout.flush()
 
     # Create new user. Note: even on mv we need to create a new user.
@@ -2124,7 +2548,7 @@ def main_mv_or_cp(version_info: VersionInfo, old_site: SiteContext, global_opts:
     if not reuse:
         useradd(version_info, new_site, uid, gid)  # None for uid/gid means: let Linux decide
 
-    if what == "mv" and not reuse:
+    if command_type is CommandType.move and not reuse:
         # Rename base directory and apache config
         os.rename(old_site.dir, new_site.dir)
         delete_apache_hook(old_site.name)
@@ -2133,14 +2557,17 @@ def main_mv_or_cp(version_info: VersionInfo, old_site: SiteContext, global_opts:
         if not reuse:
             os.mkdir(new_site.dir)
 
-        addopts = ""
+        addopts = []
         for p in omdlib.backup.get_exclude_patterns(options):
-            addopts += " --exclude '/%s'" % p
+            addopts += ["--exclude", "/%s" % p]
 
         if global_opts.verbose:
-            addopts += " -v"
+            addopts += ["-v"]
 
-        os.system("rsync -arx %s '%s/' '%s/'" % (addopts, old_site.dir, new_site.dir))  # nosec
+        with subprocess.Popen(
+            ["rsync", "-arx"] + addopts + [old_site.dir + "/", new_site.dir + "/"]
+        ):
+            pass
 
         httpdlogdir = new_site.dir + "/var/log/apache"
         if not os.path.exists(httpdlogdir):
@@ -2157,29 +2584,36 @@ def main_mv_or_cp(version_info: VersionInfo, old_site: SiteContext, global_opts:
     patch_skeleton_files(conflict_mode, old_site, new_site)
 
     # In case of mv now delete old user
-    if what == "mv" and not reuse:
+    if command_type is CommandType.move and not reuse:
         userdel(old_site.name)
 
     # clean up old site
-    if what == "mv" and reuse:
-        main_rm(version_info, old_site, global_opts, [], {'reuse': None})
+    if command_type is CommandType.move and reuse:
+        main_rm(version_info, old_site, global_opts, [], {"reuse": None})
 
     sys.stdout.write("OK\n")
 
     # Now switch over to the new site as currently active site
-    new_site.load_config()
+    new_site.load_config(load_defaults(new_site))
     set_environment(new_site)
 
     # Entry for tmps in /etc/fstab
     if not reuse:
-        add_to_fstab(new_site, tmpfs_size=options.get('tmpfs-size'))
+        add_to_fstab(new_site, tmpfs_size=options.get("tmpfs-size"))
 
-    finalize_site(version_info, new_site, what, "apache-reload" in options)
+    # Needed by the post-rename-site script
+    putenv("OLD_OMD_SITE", old_site.name)
+
+    finalize_site(version_info, new_site, command_type, "apache-reload" in options)
 
 
-def main_diff(version_info: VersionInfo, site: SiteContext, global_opts: 'GlobalOptions',
-              args: Arguments, options: CommandOptions) -> None:
-
+def main_diff(
+    version_info: VersionInfo,
+    site: SiteContext,
+    global_opts: GlobalOptions,
+    args: Arguments,
+    options: CommandOptions,
+) -> None:
     from_version = site.version
     if from_version is None:
         bail_out("Failed to determine site version")
@@ -2193,17 +2627,25 @@ def main_diff(version_info: VersionInfo, site: SiteContext, global_opts: 'Global
     if len(args) == 0:
         args = ["."]
     elif len(args) == 1 and os.path.isfile(args[0]):
-        global_opts = GlobalOptions(verbose=True,
-                                    force=global_opts.force,
-                                    interactive=global_opts.interactive,
-                                    orig_working_directory=global_opts.orig_working_directory)
+        global_opts = GlobalOptions(
+            verbose=True,
+            force=global_opts.force,
+            interactive=global_opts.interactive,
+            orig_working_directory=global_opts.orig_working_directory,
+        )
 
     for arg in args:
         diff_list(global_opts, options, site, from_skelroot, from_version, arg)
 
 
-def diff_list(global_opts: 'GlobalOptions', options: CommandOptions, site: SiteContext,
-              from_skelroot: str, from_version: str, orig_path: str) -> None:
+def diff_list(
+    global_opts: GlobalOptions,
+    options: CommandOptions,
+    site: SiteContext,
+    from_skelroot: str,
+    from_version: str,
+    orig_path: str,
+) -> None:
     # Compare a list of files/directories with the original state and output differences. In verbose
     # mode, we output the complete diff, otherwise just the state. Only files present in skel/ are
     # handled at all.
@@ -2234,32 +2676,47 @@ def diff_list(global_opts: 'GlobalOptions', options: CommandOptions, site: SiteC
 
     # Make sure that path does not lie outside the OMD site
     if abs_path.startswith(site.dir):
-        rel_path = abs_path[len(site.dir) + 1:]
+        rel_path = abs_path[len(site.dir) + 1 :]
     elif abs_path.startswith(abs_sitedir):
-        rel_path = abs_path[len(abs_sitedir) + 1:]
+        rel_path = abs_path[len(abs_sitedir) + 1 :]
     else:
         bail_out("Sorry, 'omd diff' only works for files in the site's directory.")
 
     if not os.path.isdir(abs_path):
-        print_diff(rel_path, global_opts, options, site, from_skelroot, site.dir, from_version,
-                   old_perms)
+        print_diff(
+            rel_path, global_opts, options, site, from_skelroot, site.dir, from_version, old_perms
+        )
     else:
         if not rel_path:
             rel_path = "."
 
-        for file_path in walk_skel(from_skelroot,
-                                   conflict_mode="ask",
-                                   depth_first=False,
-                                   relbase=rel_path):
-            print_diff(file_path, global_opts, options, site, from_skelroot, site.dir, from_version,
-                       old_perms)
+        for file_path in walk_skel(
+            from_skelroot, conflict_mode="ask", depth_first=False, relbase=rel_path
+        ):
+            print_diff(
+                file_path,
+                global_opts,
+                options,
+                site,
+                from_skelroot,
+                site.dir,
+                from_version,
+                old_perms,
+            )
 
 
-def print_diff(rel_path: str, global_opts: 'GlobalOptions', options: CommandOptions,
-               site: SiteContext, source_path: str, target_path: str, source_version: str,
-               source_perms: Permissions) -> None:
-    source_file = source_path + '/' + rel_path
-    target_file = target_path + '/' + rel_path
+def print_diff(
+    rel_path: str,
+    global_opts: GlobalOptions,
+    options: CommandOptions,
+    site: SiteContext,
+    source_path: str,
+    target_path: str,
+    source_version: str,
+    source_perms: Permissions,
+) -> None:
+    source_file = source_path + "/" + rel_path
+    target_file = target_path + "/" + rel_path
 
     source_perm = get_skel_permissions(source_path, source_perms, rel_path)
     target_perm = get_file_permissions(target_file)
@@ -2277,50 +2734,53 @@ def print_diff(rel_path: str, global_opts: 'GlobalOptions', options: CommandOpti
 
     def print_status(color: str, f: str, status: str, long_out: str) -> None:
         if "bare" in options:
-            sys.stdout.write("%s %s\n" % (status, f))
+            sys.stdout.write(f"{status} {f}\n")
         elif not global_opts.verbose:
-            sys.stdout.write(color + " %s %s\n" % (long_out, f))
+            sys.stdout.write(color + f" {long_out} {f}\n")
         else:
-            arrow = tty.magenta + '->' + tty.normal
-            if 'c' in status:
+            arrow = tty.magenta + "->" + tty.normal
+            if "c" in status:
                 source_content = file_contents(site, source_file)
-                if os.system("which colordiff > /dev/null 2>&1") == 0:  # nosec
+                if os.system("which colordiff > /dev/null 2>&1") == 0:  # nosec B605 # BNS:2b5952
                     diff = "colordiff"
                 else:
                     diff = "diff"
-                p = subprocess.Popen([diff, "-", target_file],
-                                     stdin=subprocess.PIPE,
-                                     close_fds=True,
-                                     shell=False)
-                p.communicate(source_content)
-                if p.stdin is None:
-                    raise Exception("Huh? stdin vanished...")
-                p.stdin.close()
-            elif status == 'p':
-                sys.stdout.write("    %s %s %s\n" % (source_perm, arrow, target_perm))
-            elif 't' in status:
-                sys.stdout.write("    %s %s %s\n" % (source_type, arrow, target_type))
+                subprocess.run(
+                    [diff, "-", target_file],
+                    close_fds=True,
+                    shell=False,
+                    input=source_content,
+                    check=False,
+                )
+            elif status == "p":
+                sys.stdout.write(f"    {source_perm} {arrow} {target_perm}\n")
+            elif "t" in status:
+                sys.stdout.write(f"    {source_type} {arrow} {target_type}\n")
 
     if not target_type:
-        print_status(StateMarkers.good, fn, 'd', 'Deleted')
+        print_status(StateMarkers.good, fn, "r", "Removed")
         return
 
     if changed_type and changed_content:
-        print_status(StateMarkers.good, fn, 'tc', 'Changed type and content')
+        print_status(StateMarkers.good, fn, "tc", "Changed type and content")
 
     elif changed_type and not changed_content:
-        print_status(StateMarkers.good, fn, 't', 'Changed type')
+        print_status(StateMarkers.good, fn, "t", "Changed type")
 
     elif changed_content and not changed_type:
-        print_status(StateMarkers.good, fn, 'c', 'Changed content')
+        print_status(StateMarkers.good, fn, "c", "Changed content")
 
     if source_perm != target_perm:
-        print_status(StateMarkers.warn, fn, 'p', 'Changed permissions')
+        print_status(StateMarkers.warn, fn, "p", "Changed permissions")
 
 
-def main_update(version_info: VersionInfo, site: SiteContext, global_opts: 'GlobalOptions',
-                args: Arguments, options: CommandOptions) -> None:
-
+def main_update(  # pylint: disable=too-many-branches
+    version_info: VersionInfo,
+    site: SiteContext,
+    global_opts: GlobalOptions,
+    args: Arguments,
+    options: CommandOptions,
+) -> None:
     conflict_mode = _get_conflict_mode(options)
 
     if not site.is_stopped():
@@ -2351,35 +2811,127 @@ def main_update(version_info: VersionInfo, site: SiteContext, global_opts: 'Glob
             to_version = possible_versions[0]
         else:
             success, to_version = dialog_menu(
-                "Choose target version", "Please choose the version this site should be updated to",
-                [(v, "Version %s" % v) for v in possible_versions], possible_versions[0],
-                "Update now", "Cancel")
+                "Choose target version",
+                "Please choose the version this site should be updated to",
+                [(v, "Version %s" % v) for v in possible_versions],
+                possible_versions[0],
+                "Update now",
+                "Cancel",
+            )
             if not success:
                 bail_out("Aborted.")
         exec_other_omd(site, to_version, "update")
 
+    cmk_from_version = _omd_to_check_mk_version(from_version)
+    cmk_to_version = _omd_to_check_mk_version(to_version)
+    if (
+        isinstance(
+            compatibility := versions_compatible(cmk_from_version, cmk_to_version),
+            VersionsIncompatible,
+        )
+        and not global_opts.force
+    ):
+        bail_out(
+            f"ERROR: You are trying to update from {from_version} to {to_version} which is not "
+            f"supported. Reason: {compatibility}\n\n"
+            "* Major downgrades are not supported\n"
+            "* Major version updates need to be done step by step.\n\n"
+            "If you are really sure about what you are doing, you can still do the "
+            "update with '-f'.\n"
+            "But you will be on your own from there."
+        )
+
+    # warn about unacknowledged werks
+    is_major_update = cmk_from_version.base != cmk_to_version.base
+    # but we can only do this if we have access to the version we upgrade from:
+    # (docker installations have only a single version, the one they run and update to.)
+    access_to_from_version = os.path.exists(os.path.join(site.real_dir, "version"))
+    if is_major_update and access_to_from_version:
+        unack_werks = unacknowledged_incompatible_werks()
+        if len(unack_werks):
+            note_list_is_clipped = ""
+            werks_list = "\n".join(f"  * {werk.id} {werk.title}" for werk in unack_werks[:50])
+            if len(unack_werks) > 50:
+                note_list_is_clipped = "(Only showing the first 50 unacknowledged werks here, check the changelog in Checkmk for the whole list.)\n\n"
+            if not dialog_yesno(
+                f"The current site contains {len(unack_werks)} unacknowledged werks.\n\n"
+                "It is recommended to review these werks for changes you need to make to your sites configuration. "
+                "If you continue, those werks will be automatically acknowledged and "
+                f"the list of unacknowledged werks is replaced with the ones of the new version.\n\n{note_list_is_clipped}"
+                f"{werks_list}",
+                "Acknowledge werks and continue",
+                "Abort",
+                scrollbar=True,
+            ):
+                bail_out("Aborted.")
+
     # This line is reached, if the version of the OMD binary (the target)
     # is different from the current version of the site.
     if not global_opts.force and not dialog_yesno(
-            "You are going to update the site %s from version %s to version %s. "
-            "This will include updating all of your configuration files and merging "
-            "changes in the default files with changes made by you. In case of conflicts "
-            "your help will be needed." %
-        (site.name, from_version, to_version), "Update!", "Abort"):
+        "You are going to update the site %s from version %s to version %s. "
+        "This will include updating all of your configuration files and merging "
+        "changes in the default files with changes made by you. In case of conflicts "
+        "your help will be needed." % (site.name, from_version, to_version),
+        "Update!",
+        "Abort",
+    ):
         bail_out("Aborted.")
 
     # In case the user changes the installed Checkmk Edition during update let the
     # user confirm this step.
     from_edition, to_edition = _get_edition(from_version), _get_edition(to_version)
-    if from_edition != to_edition and not global_opts.force and not dialog_yesno(
-            "You are updating from %s Edition to %s Edition. Is this intended?" %
-        (from_edition.title(), to_edition.title())):
+    if from_edition == "managed" and to_edition != "managed" and not global_opts.force:
+        bail_out(f"ERROR: Updating from {from_edition} to {to_edition} is not possible. Aborted.")
+
+    if (
+        from_edition != to_edition
+        and not global_opts.force
+        and not dialog_yesno(
+            text=f"You are updating from {from_edition.title()} Edition to {to_edition.title()} Edition. Is this intended?",
+            default_no=True,
+        )
+    ):
         bail_out("Aborted.")
 
-    start_logging(site.dir + '/var/log/update.log')
+    # - 2.1 and before were compatible with the old and new hook configuration
+    # - Checkmk 2.2 enforces the new hook with this condition
+    # TODO: Remove with 2.3
+    if not global_opts.force and has_old_apache_hook_in_site(site):
+        bail_out(
+            "ERROR: You have to update the system apache configuration in order to proceed "
+            "with this update.\n\n"
+            "Previous Checkmk versions were compatible with the old configuration, but this "
+            "version requires\n"
+            f"you to execute 'omd update-apache-config {site.name}' as root user.\n\n"
+            "Have a look at #14281 for further information."
+        )
 
-    sys.stdout.write("%s - Updating site '%s' from version %s to %s...\n\n" %
-                     (time.strftime('%Y-%m-%d %H:%M:%S'), site.name, from_version, to_version))
+    try:
+        hook_up_to_date = is_apache_hook_up_to_date(site)
+    except PermissionError:
+        # In case the hook can not be read, assume the hook needs to be updated
+        hook_up_to_date = False
+
+    if (
+        not hook_up_to_date
+        and not global_opts.force
+        and not dialog_yesno(
+            "This update requires additional actions: The system apache configuration has changed "
+            "with the new version and needs to be updated.\n\n"
+            f"You will have to execute 'omd update-apache-config {site.name}' as root user.\n\n"
+            "Please do it right after 'omd update' to prevent inconsistencies. Have a look at "
+            "#14281 for further information.\n\n"
+            "Do you want to proceed?"
+        )
+    ):
+        bail_out("Aborted.")
+
+    is_tty = sys.stdout.isatty()
+    start_logging(site.dir + "/var/log/update.log")
+
+    sys.stdout.write(
+        f"{time.strftime('%Y-%m-%d %H:%M:%S')} - Updating site '{site.name}' from version {from_version} to {to_version}...\n\n"
+    )
 
     # etc/icinga/icinga.d/pnp4nagios.cfg was created by the PNP4NAGIOS OMD hook in previous
     # versions. Since we have removed Icinga 1 the "omd update" command tries to remove the
@@ -2410,14 +2962,17 @@ def main_update(version_info: VersionInfo, site: SiteContext, global_opts: 'Glob
 
     # First walk through skeleton files of new version
     for relpath in walk_skel(to_skelroot, conflict_mode=conflict_mode, depth_first=False):
-        _execute_update_file(relpath, site, conflict_mode, from_version, to_version, old_perms)
+        _execute_update_file(
+            relpath, site, conflict_mode, from_version, to_version, to_edition, old_perms
+        )
 
     # Now handle files present in old but not in new skel files
-    for relpath in walk_skel(from_skelroot,
-                             conflict_mode=conflict_mode,
-                             depth_first=True,
-                             exclude_if_in=to_skelroot):
-        _execute_update_file(relpath, site, conflict_mode, from_version, to_version, old_perms)
+    for relpath in walk_skel(
+        from_skelroot, conflict_mode=conflict_mode, depth_first=True, exclude_if_in=to_skelroot
+    ):
+        _execute_update_file(
+            relpath, site, conflict_mode, from_version, to_version, to_edition, old_perms
+        )
 
     # Change symbolic link pointing to new version
     create_version_symlink(site, to_version)
@@ -2425,11 +2980,16 @@ def main_update(version_info: VersionInfo, site: SiteContext, global_opts: 'Glob
 
     # Prepare for config_set_all: Refresh the site configuration, because new hooks may introduce
     # new settings and default values.
-    site.load_config()
+    site.load_config(load_defaults(site))
 
     # Execute some builtin initializations before executing the update-pre-hooks
     initialize_livestatus_tcp_tls_after_update(site)
     initialize_site_ca(site)
+
+    preexisting = agent_ca_existing(site)
+    initialize_agent_ca(site)
+    if not preexisting:
+        link_legacy_agent_ca(site)
 
     # Let hooks of the new(!) version do their work and update configuration.
     config_set_all(site)
@@ -2438,7 +2998,18 @@ def main_update(version_info: VersionInfo, site: SiteContext, global_opts: 'Glob
     # initialized tmpfs.
     prepare_and_populate_tmpfs(version_info, site)
 
-    call_scripts(site, 'update-pre-hooks')
+    call_scripts(
+        site,
+        "update-pre-hooks",
+        open_pty=is_tty,
+        add_env={
+            "OMD_CONFLICT_MODE": conflict_mode,
+            "OMD_TO_EDITION": to_edition,
+            "OMD_FROM_VERSION": from_version,
+            "OMD_TO_VERSION": to_version,
+            "OMD_FROM_EDITION": from_edition,
+        },
+    )
 
     # We previously executed "cmk -U" multiple times in the hooks CORE, MKEVENTD, PNP4NAGIOS to
     # update the core configuration. To only execute it once, we do it here.
@@ -2450,18 +3021,30 @@ def main_update(version_info: VersionInfo, site: SiteContext, global_opts: 'Glob
 
     save_site_conf(site)
 
-    call_scripts(site, 'post-update')
+    call_scripts(site, "post-update", open_pty=is_tty)
 
-    sys.stdout.write('Finished update.\n\n')
+    if from_edition != "cloud" and to_edition == "cloud":
+        sys.stdout.write(
+            f"{tty.bold}You are now starting your trial of Checkmk Cloud Edition. If you are "
+            f"intending to use Checkmk to monitor more than 750 services after 30 days, you must "
+            f"purchase a license. In case you already have a license, please enter your license "
+            f"credentials on the product's licensing page "
+            f"(Setup > Maintenance > Licensing > Edit settings).{tty.normal}\n"
+        )
+
+    sys.stdout.write("Finished update.\n\n")
     stop_logging()
 
 
-def _update_cmk_core_config(site: SiteContext):
+def _update_cmk_core_config(site: SiteContext) -> None:
     if site.conf["CORE"] == "none":
         return  # No core config is needed in this case
 
     sys.stdout.write("Updating core configuration...\n")
-    subprocess.call(["cmk", "-U"], shell=False)
+    try:
+        subprocess.check_call(["cmk", "-U"], shell=False)
+    except subprocess.SubprocessError:
+        bail_out("Could not update core configuration. Aborting.")
 
 
 def initialize_livestatus_tcp_tls_after_update(site: SiteContext) -> None:
@@ -2476,7 +3059,7 @@ def initialize_livestatus_tcp_tls_after_update(site: SiteContext) -> None:
     if "LIVESTATUS_TCP_TLS" in site.read_site_config():
         return  # Is already set in this site
 
-    config_set_value(site, {}, "LIVESTATUS_TCP_TLS", value="off", save=True)
+    config_set_value(site, "LIVESTATUS_TCP_TLS", value="off", save=True)
 
 
 def _create_livestatus_tcp_socket_link(site: SiteContext) -> None:
@@ -2494,8 +3077,10 @@ def _create_livestatus_tcp_socket_link(site: SiteContext) -> None:
     os.symlink(target, link_path)
 
 
-def _get_edition(omd_version: str) -> str:
-    """Returns the long Check_MK Edition name or "unknown" of the given OMD version"""
+def _get_edition(
+    omd_version: str,
+) -> Literal["raw", "enterprise", "managed", "free", "cloud", "saas", "unknown"]:
+    """Returns the long Checkmk Edition name or "unknown" of the given OMD version"""
     parts = omd_version.split(".")
     if parts[-1] == "demo":
         edition_short = parts[-2]
@@ -2508,12 +3093,51 @@ def _get_edition(omd_version: str) -> str:
         return "enterprise"
     if edition_short == "cme":
         return "managed"
+    if edition_short == "cfe":
+        return "free"
+    if edition_short == "cce":
+        return "cloud"
+    if edition_short == "cse":
+        return "saas"
     return "unknown"
 
 
-def main_umount(version_info: VersionInfo, site: SiteContext, global_opts: 'GlobalOptions',
-                args: Arguments, options: CommandOptions) -> None:
+def _get_raw_version(omd_version: str) -> str:
+    return omd_version[:-4]
 
+
+def _omd_to_check_mk_version(omd_version: str) -> Version:
+    """
+    >>> f = _omd_to_check_mk_version
+    >>> f("2.0.0p3.cee")
+    Version(_BaseVersion(major=2, minor=0, sub=0), _Release(r_type=RType.p, value=3))
+    >>> f("1.6.0p3.cee.demo")
+    Version(_BaseVersion(major=1, minor=6, sub=0), _Release(r_type=RType.p, value=3))
+    >>> f("2.0.0p3.cee")
+    Version(_BaseVersion(major=2, minor=0, sub=0), _Release(r_type=RType.p, value=3))
+    >>> f("2021.12.13.cee")
+    Version(None, _Release(r_type=RType.daily, value=_BuildDate(year=2021, month=12, day=13)))
+    """
+    parts = omd_version.split(".")
+
+    # Before we had the free edition, we had versions like ".cee.demo". Since we deal with old
+    # versions, we need to care about this.
+    if parts[-1] == "demo":
+        del parts[-1]
+
+    # Strip the edition suffix away
+    del parts[-1]
+
+    return Version.from_str(".".join(parts))
+
+
+def main_umount(
+    version_info: VersionInfo,
+    site: SiteContext,
+    global_opts: GlobalOptions,
+    args: Arguments,
+    options: CommandOptions,
+) -> None:
     only_version = options.get("version")
 
     # if no site is selected, all sites are affected
@@ -2528,12 +3152,12 @@ def main_umount(version_info: VersionInfo, site: SiteContext, global_opts: 'Glob
 
             # Skip the site even when it is partly running
             if not site.is_stopped():
-                sys.stderr.write("Cannot unmount tmpfs of site '%s' while it is running.\n" %
-                                 site.name)
+                sys.stderr.write(
+                    "Cannot unmount tmpfs of site '%s' while it is running.\n" % site.name
+                )
                 continue
 
-            sys.stdout.write("%sUnmounting tmpfs of site %s%s..." %
-                             (tty.bold, site.name, tty.normal))
+            sys.stdout.write(f"{tty.bold}Unmounting tmpfs of site {site.name}{tty.normal}...")
             sys.stdout.flush()
 
             if not show_success(unmount_tmpfs(site, False, kill="kill" in options)):
@@ -2546,9 +3170,14 @@ def main_umount(version_info: VersionInfo, site: SiteContext, global_opts: 'Glob
     sys.exit(exit_status)
 
 
-def main_init_action(version_info: VersionInfo, site: SiteContext, global_opts: 'GlobalOptions',
-                     command: str, args: Arguments, options: CommandOptions) -> None:
-
+def main_init_action(  # pylint: disable=too-many-branches
+    version_info: VersionInfo,
+    site: SiteContext,
+    global_opts: GlobalOptions,
+    command: str,
+    args: Arguments,
+    options: CommandOptions,
+) -> None:
     if site.is_site_context():
         exit_status = init_action(version_info, site, global_opts, command, args, options)
 
@@ -2559,6 +3188,12 @@ def main_init_action(version_info: VersionInfo, site: SiteContext, global_opts: 
             # Even if we are not explicitly executing an unmount of the tmpfs, this may be the
             # "stop" before shutting down the computer. Create a tmpfs dump now, just to be sure.
             save_tmpfs_dump(site)
+
+        if command == "start":
+            if not (instance_id_file_path := get_instance_id_file_path(Path(site.dir))).exists():
+                # Existing sites may not have an instance ID yet. After an update we create a new one.
+                save_instance_id(file_path=instance_id_file_path, instance_id=uuid4())
+            _update_license_usage(site)
 
         sys.exit(exit_status)
 
@@ -2587,7 +3222,7 @@ def main_init_action(version_info: VersionInfo, site: SiteContext, global_opts: 
         if site.is_disabled():
             continue
 
-        site.load_config()
+        site.load_config(load_defaults(site))
 
         # Handle non autostart sites
         if command in ["start", "restart", "reload"] or ("auto" in options and command == "status"):
@@ -2603,24 +3238,25 @@ def main_init_action(version_info: VersionInfo, site: SiteContext, global_opts: 
                 continue
 
         if command == "status" and bare:
-            sys.stdout.write('[%s]\n' % site.name)
+            sys.stdout.write("[%s]\n" % site.name)
         elif not parallel:
-            sys.stdout.write("%sDoing '%s' on site %s:%s\n" %
-                             (tty.bold, command, site.name, tty.normal))
+            sys.stdout.write(f"{tty.bold}Doing '{command}' on site {site.name}:{tty.normal}\n")
         else:
             parallel_output(site.name, "Invoking '%s'\n" % (command))
         sys.stdout.flush()
 
         # We need to open a subprocess, because each site must be started with the account of the
         # site user. And after setuid() we cannot return.
-        stdout: Union[int, IO[str]] = sys.stdout if not parallel else subprocess.PIPE
-        stderr: Union[int, IO[str]] = sys.stderr if not parallel else subprocess.STDOUT
+        stdout: int | IO[str] = sys.stdout if not parallel else subprocess.PIPE
+        stderr: int | IO[str] = sys.stderr if not parallel else subprocess.STDOUT
         bare_arg = ["--bare"] if bare else []
-        p = subprocess.Popen([sys.argv[0], command] + bare_arg + [site.name] + args,
-                             stdin=open(os.devnull, "r"),
-                             stdout=stdout,
-                             stderr=stderr,
-                             encoding="utf-8")
+        p = subprocess.Popen(  # pylint: disable=consider-using-with
+            [sys.argv[0], command] + bare_arg + [site.name] + args,
+            stdin=subprocess.DEVNULL,
+            stdout=stdout,
+            stderr=stderr,
+            encoding="utf-8",
+        )
 
         if parallel:
             if p.stdout is not None:
@@ -2641,7 +3277,7 @@ def main_init_action(version_info: VersionInfo, site: SiteContext, global_opts: 
     # the output line by line and prefix each line with the ID of the site.
     # The output of a single process must not block the output of the others,
     # so it seems we need to do some low level stuff here :-/.
-    site_buf: Dict[str, str] = {}
+    site_buf: dict[str, str] = {}
     while parallel and processes:
         for site_id, p in processes[:]:
             if p.stdout is None:
@@ -2654,7 +3290,7 @@ def main_init_action(version_info: VersionInfo, site: SiteContext, global_opts: 
                     if not b:
                         break
                     buf += b
-            except IOError as e:
+            except OSError as e:
                 if e.errno == errno.EAGAIN:
                     pass
                 else:
@@ -2664,7 +3300,7 @@ def main_init_action(version_info: VersionInfo, site: SiteContext, global_opts: 
                 pos = buf.find("\n")
                 if pos == -1:
                     break
-                line, buf = buf[:pos + 1], buf[pos + 1:]
+                line, buf = buf[: pos + 1], buf[pos + 1 :]
                 parallel_output(site_id, line)
 
             site_buf[site_id] = buf
@@ -2689,100 +3325,124 @@ def main_init_action(version_info: VersionInfo, site: SiteContext, global_opts: 
     sys.exit(exit_status)
 
 
-def main_config(version_info: VersionInfo, site: SiteContext, global_opts: 'GlobalOptions',
-                args: Arguments, options: CommandOptions) -> None:
+def _update_license_usage(site: SiteContext) -> None:
+    subprocess.Popen(  # pylint: disable=consider-using-with
+        [f"/omd/sites/{site.name}/bin/cmk-update-license-usage"],
+        start_new_session=True,
+    )
 
-    if (len(args) == 0 or args[0] != "show") and \
-        not site.is_stopped() and global_opts.force:
+
+def main_config(  # pylint: disable=too-many-branches
+    version_info: VersionInfo,
+    site: SiteContext,
+    global_opts: GlobalOptions,
+    args: Arguments,
+    options: CommandOptions,
+) -> None:
+    if (not args or args[0] != "show") and not site.is_stopped() and global_opts.force:
         need_start = True
         stop_site(site)
     else:
         need_start = False
 
     config_hooks = load_config_hooks(site)
+    set_hooks: list[str] = []
     if len(args) == 0:
-        config_configure(site, global_opts, config_hooks)
+        set_hooks = list(config_configure(site, global_opts, config_hooks))
     else:
         command = args[0]
         args = args[1:]
         if command == "show":
             config_show(site, config_hooks, args)
         elif command == "set":
-            config_set(site, config_hooks, args)
+            set_hooks = config_set(site, config_hooks, args)
         elif command == "change":
-            config_change(version_info, site, config_hooks)
+            set_hooks = config_change(version_info, site, config_hooks)
         else:
             config_usage()
+
+    if set(set_hooks).intersection({"APACHE_TCP_ADDR", "APACHE_TCP_PORT", "APACHE_MODE"}):
+        sys.stdout.write(
+            f"WARNING: You have to execute 'omd update-apache-config {site.name}' as "
+            "root to update and apply the configuration of the system apache.\n"
+        )
 
     if need_start:
         start_site(version_info, site)
 
 
-def main_su(version_info: VersionInfo, site: SiteContext, global_opts: 'GlobalOptions',
-            args: Arguments, options: CommandOptions) -> None:
+def main_su(
+    version_info: VersionInfo,
+    site: SiteContext,
+    global_opts: GlobalOptions,
+    args: Arguments,
+    options: CommandOptions,
+) -> None:
     try:
         os.execl("/bin/su", "su", "-", "%s" % site.name)
     except OSError:
         bail_out("Cannot open a shell for user %s" % site.name)
 
 
-def main_backup(version_info: VersionInfo, site: SiteContext, global_opts: 'GlobalOptions',
-                args: Arguments, options: CommandOptions) -> None:
-    if len(args) == 0:
-        bail_out("You need to provide either a path to the destination "
-                 "file or \"-\" for backup to stdout.")
-
-    dest = args[0]
-
-    if dest == '-':
-        fh = sys.stdout.buffer
-        tar_mode = 'w|'
-    else:
-        if dest[0] != '/':
-            dest = global_opts.orig_working_directory + '/' + dest
-        fh = open(dest, 'wb')
-        tar_mode = 'w:'
-
+def _try_backup_site_to_tarfile(
+    fh: io.BufferedWriter | BinaryIO,
+    tar_mode: str,
+    options: CommandOptions,
+    site: SiteContext,
+    global_opts: GlobalOptions,
+) -> None:
     if "no-compression" not in options:
         tar_mode += "gz"
 
     try:
         omdlib.backup.backup_site_to_tarfile(site, fh, tar_mode, options, global_opts.verbose)
-    except IOError as e:
+    except OSError as e:
         bail_out("Failed to perform backup: %s" % e)
 
 
-def main_restore(version_info: VersionInfo, site: SiteContext, global_opts: 'GlobalOptions',
-                 args: Arguments, options: CommandOptions) -> None:
-    conflict_mode = _get_conflict_mode(options)
-
+def main_backup(
+    version_info: VersionInfo,
+    site: SiteContext,
+    global_opts: GlobalOptions,
+    args: Arguments,
+    options: CommandOptions,
+) -> None:
     if len(args) == 0:
-        bail_out("You need to provide either a path to the source "
-                 "file or \"-\" for restore from stdin.")
+        bail_out(
+            "You need to provide either a path to the destination "
+            'file or "-" for backup to stdout.'
+        )
 
-    source = args[-1]
-    if source == '-':
-        fh = sys.stdin.buffer
-        tar_mode = 'r|*'
-    elif os.path.exists(source):
-        fh = open(source, "rb")
-        tar_mode = 'r:*'
+    dest = args[0]
+
+    if dest == "-":
+        _try_backup_site_to_tarfile(sys.stdout.buffer, "w|", options, site, global_opts)
     else:
-        bail_out("The backup archive does not exist.")
+        if not (dest_path := Path(dest)).is_absolute():
+            dest_path = global_opts.orig_working_directory / dest_path
+        with dest_path.open(mode="wb") as fh:
+            _try_backup_site_to_tarfile(fh, "w:", options, site, global_opts)
 
-    try:
-        tar = tarfile.open(fileobj=fh, mode=tar_mode)
-    except tarfile.ReadError as e:
-        bail_out("Failed to open the backup: %s" % e)
 
+def _restore_backup_from_tar(  # pylint: disable=too-many-branches
+    *,
+    tar: tarfile.TarFile,
+    site: SiteContext,
+    options: CommandOptions,
+    global_opts: GlobalOptions,
+    version_info: VersionInfo,
+    source_descr: str,
+    new_site_name: str | None,
+) -> SiteContext:
     try:
         sitename, version = omdlib.backup.get_site_and_version_from_backup(tar)
     except Exception as e:
         bail_out("%s" % e)
 
     if not version_exists(version):
-        bail_out("You need to have version %s installed to be able to restore "
-                 "this backup." % version)
+        bail_out(
+            "You need to have version %s installed to be able to restore " "this backup." % version
+        )
 
     if is_root():
         # Ensure the restore is done with the sites version
@@ -2790,26 +3450,23 @@ def main_restore(version_info: VersionInfo, site: SiteContext, global_opts: 'Glo
             exec_other_omd(site, version, "restore")
 
         # Restore site with its original name, or specify a new one
-        new_sitename = sitename
-        if len(args) == 2:
-            new_sitename = args[0]
+        new_sitename = new_site_name or sitename
     else:
         new_sitename = site_name()
 
     site = SiteContext(new_sitename)
 
-    source_txt = 'stdin' if source == '-' else source
     if is_root():
-        sys.stdout.write("Restoring site %s from %s...\n" % (site.name, source_txt))
+        sys.stdout.write(f"Restoring site {site.name} from {source_descr}...\n")
         sys.stdout.flush()
 
         prepare_restore_as_root(version_info, site, options)
 
     else:
-        sys.stdout.write("Restoring site from %s...\n" % source_txt)
+        sys.stdout.write("Restoring site from %s...\n" % source_descr)
         sys.stdout.flush()
 
-        site.load_config()
+        site.load_config(load_defaults(site))
         orig_apache_port = site.conf["APACHE_TCP_PORT"]
 
         prepare_restore_as_site_user(site, global_opts, options)
@@ -2821,25 +3478,25 @@ def main_restore(version_info: VersionInfo, site: SiteContext, global_opts: 'Glo
         # targets.
 
         # Remove leading site name from paths
-        tarinfo.name = '/'.join(tarinfo.name.split('/')[1:])
+        tarinfo.name = "/".join(tarinfo.name.split("/")[1:])
         if global_opts.verbose:
             sys.stdout.write("Restoring %s...\n" % tarinfo.name)
 
         if tarinfo.islnk():
-            parts = tarinfo.linkname.split('/')
+            parts = tarinfo.linkname.split("/")
 
             if parts[0] == sitename:
-                new_linkname = '/'.join(parts[1:])
+                new_linkname = "/".join(parts[1:])
 
                 if global_opts.verbose:
-                    sys.stdout.write("  Rewriting link target from %s to %s\n" %
-                                     (tarinfo.linkname, new_linkname))
+                    sys.stdout.write(
+                        f"  Rewriting link target from {tarinfo.linkname} to {new_linkname}\n"
+                    )
                 tarinfo.linkname = new_linkname
 
         tar.extract(tarinfo, path=site.dir)
-    tar.close()
 
-    site.load_config()
+    site.load_config(load_defaults(site))
 
     # give new user all files
     chown_tree(site.dir, site.name)
@@ -2847,20 +3504,73 @@ def main_restore(version_info: VersionInfo, site: SiteContext, global_opts: 'Glo
     # Change config files from old to new site (see rename_site())
     if sitename != site.name:
         old_site = SiteContext(sitename)
-        patch_skeleton_files(conflict_mode, old_site, site)
+        patch_skeleton_files(_get_conflict_mode(options), old_site, site)
 
     # Now switch over to the new site as currently active site
     os.chdir(site.dir)
     set_environment(site)
+
+    # Needed by the post-rename-site script
+    putenv("OLD_OMD_SITE", sitename)
 
     if is_root():
         postprocess_restore_as_root(version_info, site, options)
     else:
         postprocess_restore_as_site_user(version_info, site, options, orig_apache_port)
 
+    return site
 
-def prepare_restore_as_root(version_info: VersionInfo, site: SiteContext,
-                            options: CommandOptions) -> None:
+
+def main_restore(
+    version_info: VersionInfo,
+    site: SiteContext,
+    global_opts: GlobalOptions,
+    args: Arguments,
+    options: CommandOptions,
+) -> None:
+    if len(args) == 0:
+        bail_out(
+            'You need to provide either a path to the source file or "-" for restore from stdin.'
+        )
+
+    source = args[-1]
+    source_descr = "stdin" if source == "-" else source
+    new_site_name = args[0] if len(args) == 2 else None
+
+    name = None
+    fileobj = None
+
+    if source == "-":
+        fileobj = sys.stdin.buffer
+        mode = "r|*"
+    elif (source_path := Path(source)).exists():
+        name = source_path
+        mode = "r:*"
+    else:
+        bail_out("The backup archive does not exist.")
+
+    try:
+        with tarfile.open(
+            name=name,
+            fileobj=fileobj,
+            mode=mode,
+        ) as tar:
+            site = _restore_backup_from_tar(
+                tar=tar,
+                site=site,
+                options=options,
+                global_opts=global_opts,
+                version_info=version_info,
+                source_descr=source_descr,
+                new_site_name=new_site_name,
+            )
+    except tarfile.ReadError as e:
+        bail_out("Failed to open the backup: %s" % e)
+
+
+def prepare_restore_as_root(
+    version_info: VersionInfo, site: SiteContext, options: CommandOptions
+) -> None:
     reuse = False
     if "reuse" in options:
         reuse = True
@@ -2874,7 +3584,8 @@ def prepare_restore_as_root(version_info: VersionInfo, site: SiteContext,
         if not site.is_stopped() and "kill" not in options:
             bail_out("Cannot restore '%s' while it is running." % (site.name))
         else:
-            os.system('omd stop %s' % site.name)  # nosec
+            with subprocess.Popen(["omd", "stop", site.name]):
+                pass
         unmount_tmpfs(site, kill="kill" in options)
 
     if not reuse:
@@ -2889,8 +3600,9 @@ def prepare_restore_as_root(version_info: VersionInfo, site: SiteContext,
     os.mkdir(site.dir)
 
 
-def prepare_restore_as_site_user(site: SiteContext, global_opts: 'GlobalOptions',
-                                 options: CommandOptions) -> None:
+def prepare_restore_as_site_user(
+    site: SiteContext, global_opts: GlobalOptions, options: CommandOptions
+) -> None:
     if not site.is_stopped() and "kill" not in options:
         bail_out("Cannot restore site while it is running.")
 
@@ -2927,13 +3639,15 @@ def verify_directory_write_access(site: SiteContext) -> None:
                 wrong.append(path)
 
     if wrong:
-        bail_out("Unable to start restore because of a permission issue.\n\n"
-                 "The restore needs to be able to clean the whole site to be able to restore "
-                 "the backup. Missing write access on the following paths:\n\n"
-                 "    %s" % "\n    ".join(wrong))
+        bail_out(
+            "Unable to start restore because of a permission issue.\n\n"
+            "The restore needs to be able to clean the whole site to be able to restore "
+            "the backup. Missing write access on the following paths:\n\n"
+            "    %s" % "\n    ".join(wrong)
+        )
 
 
-def terminate_site_user_processes(site: SiteContext, global_opts: 'GlobalOptions') -> None:
+def terminate_site_user_processes(site: SiteContext, global_opts: GlobalOptions) -> None:
     """Sends a SIGTERM to all running site processes and waits up to 5 seconds for termination
 
     In case one or more processes are still running after the timeout, the method will make
@@ -2972,9 +3686,9 @@ def terminate_site_user_processes(site: SiteContext, global_opts: 'GlobalOptions
         ok()
 
 
-def kill_site_user_processes(site: SiteContext,
-                             global_opts: 'GlobalOptions',
-                             exclude_current_and_parents: bool = False) -> None:
+def kill_site_user_processes(
+    site: SiteContext, global_opts: GlobalOptions, exclude_current_and_parents: bool = False
+) -> None:
     pids = site_user_processes(site, exclude_current_and_parents)
     tries = 5
     while tries > 0 and pids:
@@ -2994,7 +3708,7 @@ def kill_site_user_processes(site: SiteContext,
         bail_out("Failed to kill site processes: %s" % ", ".join(map(str, pids)))
 
 
-def get_current_and_parent_pids() -> List[int]:
+def get_current_and_parent_pids() -> list[int]:
     """Return list of PIDs of the current process and parent process tree till pid 0"""
     pids = []
     process = psutil.Process()
@@ -3004,79 +3718,118 @@ def get_current_and_parent_pids() -> List[int]:
     return pids
 
 
-def site_user_processes(site: SiteContext, exclude_current_and_parents: bool) -> List[int]:
+def site_user_processes(site: SiteContext, exclude_current_and_parents: bool) -> list[int]:
     """Return list of PIDs of all running site user processes (that are not excluded)"""
-    exclude: List[int] = []
+    exclude: list[int] = []
     if exclude_current_and_parents:
         exclude = get_current_and_parent_pids()
-
-    p = subprocess.Popen(["ps", "-U", site.name, "-o", "pid", "--no-headers"],
-                         close_fds=True,
-                         stdin=open(os.devnull),
-                         stdout=subprocess.PIPE,
-                         encoding="utf-8")
-    exclude.append(p.pid)
-
-    pids = []
-    for l in p.communicate()[0].split("\n"):
-        line = l.strip()
-        if not line:
-            continue
-
-        pid = int(line)
-
-        if pid in exclude:
-            continue
-
-        pids.append(pid)
+    with subprocess.Popen(
+        ["ps", "-U", site.name, "-o", "pid", "--no-headers"],
+        close_fds=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        encoding="utf-8",
+    ) as user_process:
+        exclude.append(user_process.pid)
+        pids = []
+        for l in user_process.communicate()[0].split("\n"):
+            line = l.strip()
+            if not line:
+                continue
+            pid = int(line)
+            if pid in exclude:
+                continue
+            pids.append(pid)
     return pids
 
 
-def postprocess_restore_as_root(version_info: VersionInfo, site: SiteContext,
-                                options: CommandOptions) -> None:
+def postprocess_restore_as_root(
+    version_info: VersionInfo, site: SiteContext, options: CommandOptions
+) -> None:
     # Entry for tmps in /etc/fstab
-    if "reuse" not in options:
-        add_to_fstab(site, tmpfs_size=options.get('tmpfs-size'))
+    if "reuse" in options:
+        command_type = CommandType.restore_existing_site
+    else:
+        command_type = CommandType.restore_as_new_site
+        add_to_fstab(site, tmpfs_size=options.get("tmpfs-size"))
 
-    finalize_site(version_info, site, "restore", "apache-reload" in options)
+    finalize_site(version_info, site, command_type, "apache-reload" in options)
 
 
-def postprocess_restore_as_site_user(version_info: VersionInfo, site: SiteContext,
-                                     options: CommandOptions, orig_apache_port: str) -> None:
+def postprocess_restore_as_site_user(
+    version_info: VersionInfo, site: SiteContext, options: CommandOptions, orig_apache_port: str
+) -> None:
     # Keep the apache port the site currently being replaced had before
     # (we can not restart the system apache as site user)
     site.conf["APACHE_TCP_PORT"] = orig_apache_port
     save_site_conf(site)
 
-    finalize_site_as_user(version_info, site, "restore")
+    finalize_site_as_user(
+        version_info,
+        site,
+        (
+            CommandType.restore_existing_site
+            if "reuse" in options
+            else CommandType.restore_as_new_site
+        ),
+    )
 
 
-def main_cleanup(version_info: VersionInfo, site: SiteContext, global_opts: 'GlobalOptions',
-                 args: Arguments, options: CommandOptions) -> None:
+def main_cleanup(
+    version_info: VersionInfo,
+    site: SiteContext,
+    global_opts: GlobalOptions,
+    args: Arguments,
+    options: CommandOptions,
+) -> None:
     package_manager = PackageManager.factory(version_info)
     if package_manager is None:
         bail_out("Command is not supported on this platform")
 
+    all_installed_packages = package_manager.get_all_installed_packages()
+
     for version in omd_versions():
-        site_ids = [s for s in all_sites() if SiteContext(s).version == version]
-        if site_ids:
-            sys.stdout.write("%s%-20s%s In use (by %s). Keeping this version.\n" %
-                             (tty.bold, version, tty.normal, ", ".join(site_ids)))
+        if version == default_version():
+            sys.stdout.write(
+                "%s%-20s%s Keeping this version, since it is the default.\n"
+                % (
+                    tty.bold,
+                    version,
+                    tty.normal,
+                ),
+            )
             continue
 
-        version_path = os.path.join("/omd/versions", version)
+        site_ids = [s for s in all_sites() if SiteContext(s).version == version]
+        if site_ids:
+            sys.stdout.write(
+                "%s%-20s%s In use (by %s). Keeping this version.\n"
+                % (tty.bold, version, tty.normal, ", ".join(site_ids))
+            )
+            continue
 
-        packages = package_manager.find_packages_of_path(version_path)
-        if len(packages) != 1:
-            sys.stdout.write("%s%-20s%s Could not determine package. Keeping this version.\n" %
-                             (tty.bold, version, tty.normal))
+        target_package_name = "{}-{}".format(
+            _get_edition(version),
+            _get_raw_version(version),
+        )
+
+        matching_installed_packages = [
+            package for package in all_installed_packages if target_package_name in package
+        ]
+
+        if len(matching_installed_packages) != 1:
+            sys.stdout.write(
+                "%s%-20s%s Could not determine package. Keeping this version.\n"
+                % (tty.bold, version, tty.normal)
+            )
             continue
 
         sys.stdout.write("%s%-20s%s Uninstalling\n" % (tty.bold, version, tty.normal))
-        package_manager.uninstall(packages[0])
+        package_manager.uninstall(matching_installed_packages[0])
 
         # In case there were modifications made to the version the uninstall may leave
         # some files behind. Remove the whole version directory
+        version_path: str = os.path.join("/omd/versions", version)
         if os.path.exists(version_path):
             shutil.rmtree(version_path)
 
@@ -3091,32 +3844,28 @@ def _cleanup_global_files(version_info: VersionInfo) -> None:
     shutil.rmtree(version_info.OMD_PHYSICAL_BASE, ignore_errors=True)
 
     for path in [
-            "/omd",
-            version_info.APACHE_CONF_DIR + "/zzz_omd.conf",
-            "/etc/init.d/omd",
-            "/usr/bin/omd",
+        "/omd",
+        version_info.APACHE_CONF_DIR + "/zzz_omd.conf",
+        "/etc/init.d/omd",
+        "/usr/bin/omd",
     ]:
         try:
             os.unlink(path)
-        except OSError as e:
-            if e.errno == errno.ENOENT:
-                pass
-            else:
-                raise
+        except FileNotFoundError:
+            pass
 
     if group_exists("omd"):
         groupdel("omd")
 
 
-class PackageManager(metaclass=abc.ABCMeta):
+class PackageManager(abc.ABC):
     @classmethod
-    def factory(cls, version_info: VersionInfo) -> Optional['PackageManager']:
+    def factory(cls, version_info: VersionInfo) -> PackageManager | None:
         if os.path.exists("/etc/cma"):
             return None
 
         distro_code = version_info.DISTRO_CODE
-        if distro_code.startswith("el") \
-           or distro_code.startswith("sles"):
+        if distro_code.startswith("el") or distro_code.startswith("sles"):
             return PackageManagerRPM()
         return PackageManagerDEB()
 
@@ -3125,77 +3874,80 @@ class PackageManager(metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    def find_packages_of_path(self, path: str) -> List[str]:
+    def get_all_installed_packages(self) -> list[str]:
         raise NotImplementedError()
 
-    def _execute_uninstall(self, cmd: List[str]) -> None:
+    def _execute_uninstall(self, cmd: list[str]) -> None:
         p = self._execute(cmd)
         output = p.communicate()[0]
         if p.wait() != 0:
             bail_out("Failed to uninstall package:\n%s" % output)
 
-    def _execute(self, cmd: List[str]) -> subprocess.Popen:
+    def _execute(self, cmd: list[str]) -> subprocess.Popen:
         logger.log(VERBOSE, "Executing: %s", subprocess.list2cmdline(cmd))
 
-        return subprocess.Popen(cmd,
-                                shell=False,
-                                close_fds=True,
-                                stdin=open(os.devnull),
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT,
-                                encoding="utf-8")
+        return subprocess.Popen(
+            cmd,
+            shell=False,
+            close_fds=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            encoding="utf-8",
+        )
 
 
 class PackageManagerDEB(PackageManager):
     def uninstall(self, package_name: str) -> None:
         self._execute_uninstall(["apt-get", "-y", "purge", package_name])
 
-    def find_packages_of_path(self, path: str) -> List[str]:
-        real_path = os.path.realpath(path)
-
-        p = self._execute(["dpkg", "-S", real_path])
+    def get_all_installed_packages(self) -> list[str]:
+        p = self._execute(["dpkg", "-l"])
         output = p.communicate()[0]
         if p.wait() != 0:
-            bail_out("Failed to find packages:\n%s" % output)
+            bail_out("Failed to get all installed packages:\n%s" % output)
 
-        for line in output.split("\n"):
-            if line.endswith(": %s" % real_path):
-                return line.split(": ", 1)[0].split(", ")
+        packages: list[str] = []
+        for package in output.split("\n"):
+            if not package.startswith("ii"):
+                continue
 
-        return []
+            packages.append(package.split()[1])
+
+        return packages
 
 
 class PackageManagerRPM(PackageManager):
     def uninstall(self, package_name: str) -> None:
         self._execute_uninstall(["rpm", "-e", package_name])
 
-    def find_packages_of_path(self, path: str) -> List[str]:
-        real_path = os.path.realpath(path)
-
-        p = self._execute(["rpm", "-qf", real_path])
+    def get_all_installed_packages(self) -> list[str]:
+        p = self._execute(["rpm", "-qa"])
         output = p.communicate()[0]
-
-        if p.wait() == 1 and "not owned" in output:
-            return []
 
         if p.wait() != 0:
             bail_out("Failed to find packages:\n%s" % output)
 
-        return output.strip().split("\n")
+        packages: list[str] = []
+        for package in output.split("\n"):
+            packages.append(package)
+
+        return packages
 
 
-Option = NamedTuple("Option", [
-    ("long_opt", str),
-    ("short_opt", Optional[str]),
-    ("needs_arg", bool),
-    ("description", str),
-])
+class Option(NamedTuple):
+    long_opt: str
+    short_opt: str | None
+    needs_arg: bool
+    description: str
+
 
 exclude_options = [
     Option("no-rrds", None, False, "do not copy RRD files (performance data)"),
     Option("no-logs", None, False, "do not copy the monitoring history and log files"),
     Option("no-past", "N", False, "do not copy RRD files, the monitoring history and log files"),
 ]
+
 
 #  command       The id of the command
 #  only_root     This option is only available when omd command is run as root
@@ -3212,26 +3964,22 @@ exclude_options = [
 #  options_spec  List of individual arguments for this command
 #  description   Text for the help of omd
 #  confirm_text  Confirm text to show before calling the handler function
-Command = NamedTuple(
-    "Command",
-    [
-        ("command", str),
-        ("only_root", bool),
-        ("no_suid", bool),
-        ("needs_site", int),
-        # TODO: Refactor to bool
-        ("site_must_exist", int),
-        ("confirm", bool),
-        ("args_text", str),
-        ("handler", Callable),
-        ("options", List[Option]),
-        ("description", str),
-        ("confirm_text", str),
-    ])
+class Command(NamedTuple):
+    command: str
+    only_root: bool
+    no_suid: bool
+    needs_site: int
+    # TODO: Refactor to bool
+    site_must_exist: int
+    confirm: bool
+    args_text: str
+    handler: Callable
+    options: list[Option]
+    description: str
+    confirm_text: str
 
-commands: List[Command] = []
 
-commands.append(
+COMMANDS: Final = [
     Command(
         command="help",
         only_root=False,
@@ -3244,9 +3992,7 @@ commands.append(
         options=[],
         description="Show general help",
         confirm_text="",
-    ))
-
-commands.append(
+    ),
     Command(
         command="setversion",
         only_root=True,
@@ -3259,9 +4005,7 @@ commands.append(
         options=[],
         description="Sets the default version of OMD which will be used by new sites",
         confirm_text="",
-    ))
-
-commands.append(
+    ),
     Command(
         command="version",
         only_root=False,
@@ -3276,9 +4020,7 @@ commands.append(
         ],
         description="Show version of OMD",
         confirm_text="",
-    ))
-
-commands.append(
+    ),
     Command(
         command="versions",
         only_root=False,
@@ -3293,9 +4035,7 @@ commands.append(
         ],
         description="List installed OMD versions",
         confirm_text="",
-    ))
-
-commands.append(
+    ),
     Command(
         command="sites",
         only_root=False,
@@ -3310,9 +4050,7 @@ commands.append(
         ],
         description="Show list of sites",
         confirm_text="",
-    ))
-
-commands.append(
+    ),
     Command(
         command="create",
         only_root=True,
@@ -3327,15 +4065,22 @@ commands.append(
             Option("gid", "g", True, "create site group with GID ARG"),
             Option("admin-password", None, True, "set initial password instead of generating one"),
             Option("reuse", None, False, "do not create a site user, reuse existing one"),
-            Option("no-init", "n", False,
-                   "leave new site directory empty (a later omd init does this"),
+            Option(
+                "no-init", "n", False, "leave new site directory empty (a later omd init does this"
+            ),
             Option("no-autostart", "A", False, "set AUTOSTART to off (useful for test sites)"),
-            Option("apache-reload", None, False,
-                   "Issue a reload of the system apache instead of a restart"),
+            Option(
+                "apache-reload",
+                None,
+                False,
+                "Issue a reload of the system apache instead of a restart",
+            ),
             Option("no-tmpfs", None, False, "set TMPFS to off"),
             Option(
-                "tmpfs-size", "t", True,
-                "specify the maximum size of the tmpfs (defaults to 50% of RAM), examples: 500M, 20G, 60%"
+                "tmpfs-size",
+                "t",
+                True,
+                "specify the maximum size of the tmpfs (defaults to 50% of RAM), examples: 500M, 20G, 60%",
             ),
         ],
         description="Create a new site (-u UID, -g GID)",
@@ -3345,9 +4090,7 @@ commands.append(
         "- Create and populate the site home directory\n"
         "- Restart the system wide apache daemon\n"
         "- Add tmpfs for the site to fstab and mount it",
-    ))
-
-commands.append(
+    ),
     Command(
         command="init",
         only_root=True,
@@ -3358,43 +4101,48 @@ commands.append(
         args_text="",
         handler=main_init,
         options=[
-            Option("apache-reload", None, False,
-                   "Issue a reload of the system apache instead of a restart"),
+            Option(
+                "apache-reload",
+                None,
+                False,
+                "Issue a reload of the system apache instead of a restart",
+            ),
         ],
         description="Populate site directory with default files and enable the site",
         confirm_text="",
-    ))
-
-commands.append(
-    Command(command="rm",
-            only_root=True,
-            no_suid=True,
-            needs_site=1,
-            site_must_exist=1,
-            confirm=True,
-            args_text="",
-            handler=main_rm,
-            options=[
-                Option("reuse", None, False,
-                       "assume --reuse on create, do not delete site user/group"),
-                Option("kill", None, False, "kill processes of the site before deleting it"),
-                Option("apache-reload", None, False,
-                       "Issue a reload of the system apache instead of a restart"),
-            ],
-            description="Remove a site (and its data)",
-            confirm_text="PLEASE NOTE: This action removes all configuration files\n"
-            "             and variable data of the site.\n"
-            "\n"
-            "In detail the following steps will be done:\n"
-            "- Stop all processes of the site\n"
-            "- Unmount tmpfs of the site\n"
-            "- Remove tmpfs of the site from fstab\n"
-            "- Remove the system user <SITENAME>\n"
-            "- Remove the system group <SITENAME>\n"
-            "- Remove the site home directory\n"
-            "- Restart the system wide apache daemon\n"))
-
-commands.append(
+    ),
+    Command(
+        command="rm",
+        only_root=True,
+        no_suid=True,
+        needs_site=1,
+        site_must_exist=1,
+        confirm=True,
+        args_text="",
+        handler=main_rm,
+        options=[
+            Option("reuse", None, False, "assume --reuse on create, do not delete site user/group"),
+            Option("kill", None, False, "kill processes of the site before deleting it"),
+            Option(
+                "apache-reload",
+                None,
+                False,
+                "Issue a reload of the system apache instead of a restart",
+            ),
+        ],
+        description="Remove a site (and its data)",
+        confirm_text="PLEASE NOTE: This action removes all configuration files\n"
+        "             and variable data of the site.\n"
+        "\n"
+        "In detail the following steps will be done:\n"
+        "- Stop all processes of the site\n"
+        "- Unmount tmpfs of the site\n"
+        "- Remove tmpfs of the site from fstab\n"
+        "- Remove the system user <SITENAME>\n"
+        "- Remove the system group <SITENAME>\n"
+        "- Remove the site home directory\n"
+        "- Restart the system wide apache daemon\n",
+    ),
     Command(
         command="disable",
         only_root=True,
@@ -3409,9 +4157,7 @@ commands.append(
         ],
         description="Disable a site (stop it, unmount tmpfs, remove Apache hook)",
         confirm_text="",
-    ))
-
-commands.append(
+    ),
     Command(
         command="enable",
         only_root=True,
@@ -3424,9 +4170,20 @@ commands.append(
         options=[],
         description="Enable a site (reenable a formerly disabled site)",
         confirm_text="",
-    ))
-
-commands.append(
+    ),
+    Command(
+        command="update-apache-config",
+        only_root=True,
+        no_suid=False,
+        needs_site=1,
+        site_must_exist=1,
+        confirm=False,
+        args_text="",
+        handler=main_update_apache_config,
+        options=[],
+        description="Update the system apache config of a site (and reload apache)",
+        confirm_text="",
+    ),
     Command(
         command="mv",
         only_root=True,
@@ -3436,25 +4193,34 @@ commands.append(
         confirm=False,
         args_text="NEWNAME",
         handler=lambda version_info, site, global_opts, args_text, opts: main_mv_or_cp(
-            version_info, site, global_opts, "mv", args_text, opts),
+            version_info, site, global_opts, CommandType.move, args_text, opts
+        ),
         options=[
             Option("uid", "u", True, "create site user with UID ARG"),
             Option("gid", "g", True, "create site group with GID ARG"),
             Option("reuse", None, False, "do not create a site user, reuse existing one"),
-            Option("conflict", None, True,
-                   "non-interactive conflict resolution. ARG is install, keepold, abort or ask"),
             Option(
-                "tmpfs-size", "t", True,
-                "specify the maximum size of the tmpfs (defaults to 50% of RAM), examples: 500M, 20G, 60%"
+                "conflict",
+                None,
+                True,
+                "non-interactive conflict resolution. ARG is install, keepold, abort or ask",
             ),
-            Option("apache-reload", None, False,
-                   "Issue a reload of the system apache instead of a restart"),
+            Option(
+                "tmpfs-size",
+                "t",
+                True,
+                "specify the maximum size of the tmpfs (defaults to 50% of RAM), examples: 500M, 20G, 60%",
+            ),
+            Option(
+                "apache-reload",
+                None,
+                False,
+                "Issue a reload of the system apache instead of a restart",
+            ),
         ],
         description="Rename a site",
         confirm_text="",
-    ))
-
-commands.append(
+    ),
     Command(
         command="cp",
         only_root=True,
@@ -3464,26 +4230,37 @@ commands.append(
         confirm=False,
         args_text="NEWNAME",
         handler=lambda version_info, site, global_opts, args_text, opts: main_mv_or_cp(
-            version_info, site, global_opts, "cp", args_text, opts),
+            version_info, site, global_opts, CommandType.copy, args_text, opts
+        ),
         options=[
             Option("uid", "u", True, "create site user with UID ARG"),
             Option("gid", "g", True, "create site group with GID ARG"),
             Option("reuse", None, False, "do not create a site user, reuse existing one"),
-        ] + exclude_options + [
-            Option("conflict", None, True,
-                   "non-interactive conflict resolution. ARG is install, keepold, abort or ask"),
+        ]
+        + exclude_options
+        + [
             Option(
-                "tmpfs-size", "t", True,
-                "specify the maximum size of the tmpfs (defaults to 50% of RAM), examples: 500M, 20G, 60%"
+                "conflict",
+                None,
+                True,
+                "non-interactive conflict resolution. ARG is install, keepold, abort or ask",
             ),
-            Option("apache-reload", None, False,
-                   "Issue a reload of the system apache instead of a restart"),
+            Option(
+                "tmpfs-size",
+                "t",
+                True,
+                "specify the maximum size of the tmpfs (defaults to 50% of RAM), examples: 500M, 20G, 60%",
+            ),
+            Option(
+                "apache-reload",
+                None,
+                False,
+                "Issue a reload of the system apache instead of a restart",
+            ),
         ],
         description="Make a copy of a site",
         confirm_text="",
-    ))
-
-commands.append(
+    ),
     Command(
         command="update",
         only_root=False,
@@ -3494,14 +4271,16 @@ commands.append(
         args_text="",
         handler=main_update,
         options=[
-            Option("conflict", None, True,
-                   "non-interactive conflict resolution. ARG is install, keepold, abort or ask")
+            Option(
+                "conflict",
+                None,
+                True,
+                "non-interactive conflict resolution. ARG is install, keepold, abort or ask",
+            )
         ],
         description="Update site to other version of OMD",
         confirm_text="",
-    ))
-
-commands.append(
+    ),
     Command(
         command="start",
         only_root=False,
@@ -3511,16 +4290,15 @@ commands.append(
         confirm=False,
         args_text="[SERVICE]",
         handler=lambda version_info, site, global_opts, args_text, opts: main_init_action(
-            version_info, site, global_opts, "start", args_text, opts),
+            version_info, site, global_opts, "start", args_text, opts
+        ),
         options=[
             Option("version", "V", True, "only start services having version ARG"),
             Option("parallel", "p", False, "Invoke start of sites in parallel"),
         ],
         description="Start services of one or all sites",
         confirm_text="",
-    ))
-
-commands.append(
+    ),
     Command(
         command="stop",
         only_root=False,
@@ -3530,16 +4308,15 @@ commands.append(
         confirm=False,
         args_text="[SERVICE]",
         handler=lambda version_info, site, global_opts, args_text, opts: main_init_action(
-            version_info, site, global_opts, "stop", args_text, opts),
+            version_info, site, global_opts, "stop", args_text, opts
+        ),
         options=[
             Option("version", "V", True, "only stop sites having version ARG"),
             Option("parallel", "p", False, "Invoke stop of sites in parallel"),
         ],
         description="Stop services of site(s)",
         confirm_text="",
-    ))
-
-commands.append(
+    ),
     Command(
         command="restart",
         only_root=False,
@@ -3549,15 +4326,14 @@ commands.append(
         confirm=False,
         args_text="[SERVICE]",
         handler=lambda version_info, site, global_opts, args_text, opts: main_init_action(
-            version_info, site, global_opts, "restart", args_text, opts),
+            version_info, site, global_opts, "restart", args_text, opts
+        ),
         options=[
             Option("version", "V", True, "only restart sites having version ARG"),
         ],
         description="Restart services of site(s)",
         confirm_text="",
-    ))
-
-commands.append(
+    ),
     Command(
         command="reload",
         only_root=False,
@@ -3567,15 +4343,14 @@ commands.append(
         confirm=False,
         args_text="[SERVICE]",
         handler=lambda version_info, site, global_opts, args_text, opts: main_init_action(
-            version_info, site, global_opts, "reload", args_text, opts),
+            version_info, site, global_opts, "reload", args_text, opts
+        ),
         options=[
             Option("version", "V", True, "only reload sites having version ARG"),
         ],
         description="Reload services of site(s)",
         confirm_text="",
-    ))
-
-commands.append(
+    ),
     Command(
         command="status",
         only_root=False,
@@ -3585,7 +4360,8 @@ commands.append(
         confirm=False,
         args_text="[SERVICE]",
         handler=lambda version_info, site, global_opts, args_text, opts: main_init_action(
-            version_info, site, global_opts, "status", args_text, opts),
+            version_info, site, global_opts, "status", args_text, opts
+        ),
         options=[
             Option("version", "V", True, "show only sites having version ARG"),
             Option("auto", None, False, "show only sites with AUTOSTART = on"),
@@ -3593,9 +4369,7 @@ commands.append(
         ],
         description="Show status of services of site(s)",
         confirm_text="",
-    ))
-
-commands.append(
+    ),
     Command(
         command="config",
         only_root=False,
@@ -3612,9 +4386,7 @@ Usage:\n\
  omd config [site] show\t\t\tshow configuration settings\n\
  omd config [site] set VAR VAL\t\tset specific setting VAR to VAL",
         confirm_text="",
-    ))
-
-commands.append(
+    ),
     Command(
         command="diff",
         only_root=False,
@@ -3629,9 +4401,7 @@ commands.append(
         ],
         description="Shows differences compared to the original version files",
         confirm_text="",
-    ))
-
-commands.append(
+    ),
     Command(
         command="su",
         only_root=True,
@@ -3644,9 +4414,7 @@ commands.append(
         options=[],
         description="Run a shell as a site-user",
         confirm_text="",
-    ))
-
-commands.append(
+    ),
     Command(
         command="umount",
         only_root=False,
@@ -3662,9 +4430,7 @@ commands.append(
         ],
         description="Umount ramdisk volumes of site(s)",
         confirm_text="",
-    ))
-
-commands.append(
+    ),
     Command(
         command="backup",
         only_root=False,
@@ -3674,14 +4440,13 @@ commands.append(
         confirm=False,
         args_text="[SITE] [-|ARCHIVE_PATH]",
         handler=main_backup,
-        options=exclude_options + [
+        options=exclude_options
+        + [
             Option("no-compression", None, False, "do not compress tar archive"),
         ],
         description="Create a backup tarball of a site, writing it to a file or stdout",
         confirm_text="",
-    ))
-
-commands.append(
+    ),
     Command(
         command="restore",
         only_root=False,
@@ -3695,20 +4460,34 @@ commands.append(
             Option("uid", "u", True, "create site user with UID ARG"),
             Option("gid", "g", True, "create site group with GID ARG"),
             Option("reuse", None, False, "do not create a site user, reuse existing one"),
-            Option("kill", None, False,
-                   "kill processes of site when reusing an existing one before restoring"),
-            Option("apache-reload", None, False,
-                   "Issue a reload of the system apache instead of a restart"),
-            Option("conflict", None, True,
-                   "non-interactive conflict resolution. ARG is install, keepold, abort or ask"),
-            Option("tmpfs-size", "t", True,
-                   "specify the maximum size of the tmpfs (defaults to 50% of RAM)"),
+            Option(
+                "kill",
+                None,
+                False,
+                "kill processes of site when reusing an existing one before restoring",
+            ),
+            Option(
+                "apache-reload",
+                None,
+                False,
+                "Issue a reload of the system apache instead of a restart",
+            ),
+            Option(
+                "conflict",
+                None,
+                True,
+                "non-interactive conflict resolution. ARG is install, keepold, abort or ask",
+            ),
+            Option(
+                "tmpfs-size",
+                "t",
+                True,
+                "specify the maximum size of the tmpfs (defaults to 50% of RAM)",
+            ),
         ],
         description="Restores the backup of a site to an existing site or creates a new site",
         confirm_text="",
-    ))
-
-commands.append(
+    ),
     Command(
         command="cleanup",
         only_root=True,
@@ -3721,23 +4500,25 @@ commands.append(
         options=[],
         description="Uninstall all Check_MK versions that are not used by any site.",
         confirm_text="",
-    ))
-
-GlobalOptions = NamedTuple("GlobalOptions", [
-    ("verbose", bool),
-    ("force", bool),
-    ("interactive", bool),
-    ("orig_working_directory", str),
-])
+    ),
+]
 
 
-def handle_global_option(global_opts: GlobalOptions, main_args: Arguments, opt: str,
-                         orig: str) -> Tuple[GlobalOptions, Arguments]:
+class GlobalOptions(NamedTuple):
+    verbose: bool
+    force: bool
+    interactive: bool
+    orig_working_directory: str
+
+
+def handle_global_option(
+    global_opts: GlobalOptions, main_args: Arguments, opt: str, orig: str
+) -> tuple[GlobalOptions, Arguments]:
     verbose = global_opts.verbose
     force = global_opts.force
     interactive = global_opts.interactive
 
-    if opt in ['V', 'version']:
+    if opt in ["V", "version"]:
         # Switch to other version of bin/omd
         version, main_args = _opt_arg(main_args, opt)
         if version != omdlib.__version__:
@@ -3746,26 +4527,28 @@ def handle_global_option(global_opts: GlobalOptions, main_args: Arguments, opt: 
                 bail_out("OMD version '%s' is not installed." % version)
             os.execv(omd_path, sys.argv)
             bail_out("Cannot execute %s." % omd_path)
-    elif opt in ['f', 'force']:
+    elif opt in ["f", "force"]:
         force = True
         interactive = False
-    elif opt in ['i', 'interactive']:
+    elif opt in ["i", "interactive"]:
         force = False
         interactive = True
-    elif opt in ['v', 'verbose']:
+    elif opt in ["v", "verbose"]:
         verbose = True
     else:
         bail_out("Invalid global option %s.\n" "Call omd help for available options." % orig)
 
-    new_global_opts = GlobalOptions(verbose=verbose,
-                                    force=force,
-                                    interactive=interactive,
-                                    orig_working_directory=global_opts.orig_working_directory)
+    new_global_opts = GlobalOptions(
+        verbose=verbose,
+        force=force,
+        interactive=interactive,
+        orig_working_directory=global_opts.orig_working_directory,
+    )
 
     return new_global_opts, main_args
 
 
-def _opt_arg(main_args: Arguments, opt: str) -> Tuple[str, Arguments]:
+def _opt_arg(main_args: Arguments, opt: str) -> tuple[str, Arguments]:
     if len(main_args) < 1:
         bail_out("Option %s needs an argument." % opt)
     arg = main_args[0]
@@ -3773,30 +4556,34 @@ def _opt_arg(main_args: Arguments, opt: str) -> Tuple[str, Arguments]:
     return arg, main_args
 
 
-def _parse_command_options(args: Arguments,
-                           options: List[Option]) -> Tuple[Arguments, CommandOptions]:
-
+def _parse_command_options(  # pylint: disable=too-many-branches
+    args: Arguments, options: list[Option]
+) -> tuple[Arguments, CommandOptions]:
     # Give a short overview over the command specific options
     # when the user specifies --help:
-    if len(args) and args[0] in ['-h', '--help']:
+    if len(args) and args[0] in ["-h", "--help"]:
         if options:
             sys.stdout.write("Possible options for this command:\n")
         else:
             sys.stdout.write("No options for this command\n")
         for option in options:
-            args_text = "%s--%s" % ("-%s," % option.short_opt if option.short_opt else "",
-                                    option.long_opt)
-            sys.stdout.write(" %-15s %3s  %s\n" %
-                             (args_text, option.needs_arg and "ARG" or "", option.description))
+            args_text = "{}--{}".format(
+                "-%s," % option.short_opt if option.short_opt else "",
+                option.long_opt,
+            )
+            sys.stdout.write(
+                " %-15s %3s  %s\n"
+                % (args_text, option.needs_arg and "ARG" or "", option.description)
+            )
         sys.exit(0)
 
     set_options: CommandOptions = {}
 
-    while len(args) >= 1 and args[0][0] == '-' and len(args[0]) > 1:
+    while len(args) >= 1 and args[0][0] == "-" and len(args[0]) > 1:
         opt = args[0]
         args = args[1:]
 
-        found_options: List[Option] = []
+        found_options: list[Option] = []
         if opt.startswith("--"):
             # Handle --foo=bar
             if "=" in opt:
@@ -3851,19 +4638,30 @@ def exec_other_omd(site: SiteContext, version: str, command: str) -> NoReturn:
         os.execv(omd_path, sys.argv)
         bail_out("Cannot run bin/omd of version %s." % version)
     else:
-        bail_out("Site %s uses version %s which is not installed.\n"
-                 "Please reinstall that version and retry this command." % (site.name, version))
+        bail_out(
+            "Site %s uses version %s which is not installed.\n"
+            "Please reinstall that version and retry this command." % (site.name, version)
+        )
 
 
-def random_password() -> str:
-    return ''.join(random.choice(string.ascii_letters + string.digits) for i in range(8))
+def ensure_mkbackup_lock_dir_rights() -> None:
+    try:
+        mkbackup_lock_dir.mkdir(mode=0o0770, exist_ok=True)
+        shutil.chown(mkbackup_lock_dir, group="omd")
+        mkbackup_lock_dir.chmod(0o0770)
+    except PermissionError:
+        logger.log(
+            VERBOSE,
+            "Unable to create %s needed for mkbackup. "
+            "This may be due to the fact that your SITE "
+            "User isn't allowed to create the backup directory. "
+            "You could resolve this issue by running 'sudo omd start' as root "
+            "(and not as SITE user).",
+            mkbackup_lock_dir,
+        )
 
 
-def hash_password(password: str) -> str:
-    return sha256_crypt.hash(password)
-
-
-#.
+# .
 #   .--Main----------------------------------------------------------------.
 #   |                        __  __       _                                |
 #   |                       |  \/  | __ _(_)_ __                           |
@@ -3882,7 +4680,9 @@ def hash_password(password: str) -> str:
 # the options before the command here only
 # TODO: Refactor these global variables
 # TODO: Refactor to argparse. Be aware of the pitfalls of the OMD command line scheme
-def main() -> None:
+def main() -> None:  # pylint: disable=too-many-branches
+    ensure_mkbackup_lock_dir_rights()
+
     main_args = sys.argv[1:]
     site: AbstractSiteContext = RootContext()
 
@@ -3917,7 +4717,7 @@ def main() -> None:
     # if a site name has been specified or not
 
     # Give a short description for the command when the user specifies --help:
-    if len(args) and args[0] in ['-h', '--help']:
+    if args and args[0] in ["-h", "--help"]:
         sys.stdout.write("%s\n\n" % command.description)
     args, command_options = _parse_command_options(args, command.options)
 
@@ -3946,17 +4746,22 @@ def main() -> None:
         v = site.version
         if v is None:  # Site has no home directory or version link
             if command.command == "rm":
-                sys.stdout.write("WARNING: This site has an empty home directory and is not\n"
-                                 "assigned to any OMD version. You are running version %s.\n" %
-                                 omdlib.__version__)
+                sys.stdout.write(
+                    "WARNING: This site has an empty home directory and is not\n"
+                    "assigned to any OMD version. You are running version %s.\n"
+                    % omdlib.__version__
+                )
             elif command.command != "init":
-                bail_out("This site has an empty home directory /omd/sites/%s.\n"
-                         "If you have created that site with 'omd create --no-init %s'\n"
-                         "then please first do an 'omd init %s'." % (3 * (site.name,)))
+                bail_out(
+                    "This site has an empty home directory /omd/sites/%s.\n"
+                    "If you have created that site with 'omd create --no-init %s'\n"
+                    "then please first do an 'omd init %s'." % (3 * (site.name,))
+                )
         elif omdlib.__version__ != v:
             exec_other_omd(site, v, command.command)
 
-    site.load_config()
+    if isinstance(site, SiteContext):
+        site.load_config(load_defaults(site))
 
     # Commands which affect a site and can be called as root *or* as
     # site user should always run with site user privileges. That way
@@ -3990,15 +4795,21 @@ def main() -> None:
 
 
 def default_global_options() -> GlobalOptions:
-    return GlobalOptions(verbose=False,
-                         force=False,
-                         interactive=False,
-                         orig_working_directory=_get_orig_working_directory())
+    return GlobalOptions(
+        verbose=False,
+        force=False,
+        interactive=False,
+        orig_working_directory=_get_orig_working_directory(),
+    )
 
 
-def _get_command(version_info: VersionInfo, site: AbstractSiteContext, global_opts: GlobalOptions,
-                 command_arg: str) -> Command:
-    for command in commands:
+def _get_command(
+    version_info: VersionInfo,
+    site: AbstractSiteContext,
+    global_opts: GlobalOptions,
+    command_arg: str,
+) -> Command:
+    for command in COMMANDS:
         if command.command == command_arg:
             return command
 
@@ -4010,7 +4821,5 @@ def _get_command(version_info: VersionInfo, site: AbstractSiteContext, global_op
 def _get_orig_working_directory() -> str:
     try:
         return os.getcwd()
-    except OSError as e:
-        if e.errno == errno.ENOENT:
-            return "/"
-        raise
+    except FileNotFoundError:
+        return "/"

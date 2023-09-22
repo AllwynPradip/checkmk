@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+import getopt
 import re
 import sys
-import getopt
 import xml.etree.ElementTree as ET
 
 import requests
-import urllib3  # type: ignore[import]
+import urllib3
+
+from cmk.utils.password_store import replace_passwords
 
 
 def usage():
-    sys.stderr.write("""Check_MK StoreOnce
+    sys.stderr.write(
+        """Check_MK StoreOnce
 
 USAGE: agent_storeonce [OPTIONS] HOST
 
@@ -24,7 +26,8 @@ OPTIONS:
   --user                        Username
   --password                    Password
   --no-cert-check               Disable certificate check
-""")
+"""
+    )
     sys.exit(1)
 
 
@@ -4532,18 +4535,18 @@ stores_xml = """<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http:/
     </body>
 </html>"""
 
-#.
+# .
 
 
 def query(url, args_dict, opt_cert):
     if not opt_cert:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    response = requests.get(url,
-                            auth=(args_dict["username"], args_dict["password"]),
-                            verify=opt_cert)
+    response = requests.get(  # nosec B113
+        url, auth=(args_dict["username"], args_dict["password"]), verify=opt_cert
+    )
     raw_xml = response.text
     # Remove namespace nonsense
-    raw_xml = re.sub(' xmlns="[^"]+"', '', raw_xml, count=1)
+    raw_xml = re.sub(' xmlns="[^"]+"', "", raw_xml, count=1)
     xml_instance = ET.fromstring(raw_xml)
     return xml_instance
 
@@ -4555,13 +4558,13 @@ def process_cluster_info(args_dict, opt_demo, opt_cert):
     for child in tbody:
         name = child[0].text
         value = child[1].text
-        output_lines.append("%s\t%s" % (name, value))
+        output_lines.append(f"{name}\t{value}")
     return output_lines
 
 
 def query_cluster_info(args_dict, opt_demo, opt_cert):
     if opt_demo:
-        raw_xml = re.sub(' xmlns="[^"]+"', '', cluster_xml, count=1)
+        raw_xml = re.sub(' xmlns="[^"]+"', "", cluster_xml, count=1)
         return ET.fromstring(raw_xml)
     url = "https://%(address)s/storeonceservices/cluster/" % args_dict
     return query(url, args_dict, opt_cert)
@@ -4582,13 +4585,13 @@ def process_servicesets(args_dict, opt_demo, opt_cert):
         for child in tbody:
             name = child[0].text
             value = child[1].text
-            output_lines.append("%s\t%s" % (name, value))
+            output_lines.append(f"{name}\t{value}")
     return output_lines
 
 
 def query_servicesets(args_dict, opt_demo, opt_cert):
     if opt_demo:
-        raw_xml = re.sub(' xmlns="[^"]+"', '', servicesets_xml, count=1)
+        raw_xml = re.sub(' xmlns="[^"]+"', "", servicesets_xml, count=1)
         return ET.fromstring(raw_xml)
     url = "https://%(address)s/storeonceservices/cluster/servicesets/" % args_dict
     return query(url, args_dict, opt_cert)
@@ -4602,26 +4605,28 @@ def process_stores_info(args_dict, opt_demo, opt_cert):
         for element in stores:
             tbody = element.find("table").find("tbody")
             store_id = tbody[0][1].text
-            output_lines.append("[%s/%s]" % (serviceset_id, store_id))
-            serviceset_ids.add(serviceset_id)
+            output_lines.append(f"[{serviceset_id}/{store_id}]")
             for child in tbody:
                 name = child[0].text
                 value = child[1].text
-                output_lines.append("%s\t%s" % (name, value))
+                output_lines.append(f"{name}\t{value}")
     return output_lines
 
 
 def query_stores_info(serviceset_id, args_dict, opt_demo, opt_cert):
     if opt_demo:
-        raw_xml = re.sub(' xmlns="[^"]+"', '', stores_xml, count=1)
+        raw_xml = re.sub(' xmlns="[^"]+"', "", stores_xml, count=1)
         return ET.fromstring(raw_xml)
-    url = "https://%(address)s/storeonceservices/cluster/servicesets/" % args_dict + \
-            "%s/services/cat/stores/" % serviceset_id
+    url = (
+        "https://%(address)s/storeonceservices/cluster/servicesets/" % args_dict
+        + "%s/services/cat/stores/" % serviceset_id
+    )
     return query(url, args_dict, opt_cert)
 
 
 def main(sys_argv=None):
     if sys_argv is None:
+        replace_passwords()
         sys_argv = sys.argv[1:]
 
     short_options = "h"
@@ -4666,3 +4671,4 @@ def main(sys_argv=None):
     except Exception as e:
         sys.stderr.write("Connection error: %s" % e)
         return 1
+    return None

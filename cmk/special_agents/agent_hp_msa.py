@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import argparse
 import hashlib
-from html.parser import HTMLParser
 import logging
 import sys
-from typing import Dict
-from urllib.parse import urljoin
 import xml.etree.ElementTree as ET
+from html.parser import HTMLParser
+from urllib.parse import urljoin
 
 import requests
+import urllib3
 from requests.structures import CaseInsensitiveDict
-import urllib3  # type: ignore[import]
+
+from cmk.utils.password_store import replace_passwords
 
 LOGGER = logging.getLogger(__name__)
 
@@ -25,9 +25,9 @@ def parse_arguments(argv):
 
     # flags
     parser.add_argument("-v", "--verbose", action="count", help="""Increase verbosity""")
-    parser.add_argument("--debug",
-                        action="store_true",
-                        help="""Debug mode: let Python exceptions come through""")
+    parser.add_argument(
+        "--debug", action="store_true", help="""Debug mode: let Python exceptions come through"""
+    )
 
     parser.add_argument("hostaddress", help="HP MSA host name")
     parser.add_argument("-u", "--username", required=True, help="HP MSA user name")
@@ -50,12 +50,21 @@ def parse_arguments(argv):
 
 
 # The dict key is the section, the values the list of lines
-sections: Dict = {}
+sections: dict = {}
 
 # Which objects to get
 api_get_objects = [
-    "controllers", "controller-statistics", "disks", "disk-statistics", "frus", "port",
-    "host-port-statistics", "power-supplies", "system", "volumes", "volume-statistics"
+    "controllers",
+    "controller-statistics",
+    "disks",
+    "disk-statistics",
+    "frus",
+    "port",
+    "host-port-statistics",
+    "power-supplies",
+    "system",
+    "volumes",
+    "volume-statistics",
 ]
 
 # Where to put the properties from any response
@@ -120,7 +129,7 @@ class AuthError(RuntimeError):
 
 
 class HPMSAConnection:
-    def __init__(self, hostaddress, opt_timeout, debug):
+    def __init__(self, hostaddress, opt_timeout, debug) -> None:  # type: ignore[no-untyped-def]
         self._host = hostaddress
         self._base_url = "https://%s/api/" % self._host
         self._timeout = opt_timeout
@@ -144,7 +153,7 @@ class HPMSAConnection:
 
     def _get_session_key(self, hash_class, username, password):
         login_hash = hash_class()
-        login_hash.update(f"{username}_{password}".encode('utf-8'))
+        login_hash.update(f"{username}_{password}".encode())
         login_url = "login/%s" % login_hash.hexdigest()
         response = self.get(login_url)
         xml_tree = ET.fromstring(response.text)
@@ -155,8 +164,10 @@ class HPMSAConnection:
         if not isinstance(session_key, str):
             raise Exception("invalid response element")
         if session_key.lower() == "authentication unsuccessful":
-            raise AuthError("Connecting to %s failed. Please verify host address & login details" %
-                            self._base_url)
+            raise AuthError(
+                "Connecting to %s failed. Please verify host address & login details"
+                % self._base_url
+            )
         return session_key
 
     def get(self, url_suffix):
@@ -165,13 +176,15 @@ class HPMSAConnection:
         # we must provide the verify keyword to every individual request call!
         response = self._session.get(url, timeout=self._timeout, verify=self._verify_ssl)
         if response.status_code != 200:
-            LOGGER.warning("RESPONSE.status_code, reason: %r",
-                           (response.status_code, response.reason))
+            LOGGER.warning(
+                "RESPONSE.status_code, reason: %r", (response.status_code, response.reason)
+            )
         LOGGER.debug("RESPONSE.text\n%s", response.text)
         return response
 
 
 def main(argv=None):
+    replace_passwords()
     args = parse_arguments(argv or sys.argv[1:])
     opt_timeout = 10
 

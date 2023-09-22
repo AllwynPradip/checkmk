@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
 import time
-from typing import List, Mapping, NamedTuple, Optional, Tuple, Union
-
-from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult, InventoryResult
+from collections.abc import Mapping
+from typing import NamedTuple
 
 from .agent_based_api.v1 import (
     Attributes,
@@ -20,13 +18,17 @@ from .agent_based_api.v1 import (
     Service,
     State,
 )
-
+from .agent_based_api.v1.type_defs import CheckResult, DiscoveryResult, InventoryResult
 from .utils import memory
 
 
-class MemBytes(NamedTuple('MemBytes', [('bytes', int), ('kb', float), ('mb', float)])):
-    def __new__(cls, value: Union[float, int]):
-        return super(MemBytes, cls).__new__(cls, int(value * 1024), float(value), value / 1024.0)
+class MemBytes(
+    NamedTuple(  # pylint: disable=typing-namedtuple-call
+        "MemBytes", [("bytes", int), ("kb", float), ("mb", float)]
+    )
+):
+    def __new__(cls, value: float | int):  # type: ignore[no-untyped-def]
+        return super().__new__(cls, int(value * 1024), float(value), value / 1024.0)
 
     def render(self) -> str:
         return render.bytes(self.bytes)
@@ -39,11 +41,10 @@ def discover_mem_used(section: memory.SectionMemUsed) -> DiscoveryResult:
 
 def _get_total_usage(
     ramused: MemBytes,
-    swapused: Optional[MemBytes],
-    pagetables: Optional[MemBytes],
-) -> Tuple[MemBytes, str]:
-    """get total usage and a description how it was computed
-    """
+    swapused: MemBytes | None,
+    pagetables: MemBytes | None,
+) -> tuple[MemBytes, str]:
+    """get total usage and a description how it was computed"""
     totalused_kb = ramused.kb
     details = ["RAM"]
 
@@ -72,40 +73,43 @@ def check_mem_used(params: Mapping, section: memory.SectionMemUsed) -> CheckResu
     if isinstance(params, tuple):
         params = {"levels": params}
 
-    memtotal = MemBytes(meminfo['MemTotal'])
+    memtotal = MemBytes(meminfo["MemTotal"])
     if memtotal.bytes == 0:
         yield Result(
             state=State.UNKNOWN,
-            summary=("Reported total memory is 0 B, this may be "
-                     "caused by the lack of a memory cgroup in the kernel"),
+            summary=(
+                "Reported total memory is 0 B, this may be "
+                "caused by the lack of a memory cgroup in the kernel"
+            ),
         )
         return
 
-    memused = MemBytes(memtotal.kb - meminfo['MemFree'])
+    memused = MemBytes(memtotal.kb - meminfo["MemFree"])
 
-    swaptotal: Optional[MemBytes] = None
-    swapused: Optional[MemBytes] = None
-    metrics: List[Metric] = []
+    swaptotal: MemBytes | None = None
+    swapused: MemBytes | None = None
+    metrics: list[Metric] = []
     if "SwapFree" in meminfo:
-        swaptotal = MemBytes(meminfo['SwapTotal'])
-        swapused = MemBytes(swaptotal.kb - meminfo['SwapFree'])
-        metrics = [Metric('swap_used', swapused.bytes, boundaries=(0, swaptotal.bytes))]
+        swaptotal = MemBytes(meminfo["SwapTotal"])
+        swapused = MemBytes(swaptotal.kb - meminfo["SwapFree"])
+        metrics = [Metric("swap_used", swapused.bytes, boundaries=(0, swaptotal.bytes))]
 
     # Size of Pagetable on Linux can be relevant e.g. on ORACLE
     # servers with much memory, that do not use HugeTables. We account
     # that for used
-    pagetables: Optional[MemBytes] = None
-    if 'PageTables' in meminfo:
-        pagetables = MemBytes(meminfo['PageTables'])
-        metrics.append(Metric('mem_lnx_page_tables', pagetables.bytes))
+    pagetables: MemBytes | None = None
+    if "PageTables" in meminfo:
+        pagetables = MemBytes(meminfo["PageTables"])
+        metrics.append(Metric("mem_lnx_page_tables", pagetables.bytes))
 
     # Buffers and Cached are optional. On Linux both mean basically the same.
-    caches = MemBytes(meminfo.get('Buffers', 0) + meminfo.get('Cached', 0))
+    caches = MemBytes(meminfo.get("Buffers", 0) + meminfo.get("Cached", 0))
 
     ramused = MemBytes(memused.kb - caches.kb)
-    metrics.append(Metric('mem_used', ramused.bytes, boundaries=(0, memtotal.bytes)))
+    metrics.append(Metric("mem_used", ramused.bytes, boundaries=(0, memtotal.bytes)))
     metrics.append(
-        Metric('mem_used_percent', 100. * ramused.bytes / memtotal.bytes, boundaries=(0, 100.)))
+        Metric("mem_used_percent", 100.0 * ramused.bytes / memtotal.bytes, boundaries=(0, 100.0))
+    )
 
     totalused, totalused_descr = _get_total_usage(ramused, swapused, pagetables)
 
@@ -113,7 +117,6 @@ def check_mem_used(params: Mapping, section: memory.SectionMemUsed) -> CheckResu
         totalused_descr,
         totalused.bytes,
         memtotal.bytes,
-        ("ignore", (None, None)),
         label_total="RAM" if totalused_descr != "RAM" else "",
     )
     assert isinstance(result, Result)
@@ -131,7 +134,7 @@ def check_mem_used(params: Mapping, section: memory.SectionMemUsed) -> CheckResu
         )
         totalused_perc_avg = totalused_mb_avg / memtotal.mb * 100
         infotext += ", %d min average %.1f%%" % (average_min, totalused_perc_avg)
-        metrics.append(Metric('memusedavg', totalused_mb_avg))
+        metrics.append(Metric("memusedavg", totalused_mb_avg))
         comp_mb = totalused_mb_avg
     else:
         comp_mb = totalused.mb
@@ -151,16 +154,17 @@ def check_mem_used(params: Mapping, section: memory.SectionMemUsed) -> CheckResu
     assert warn_mb is not None and crit_mb is not None
     metrics.append(
         Metric(
-            'mem_lnx_total_used',
+            "mem_lnx_total_used",
             totalused.bytes,
             levels=(warn_mb * 1024**2, crit_mb * 1024**2),
             boundaries=(0, totalvirt.bytes),
-        ))
+        )
+    )
 
     # Check levels
     state = memory.compute_state(comp_mb, warn_mb, crit_mb)
     if state != State.OK and levels_text:
-        infotext = "%s (%s)" % (infotext, levels_text)
+        infotext = f"{infotext} ({levels_text})"
 
     yield Result(state=state, summary=infotext)
     yield from metrics
@@ -170,7 +174,6 @@ def check_mem_used(params: Mapping, section: memory.SectionMemUsed) -> CheckResu
             "RAM",
             ramused.bytes,  # <- caches subtracted
             memtotal.bytes,
-            ("ignore", (None, None)),
         )
         if swaptotal is not None and swaptotal.bytes:
             assert swapused is not None
@@ -178,20 +181,19 @@ def check_mem_used(params: Mapping, section: memory.SectionMemUsed) -> CheckResu
                 "Swap",
                 swapused.bytes,
                 swaptotal.bytes,
-                ("ignore", (None, None)),
             )
         if pagetables:
             yield Result(state=State.OK, summary="Pagetables: %s" % pagetables.render())
 
     # Add additional metrics, provided by Linux.
-    if meminfo.get('Mapped'):
+    if meminfo.get("Mapped"):
         for key, label, metric in (
-            ('Mapped', 'Mapped', 'mem_lnx_mapped'),
-            ('Committed_AS', 'Committed', 'mem_lnx_committed_as'),
-            ('Shmem', 'Shared', 'mem_lnx_shmem'),
+            ("Mapped", "Mapped", "mem_lnx_mapped"),
+            ("Committed_AS", "Committed", "mem_lnx_committed_as"),
+            ("Shmem", "Shared", "mem_lnx_shmem"),
         ):
             value = MemBytes(meminfo.get(key, 0))
-            yield Result(state=State.OK, summary="%s: %s" % (label, value.render()))
+            yield Result(state=State.OK, summary=f"{label}: {value.render()}")
             yield Metric(metric, value.bytes)
 
 
@@ -218,12 +220,16 @@ register.check_plugin(
 
 
 def inventory_mem_used(section: memory.SectionMemUsed) -> InventoryResult:
-    yield Attributes(
-        path=["hardware", "memory"],
-        inventory_attributes={
-            "total_ram_usable": section["MemTotal"],
-            "total_swap": section["SwapTotal"],
-        },
+    yield from (  #
+        Attributes(
+            path=["hardware", "memory"],
+            inventory_attributes={key: value},
+        )
+        for key, value in (
+            ("total_ram_usable", section.get("MemTotal")),
+            ("total_swap", section.get("SwapTotal")),
+        )
+        if value is not None  #
     )
 
 

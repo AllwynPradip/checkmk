@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
-from .agent_based_api.v1 import register, HostLabel
+
+from collections.abc import Mapping
+
+from .agent_based_api.v1 import Attributes, HostLabel, register
+from .agent_based_api.v1.type_defs import HostLabelGenerator, InventoryResult, StringTable
+
+Section = Mapping[str, str]
 
 
-def parse_esx_vsphere_systeminfo(string_table):
+def parse_esx_vsphere_systeminfo(string_table: StringTable) -> Section:
     """Load key/value pairs into dict
 
     Example:
@@ -31,25 +36,55 @@ def parse_esx_vsphere_systeminfo(string_table):
     return parsed
 
 
-def host_label_esx_vshpere_systeminfo(section):
+def host_label_esx_vshpere_systeminfo(section: Section) -> HostLabelGenerator:
     """Host label function
 
     Labels:
 
+        cmk/vsphere_vcenter:
+            This label is set to "yes" if the corresponding host is a VMware vCenter
+            otherwise the label is not created.
+
         cmk/vsphere_object:
-            This label is set to "vcenter" if the corresponding host is a
-            VMWare vCenter, and to "server" if the host is an ESXi hostsystem.
+            This label is set to "server" if the host is an ESXi hostsystem
+            and to "vm" if the host is a virtual machine.
 
     """
     name = section.get("name", "")
     if "vCenter" in name:
-        yield HostLabel(u"cmk/vsphere_object", u"vcenter")
-    elif "ESXi" in name:
-        yield HostLabel(u"cmk/vsphere_object", u"server")
+        yield HostLabel("cmk/vsphere_vcenter", "yes")
+    if "ESXi" in name:
+        yield HostLabel("cmk/vsphere_object", "server")
 
 
 register.agent_section(
     name="esx_systeminfo",
     parse_function=parse_esx_vsphere_systeminfo,
     host_label_function=host_label_esx_vshpere_systeminfo,
+)
+
+
+def inventory_esx_systeminfo(section: Section) -> InventoryResult:
+    yield Attributes(
+        path=["software", "os"],
+        inventory_attributes={
+            "arch": "x86_64",
+            **{
+                key: section[raw_key]
+                for key, raw_key in (
+                    ("vendor", "vendor"),
+                    ("build", "build"),
+                    ("name", "name"),
+                    ("version", "version"),
+                    ("type", "osType"),
+                )
+                if raw_key in section
+            },
+        },
+    )
+
+
+register.inventory_plugin(
+    name="esx_systeminfo",
+    inventory_function=inventory_esx_systeminfo,
 )

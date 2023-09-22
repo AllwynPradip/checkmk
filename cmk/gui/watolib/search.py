@@ -1,56 +1,51 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from contextlib import contextmanager
+from collections import defaultdict
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
-from functools import partial
 from itertools import chain
-from time import sleep
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Callable,
-    DefaultDict,
-    Dict,
-    Final,
-    Iterable,
-    Iterator,
-    List,
-    Mapping,
-    Optional,
-)
+from typing import Final
 
 import redis
-from werkzeug.test import create_environ
 
-import cmk.gui.config as config
-from cmk.gui.background_job import BackgroundJobAlreadyRunning, BackgroundProcessInterface
-from cmk.gui.config import UserContext, user
-from cmk.gui.display_options import DisplayOptions
-from cmk.gui.exceptions import MKAuthException
-from cmk.gui.globals import RequestContext, g, request
-from cmk.gui.gui_background_job import GUIBackgroundJob, job_registry
-from cmk.gui.htmllib import html
-from cmk.gui.http import Request, Response
-from cmk.gui.utils.output_funnel import OutputFunnel
-from cmk.gui.utils.theme import Theme
-from cmk.gui.i18n import _, get_current_language, get_languages, localize
-from cmk.gui.pages import get_page_handler
-from cmk.gui.type_defs import SearchQuery, SearchResult, SearchResultsByTopic
-from cmk.gui.utils.urls import file_name_and_query_vars_from_url, QueryVars
-from cmk.gui.watolib.utils import may_edit_ruleset
 from cmk.utils.exceptions import MKGeneralException
-from cmk.utils.redis import get_redis_client
 from cmk.utils.plugin_registry import Registry
+from cmk.utils.redis import get_redis_client, redis_enabled, redis_server_reachable
+from cmk.utils.setup_search_index import (
+    read_and_remove_update_requests,
+    UpdateRequests,
+    updates_requested,
+)
+from cmk.utils.version import edition, Edition
 
-if TYPE_CHECKING:
-    from cmk.utils.redis import RedisDecoded
-
-_NAME_DEFAULT_LANGUAGE = 'default'
+from cmk.gui.background_job import (
+    BackgroundJob,
+    BackgroundJobAlreadyRunning,
+    BackgroundProcessInterface,
+    InitialStatusArgs,
+    job_registry,
+)
+from cmk.gui.ctx_stack import g
+from cmk.gui.exceptions import MKAuthException
+from cmk.gui.global_config import get_global_config
+from cmk.gui.hooks import register_builtin
+from cmk.gui.http import request
+from cmk.gui.i18n import _, get_current_language, get_languages, localize
+from cmk.gui.logged_in import user
+from cmk.gui.pages import get_page_handler
+from cmk.gui.session import SuperUserContext
+from cmk.gui.type_defs import SearchQuery, SearchResult, SearchResultsByTopic
+from cmk.gui.utils.output_funnel import output_funnel
+from cmk.gui.utils.urls import file_name_and_query_vars_from_url, QueryVars
+from cmk.gui.watolib.mode_permissions import mode_permissions_ensurance_registry
+from cmk.gui.watolib.utils import may_edit_ruleset
 
 
 class IndexNotFoundException(MKGeneralException):
@@ -70,16 +65,15 @@ class MatchItem:
 
 
 MatchItems = Iterable[MatchItem]
-MatchItemsByTopic = Dict[str, MatchItems]
+MatchItemsByTopic = dict[str, MatchItems]
 
 
 class ABCMatchItemGenerator(ABC):
     def __init__(self, name: str) -> None:
-        self._name: Final[str] = name
+        self.name: Final[str] = name
 
-    @property
-    def name(self) -> str:
-        return self._name
+    def __hash__(self) -> int:
+        return hash(self.name)
 
     @abstractmethod
     def generate_match_items(self) -> MatchItems:
@@ -101,21 +95,24 @@ class MatchItemGeneratorRegistry(Registry[ABCMatchItemGenerator]):
         return instance.name
 
 
+match_item_generator_registry = MatchItemGeneratorRegistry()
+
+
 class IndexBuilder:
     _KEY_INDEX_BUILT = "si:index_built"
     PREFIX_LOCALIZATION_INDEPENDENT = "si:li"
     PREFIX_LOCALIZATION_DEPENDENT = "si:ld"
 
-    def __init__(self, registry: MatchItemGeneratorRegistry) -> None:
+    def __init__(
+        self,
+        registry: MatchItemGeneratorRegistry,
+        redis_client: redis.Redis[str],
+    ) -> None:
         self._registry = registry
-        self._all_languages = {
-            name: name or _NAME_DEFAULT_LANGUAGE for language in get_languages()
-            for name in [language[0]]
-        }
-        self._redis_client = get_redis_client()
+        self._redis_client = redis_client
 
     @staticmethod
-    def add_to_prefix(prefix: str, to_add: Any) -> str:
+    def add_to_prefix(prefix: str, to_add: object) -> str:
         return f"{prefix}:{to_add}"
 
     @classmethod
@@ -128,45 +125,91 @@ class IndexBuilder:
 
     def _build_index(
         self,
-        names_and_generators: Iterable[ABCMatchItemGenerator],
+        match_item_generators: Iterable[ABCMatchItemGenerator],
     ) -> None:
-        localization_dependent_generators = []
+        with SuperUserContext():
+            self._do_build_index(match_item_generators)
+
+    def _do_build_index(
+        self,
+        match_item_generators: Iterable[ABCMatchItemGenerator],
+    ) -> None:
+        current_language = get_current_language()
 
         with self._redis_client.pipeline() as pipeline:
-            key_categories_li = self.key_categories(self.PREFIX_LOCALIZATION_INDEPENDENT)
-            for match_item_generator in names_and_generators:
-                if match_item_generator.is_localization_dependent:
-                    localization_dependent_generators.append(match_item_generator)
-                    continue
-                pipeline.sadd(
-                    key_categories_li,
-                    match_item_generator.name,
-                )
-                self._add_match_items_to_redis(
-                    match_item_generator,
-                    pipeline,
-                    self.PREFIX_LOCALIZATION_INDEPENDENT,
-                )
-
-            key_categories_ld = self.key_categories(self.PREFIX_LOCALIZATION_DEPENDENT)
-            for language, language_name in self._all_languages.items():
-                localize(language)
-                prefix_ld = self.add_to_prefix(
-                    self.PREFIX_LOCALIZATION_DEPENDENT,
-                    language_name,
-                )
-                for match_item_generator in localization_dependent_generators:
-                    pipeline.sadd(
-                        key_categories_ld,
-                        match_item_generator.name,
+            self._add_language_independent_item_generators_to_redis(
+                iter(  # to make pylint happy
+                    filter(
+                        lambda match_item_gen: not match_item_gen.is_localization_dependent,
+                        match_item_generators,
                     )
-                    self._add_match_items_to_redis(
-                        match_item_generator,
-                        pipeline,
-                        prefix_ld,
+                ),
+                pipeline,
+            )
+            self._add_language_dependent_item_generators_to_redis(
+                list(
+                    filter(
+                        lambda match_item_gen: match_item_gen.is_localization_dependent,
+                        match_item_generators,
                     )
-
+                ),
+                pipeline,
+            )
             pipeline.execute()
+
+        localize(current_language)
+
+    @classmethod
+    def _add_language_independent_item_generators_to_redis(
+        cls,
+        match_item_generators: Iterable[ABCMatchItemGenerator],
+        redis_pipeline: redis.client.Pipeline,
+    ) -> None:
+        key_categories_li = cls.key_categories(cls.PREFIX_LOCALIZATION_INDEPENDENT)
+        for match_item_generator in match_item_generators:
+            cls._add_match_item_generator_to_redis(
+                match_item_generator,
+                redis_pipeline,
+                key_categories_li,
+                cls.PREFIX_LOCALIZATION_INDEPENDENT,
+            )
+
+    def _add_language_dependent_item_generators_to_redis(
+        self,
+        match_item_generators: Collection[ABCMatchItemGenerator],
+        redis_pipeline: redis.client.Pipeline,
+    ) -> None:
+        key_categories_ld = self.key_categories(self.PREFIX_LOCALIZATION_DEPENDENT)
+        for language_code, _language_name in get_languages():
+            localize(language_code)
+            for match_item_generator in match_item_generators:
+                self._add_match_item_generator_to_redis(
+                    match_item_generator,
+                    redis_pipeline,
+                    key_categories_ld,
+                    self.add_to_prefix(
+                        self.PREFIX_LOCALIZATION_DEPENDENT,
+                        language_code,
+                    ),
+                )
+
+    @classmethod
+    def _add_match_item_generator_to_redis(
+        cls,
+        match_item_generator: ABCMatchItemGenerator,
+        redis_pipeline: redis.client.Pipeline,
+        category_key: str,
+        prefix: str,
+    ) -> None:
+        redis_pipeline.sadd(
+            category_key,
+            match_item_generator.name,
+        )
+        cls._add_match_items_to_redis(
+            match_item_generator,
+            redis_pipeline,
+            prefix,
+        )
 
     @classmethod
     def _add_match_items_to_redis(
@@ -184,7 +227,7 @@ class IndexBuilder:
                 key=" ".join(match_item.match_texts),
                 value=idx,
             )
-            redis_pipeline.hset(  # type: ignore[call-arg]  # no idea why this is necessary...
+            redis_pipeline.hset(
                 cls.add_to_prefix(prefix, idx),
                 mapping={
                     "title": match_item.title,
@@ -203,60 +246,59 @@ class IndexBuilder:
         self._build_index(self._registry.values())
         self._mark_index_as_built()
 
-    def build_changed_sub_indices(self, change_action_name: str) -> None:
-        self._build_index(match_item_generator for match_item_generator in self._registry.values()
-                          if match_item_generator.is_affected_by_change(change_action_name))
+    def build_changed_sub_indices(self, change_action_names: Collection[str]) -> None:
+        self._build_index(
+            {
+                match_item_generator
+                for change_action_name in change_action_names
+                for match_item_generator in self._registry.values()
+                if match_item_generator.is_affected_by_change(change_action_name)
+            }
+        )
 
     @classmethod
-    def index_is_built(cls, client: Optional['RedisDecoded'] = None) -> bool:
-        return (client or get_redis_client()).exists(cls._KEY_INDEX_BUILT) == 1
+    def index_is_built(cls, client: redis.Redis[str]) -> bool:
+        return client.exists(cls._KEY_INDEX_BUILT) == 1
 
 
-class URLChecker:
-    def __init__(self) -> None:
-        from cmk.gui.wato.pages.hosts import ModeEditHost
-        self._mode_edit_host = ModeEditHost
+def _set_query_vars(query_vars: QueryVars) -> None:
+    for name, vals in query_vars.items():
+        request.set_var(name, vals[0])
 
-    @staticmethod
-    def _set_query_vars(query_vars: QueryVars) -> None:
-        for name, vals in query_vars.items():
-            request.set_var(name, vals[0])
 
-    @staticmethod
-    def _set_current_folder(folder_name: str) -> None:
-        # this attribute is set when calling cmk.gui.watolib.hosts_and_folders.Folder.all_folders
-        # if it is not set now, then it will be set for sure upon the next call
-        if not hasattr(g, "wato_folders"):
-            return
-        g.wato_current_folder = g.wato_folders[folder_name]
+def _set_current_folder(folder_name: str) -> None:
+    # this attribute is set when calling cmk.gui.watolib.hosts_and_folders.Folder.all_folders
+    # if it is not set now, then it will be set for sure upon the next call
+    if not hasattr(g, "wato_folders"):
+        return
+    g.wato_current_folder = g.wato_folders[folder_name]
 
-    def is_permitted(self, url: str) -> bool:
-        file_name, query_vars = file_name_and_query_vars_from_url(url)
-        self._set_query_vars(query_vars)
 
-        is_host_url = "mode=edit_host" in url
-        if is_host_url:
-            self._set_current_folder(query_vars.get("folder", [""])[0])  # "" means root dir
+def is_url_permitted(url: str) -> bool:
+    file_name, query_vars = file_name_and_query_vars_from_url(url)
+    _set_query_vars(query_vars)
 
-        try:
-            if is_host_url:
-                self._try_host()
-            else:
-                self._try_page(file_name)
-            return True
-        except MKAuthException:
-            return False
+    mode = modes[0] if (modes := query_vars.get("mode", [])) else None
 
-    @staticmethod
-    def _try_page(file_name: str) -> None:
-        page_handler = get_page_handler(file_name)
-        if page_handler:
+    if mode == "edit_host":
+        _set_current_folder(query_vars.get("folder", [""])[0])  # "" means root dir
+
+    try:
+        if mode:
+            mode_permissions_ensurance_registry[mode]().ensure_permissions()
+        else:
+            _try_page(file_name)
+        return True
+    except MKAuthException:
+        return False
+
+
+def _try_page(file_name: str) -> None:
+    page_handler = get_page_handler(file_name)
+    if page_handler:
+        with output_funnel.plugged():
             page_handler()
-
-    # TODO: Find a better solution here. We treat hosts separately because calling the page takes
-    #  very long in this case and is not necessary (the initializer already throws an exception).
-    def _try_host(self) -> None:
-        self._mode_edit_host()
+            output_funnel.drain()
 
 
 class PermissionsHandler:
@@ -269,136 +311,168 @@ class PermissionsHandler:
             "event_console_settings": user.may("mkeventd.config") or user.may("wato.seeall"),
             "logfile_pattern_analyzer": user.may("wato.pattern_editor") or user.may("wato.seeall"),
         }
-        self._url_checker = URLChecker()
 
     @staticmethod
     def _permissions_rule(url: str) -> bool:
         _, query_vars = file_name_and_query_vars_from_url(url)
-        return may_edit_ruleset(query_vars['varname'][0])
-
-    def _permissions_url(self, url: str) -> bool:
-        return self._url_checker.is_permitted(url)
+        return may_edit_ruleset(query_vars["varname"][0])
 
     def may_see_category(self, category: str) -> bool:
         return user.may("wato.use") and self._category_permissions.get(category, True)
 
+    @staticmethod
+    def _permission_global_setting(url: str) -> bool:
+        if edition() is not Edition.CSE:
+            return True
+        _, query_vars = file_name_and_query_vars_from_url(url)
+        return get_global_config().global_settings.is_activated(query_vars["varname"][0])
+
     def permissions_for_items(self) -> Mapping[str, Callable[[str], bool]]:
         return {
+            "global_settings": self._permission_global_setting,
             "rules": self._permissions_rule,
-            "hosts": lambda url:
-                     (any(user.may(perm) for perm in ("wato.all_folders", "wato.see_all_folders"))
-                      or self._permissions_url(url)),
-            "setup": self._permissions_url,
+            "hosts": lambda url: (
+                any(user.may(perm) for perm in ("wato.all_folders", "wato.see_all_folders"))
+                or is_url_permitted(url)
+            ),
+            "setup": is_url_permitted,
         }
 
 
 class IndexSearcher:
-    def __init__(self) -> None:
-        permissions_handler = PermissionsHandler()
+    def __init__(
+        self,
+        redis_client: redis.Redis[str],
+        permissions_handler: PermissionsHandler,
+    ) -> None:
+        self._redis_client = redis_client
+        if not redis_server_reachable(self._redis_client):
+            raise RuntimeError("Redis server is not reachable")
         self._may_see_category = permissions_handler.may_see_category
         self._may_see_item_func = permissions_handler.permissions_for_items()
-        self._current_language = get_current_language() or _NAME_DEFAULT_LANGUAGE
         self._user_id = user.ident
-        self._redis_client = get_redis_client()
-
-    @contextmanager
-    def _SearchContext(self) -> Iterator[None]:
-        _request = Request(create_environ())
-        _response = Response()
-        _funnel = OutputFunnel(_response)
-        _theme = Theme()
-        _theme.from_config(config.ui_theme, config.theme_choices())
-        with RequestContext(
-                req=_request,
-                resp=_response,
-                funnel=_funnel,
-                html_obj=html(_request, _response, _funnel, output_format="html"),
-                display_options=DisplayOptions(),
-                theme=_theme,
-        ), UserContext(self._user_id):
-            yield
 
     def search(self, query: SearchQuery) -> SearchResultsByTopic:
-        with self._SearchContext():
-            results = self._search(query)
-        yield from self._sort_search_results(results)
+        """
+        Sorted search results restricted according to the permissions of the current user.
 
-    def _search(self, query: SearchQuery) -> Mapping[str, Iterable[SearchResult]]:
+        The permissions check for the individual results is explicitly separated from the actual
+        search in Redis. Searching in Redis and sorting the results by topic is fast. Checking the
+        permissions can be quite slow, so we do this step at the very end in a generator function.
+        This way, the code which displays the results can request as many results as it wants to
+        render only, thus avoiding checking the permissions for all found results.
+        """
+        yield from self._filter_results_by_user_permissions(
+            self._sort_search_results(self._search_redis(query))
+        )
+
+    def _search_redis(
+        self, query: SearchQuery
+    ) -> dict[str, list[_SearchResultWithPermissionsCheck]]:
         if not IndexBuilder.index_is_built(self._redis_client):
-            build_index_background()
+            self._launch_index_building_in_background_job()
             raise IndexNotFoundException
 
         query_preprocessed = f"*{query.lower().replace(' ', '*')}*"
-        results: DefaultDict[str, List[SearchResult]] = DefaultDict(list)
 
-        self._search_redis(
-            query_preprocessed,
-            IndexBuilder.key_categories(IndexBuilder.PREFIX_LOCALIZATION_INDEPENDENT),
-            IndexBuilder.PREFIX_LOCALIZATION_INDEPENDENT,
-            results,
-        )
-        self._search_redis(
-            query_preprocessed,
-            IndexBuilder.key_categories(IndexBuilder.PREFIX_LOCALIZATION_DEPENDENT),
-            IndexBuilder.add_to_prefix(
-                IndexBuilder.PREFIX_LOCALIZATION_DEPENDENT,
-                self._current_language,
+        results_localization_independent = self._search_redis_categories(
+            query=query_preprocessed,
+            key_categories=IndexBuilder.key_categories(
+                IndexBuilder.PREFIX_LOCALIZATION_INDEPENDENT
             ),
-            results,
+            key_prefix_match_items=IndexBuilder.PREFIX_LOCALIZATION_INDEPENDENT,
+        )
+        results_localization_dependent = self._search_redis_categories(
+            query=query_preprocessed,
+            key_categories=IndexBuilder.key_categories(IndexBuilder.PREFIX_LOCALIZATION_DEPENDENT),
+            key_prefix_match_items=IndexBuilder.add_to_prefix(
+                IndexBuilder.PREFIX_LOCALIZATION_DEPENDENT,
+                get_current_language(),
+            ),
         )
 
-        return results
+        return {
+            topic: [
+                *results_localization_independent[topic],
+                *results_localization_dependent[topic],
+            ]
+            for topic in chain(results_localization_independent, results_localization_dependent)
+        }
 
-    def _search_redis(
+    def _launch_index_building_in_background_job(self) -> None:
+        build_job = SearchIndexBackgroundJob()
+        with suppress(BackgroundJobAlreadyRunning):
+            build_job.start(
+                lambda job_interface: _index_building_in_background_job(
+                    job_interface,
+                    self._redis_client,
+                )
+            )
+
+    def _search_redis_categories(
         self,
+        *,
         query: str,
         key_categories: str,
         key_prefix_match_items: str,
-        results: DefaultDict[str, List[SearchResult]],
-    ) -> None:
+    ) -> defaultdict[str, list[_SearchResultWithPermissionsCheck]]:
+        results = defaultdict(list)
         for category in self._redis_client.smembers(key_categories):
-            # category is a Union[bytes, float, int, str]
-            if not (isinstance(category, str) and self._may_see_category(category)):
+            if not self._may_see_category(category):
                 continue
 
             prefix_category = IndexBuilder.add_to_prefix(
                 key_prefix_match_items,
                 category,
             )
-            permissions_check = self._may_see_item_func.get(category, lambda _: True)
+            permissions_check = self._may_see_item_func.get(category, lambda _url: True)
 
             for _matched_text, idx_matched_item in self._redis_client.hscan_iter(
-                    IndexBuilder.key_match_texts(prefix_category),
-                    match=query,
+                IndexBuilder.key_match_texts(prefix_category),
+                match=query,
             ):
                 match_item_dict = self._redis_client.hgetall(
-                    IndexBuilder.add_to_prefix(prefix_category, idx_matched_item))
+                    IndexBuilder.add_to_prefix(prefix_category, idx_matched_item)
+                )
 
-                if not permissions_check(match_item_dict["url"]):
-                    continue
-
+                # This call to i18n._ with a non-constant string is ok. Here, we translate the
+                # topics of our search results. For localization-dependent search results, such as
+                # rulesets, they are already localized anyway. However, for localization-independent
+                # results, such as hosts, they are not. For example, "Hosts" in French is "Hôtes".
+                # Without this call to i18n._, found hosts would be displayed under the topic
+                # "Hosts" instead of "Hôtes" in the setup search.
+                # pylint: disable=translation-of-non-string
                 results[_(match_item_dict["topic"])].append(
-                    SearchResult(
-                        match_item_dict["title"],
-                        match_item_dict["url"],
-                    ))
+                    _SearchResultWithPermissionsCheck(
+                        SearchResult(
+                            match_item_dict["title"],
+                            match_item_dict["url"],
+                        ),
+                        permissions_check,
+                    )
+                )
+        return results
 
     @classmethod
     def _sort_search_results(
         cls,
-        results: Mapping[str, Iterable[SearchResult]],
-    ) -> SearchResultsByTopic:
+        results: Mapping[str, Iterable[_SearchResultWithPermissionsCheck]],
+    ) -> Iterator[tuple[str, Iterable[_SearchResultWithPermissionsCheck]]]:
         first_topics = cls._first_topics()
         last_topics = cls._last_topics()
         middle_topics = sorted(set(results.keys()) - set(first_topics) - set(last_topics))
-        yield from ((
-            topic,
-            results[topic],
-        ) for topic in chain(
-            first_topics,
-            middle_topics,
-            last_topics,
-        ) if topic in results)
+        yield from (
+            (
+                topic,
+                results[topic],
+            )
+            for topic in chain(
+                first_topics,
+                middle_topics,
+                last_topics,
+            )
+            if topic in results
+        )
 
     @staticmethod
     def _first_topics() -> Iterable[str]:
@@ -419,7 +493,7 @@ class IndexSearcher:
         # string concatenation is used
         return (
             # _("Business Intelligence"),
-            _("Event Console rule packages"),
+            _("Event Console rule packs"),
             _("Event Console rules"),
             _("Event Console settings"),
             # _("Users"),
@@ -430,75 +504,93 @@ class IndexSearcher:
             # _("Maintenance"),
         )
 
+    @staticmethod
+    def _filter_results_by_user_permissions(
+        results_by_topic: Iterable[tuple[str, Iterable[_SearchResultWithPermissionsCheck]]]
+    ) -> SearchResultsByTopic:
+        yield from (
+            (
+                topic,
+                (
+                    result.result
+                    for result in results
+                    if result.permissions_check(result.result.url)
+                ),
+            )
+            for topic, results in results_by_topic
+        )
 
-def _build_index_background(
+
+@dataclass(frozen=True)
+class _SearchResultWithPermissionsCheck:
+    result: SearchResult
+    permissions_check: Callable[[str], bool]
+
+
+def _index_building_in_background_job(
     job_interface: BackgroundProcessInterface,
-    n_attempts_redis_connection: int = 1,
-    sleep_time: int = 5,
+    redis_client: redis.Redis[str],
 ) -> None:
-    n_attempts = 0
     job_interface.send_progress_update(_("Building of search index started"))
-    while True:
-        try:
-            n_attempts += 1
-            IndexBuilder(match_item_generator_registry).build_full_index()
-            break
-        except redis.ConnectionError:
-            job_interface.send_progress_update(
-                _(f"Connection attempt {n_attempts} / {n_attempts_redis_connection} to Redis failed"
-                 ))
-            if n_attempts == n_attempts_redis_connection:
-                job_interface.send_result_message(
-                    _("Maximum number of allowed connection attempts reached, terminating"))
-                raise
-            job_interface.send_progress_update(_(f"Will wait for {sleep_time} seconds and retry"))
-            sleep(sleep_time)
+    IndexBuilder(match_item_generator_registry, redis_client).build_full_index()
     job_interface.send_result_message(_("Search index successfully built"))
 
 
-def build_index_background(
-    n_attempts_redis_connection: int = 1,
-    sleep_time: int = 5,
-) -> None:
-    build_job = SearchIndexBackgroundJob()
-    build_job.set_function(
-        partial(
-            _build_index_background,
-            n_attempts_redis_connection=n_attempts_redis_connection,
-            sleep_time=sleep_time,
-        ))
-    try:
-        build_job.start()
-    except BackgroundJobAlreadyRunning:
-        pass
+def _launch_requests_processing_background() -> None:
+    if not updates_requested() or not redis_enabled():
+        return
+    job = SearchIndexBackgroundJob()
+    with suppress(BackgroundJobAlreadyRunning):
+        job.start(
+            lambda job_interface: _process_update_requests_background(
+                job_interface,
+                get_redis_client(),
+            )
+        )
 
 
-def _update_index_background(
-    change_action_name: str,
+register_builtin("request-start", _launch_requests_processing_background)
+
+
+def _process_update_requests_background(
     job_interface: BackgroundProcessInterface,
+    redis_client: redis.Redis[str],
 ) -> None:
-    job_interface.send_progress_update(_("Updating of search index started"))
-
-    if not IndexBuilder.index_is_built():
-        job_interface.send_progress_update(_("Search index not found, re-building from scratch"))
-        _build_index_background(job_interface)
+    if not redis_server_reachable(redis_client):
+        job_interface.send_progress_update(_("Redis is not reachable, terminating"))
         return
 
-    IndexBuilder(match_item_generator_registry).build_changed_sub_indices(change_action_name)
+    while updates_requested():
+        _process_update_requests(
+            read_and_remove_update_requests(),
+            job_interface,
+            redis_client,
+        )
+
+
+def _process_update_requests(
+    requests: UpdateRequests,
+    job_interface: BackgroundProcessInterface,
+    redis_client: redis.Redis[str],
+) -> None:
+    if requests["rebuild"]:
+        _index_building_in_background_job(job_interface, redis_client)
+        return
+
+    if not IndexBuilder.index_is_built(redis_client):
+        job_interface.send_progress_update(_("Search index not found, re-building from scratch"))
+        _index_building_in_background_job(job_interface, redis_client)
+        return
+
+    job_interface.send_progress_update(_("Updating of search index started"))
+    IndexBuilder(match_item_generator_registry, redis_client).build_changed_sub_indices(
+        requests["change_actions"]
+    )
     job_interface.send_result_message(_("Search index successfully updated"))
 
 
-def update_index_background(change_action_name: str) -> None:
-    update_job = SearchIndexBackgroundJob()
-    update_job.set_function(_update_index_background, change_action_name)
-    try:
-        update_job.start()
-    except BackgroundJobAlreadyRunning:
-        pass
-
-
 @job_registry.register
-class SearchIndexBackgroundJob(GUIBackgroundJob):
+class SearchIndexBackgroundJob(BackgroundJob):
     job_prefix = "search_index"
 
     @classmethod
@@ -506,13 +598,13 @@ class SearchIndexBackgroundJob(GUIBackgroundJob):
         return _("Search index")
 
     def __init__(self) -> None:
-        last_job_status = GUIBackgroundJob(self.job_prefix).get_status()
         super().__init__(
             self.job_prefix,
-            title=_("Search index"),
-            stoppable=False,
-            estimated_duration=last_job_status.get("duration"),
+            # We deliberately do not provide an estimated duration here, since that involves I/O.
+            # We need to be as fast as possible here, since this is done at the end of HTTP
+            # requests.
+            InitialStatusArgs(
+                title=_("Search index"),
+                stoppable=False,
+            ),
         )
-
-
-match_item_generator_registry = MatchItemGeneratorRegistry()

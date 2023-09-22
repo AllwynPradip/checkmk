@@ -1,8 +1,11 @@
 #!/bin/bash
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
+:
+
+# shellcheck disable=SC2046 # Quote this to prevent word splitting.
 set $(echo -e "GET services
 Separators: 10 32 32 32
 Stats: state >= 0
@@ -12,7 +15,7 @@ Stats: has_been_checked = 1
 StatsAnd: 2
 Stats: state = 1
 Stats: state = 2
-Stats: state = 3" | unixcat $OMD_ROOT/tmp/run/live)
+Stats: state = 3" | unixcat "$OMD_ROOT"/tmp/run/live)
 
 TOTAL=$1
 PENDING=$2

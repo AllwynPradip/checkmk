@@ -1,8 +1,8 @@
 title: Checkmk Notification Spooler: Status
 agents: linux
 catalog: app/cmk
-license: GPL
-distribution: checkmk
+license: GPLv2
+distribution: check_mk
 description:
  This check checks the status of Checkmk Notification Spooler. It will warn
  if deferred spool files lie around too long or if any corrupted spool
@@ -12,5 +12,5 @@ description:
 item:
  The name of the site.
 
-inventory:
+discovery:
  One sevice is created for each site.

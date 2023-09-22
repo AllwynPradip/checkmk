@@ -1,42 +1,30 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from typing import (
-    Any,
-    Dict,
-    List,
-    Mapping,
-    Optional,
-    Sequence,
-)
-from .agent_based_api.v1 import (
-    register,
-    SNMPTree,
-    type_defs,
-)
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+from .agent_based_api.v1 import register, SNMPTree, type_defs
 from .utils import if64, interfaces
 
 If64AdmSection = Sequence[str]
 
 
-def parse_if64adm(string_table: List[type_defs.StringTable]) -> If64AdmSection:
-    return [sub_table[0] for sub_table in string_table[0]]
+def parse_if64adm(string_table: type_defs.StringTable) -> If64AdmSection:
+    return [sub_table[0] for sub_table in string_table]
 
 
 register.snmp_section(
     name="if64",
     parse_function=if64.parse_if64,
-    fetch=[
-        SNMPTree(
-            base=if64.BASE_OID,
-            oids=if64.END_OIDS,
-        ),
-    ],
+    fetch=SNMPTree(
+        base=if64.BASE_OID,
+        oids=if64.END_OIDS,
+    ),
     detect=if64.HAS_ifHCInOctets,
-    supersedes=['if', 'statgrab_net'],
+    supersedes=["if", "statgrab_net"],
 )
 
 # Note: This section is by default deactivated (hard-coded in
@@ -45,30 +33,28 @@ register.snmp_section(
 register.snmp_section(
     name="if64adm",
     parse_function=parse_if64adm,
-    fetch=[
-        SNMPTree(
-            base=if64.BASE_OID,
-            oids=["2.2.1.7"],  # ifAdminStatus
-        ),
-    ],
+    fetch=SNMPTree(
+        base=if64.BASE_OID,
+        oids=["2.2.1.7"],  # ifAdminStatus
+    ),
     detect=if64.HAS_ifHCInOctets,
 )
 
 
 def _add_admin_status_to_ifaces(
-    section_if64: interfaces.Section,
-    section_if64adm: Optional[If64AdmSection],
+    section_if64: interfaces.Section[interfaces.TInterfaceType],
+    section_if64adm: If64AdmSection | None,
 ) -> None:
     if section_if64adm is None or len(section_if64) != len(section_if64adm):
         return
     for iface, admin_status in zip(section_if64, section_if64adm):
-        iface.admin_status = admin_status
+        iface.attributes.admin_status = admin_status
 
 
 def discover_if64(
     params: Sequence[Mapping[str, Any]],
-    section_if64: Optional[interfaces.Section],
-    section_if64adm: Optional[If64AdmSection],
+    section_if64: interfaces.Section[interfaces.TInterfaceType] | None,
+    section_if64adm: If64AdmSection | None,
 ) -> type_defs.DiscoveryResult:
     if section_if64 is None:
         return
@@ -82,8 +68,8 @@ def discover_if64(
 def check_if64(
     item: str,
     params: Mapping[str, Any],
-    section_if64: Optional[interfaces.Section],
-    section_if64adm: Optional[If64AdmSection],
+    section_if64: interfaces.Section[interfaces.TInterfaceType] | None,
+    section_if64adm: If64AdmSection | None,
 ) -> type_defs.CheckResult:
     if section_if64 is None:
         return
@@ -98,11 +84,10 @@ def check_if64(
 def cluster_check_if64(
     item: str,
     params: Mapping[str, Any],
-    section_if64: Mapping[str, Optional[interfaces.Section]],
-    section_if64adm: Mapping[str, Optional[If64AdmSection]],
+    section_if64: Mapping[str, interfaces.Section[interfaces.TInterfaceType] | None],
+    section_if64adm: Mapping[str, If64AdmSection | None],
 ) -> type_defs.CheckResult:
-
-    sections_w_admin_status: Dict[str, interfaces.Section] = {}
+    sections_w_admin_status: dict[str, interfaces.Section[interfaces.TInterfaceType]] = {}
     for node_name, node_section_if64 in section_if64.items():
         if node_section_if64 is not None:
             _add_admin_status_to_ifaces(node_section_if64, section_if64adm[node_name])
@@ -117,7 +102,7 @@ def cluster_check_if64(
 
 register.check_plugin(
     name="if64",
-    sections=['if64', 'if64adm'],
+    sections=["if64", "if64adm"],
     service_name="Interface %s",
     discovery_ruleset_name="inventory_if_rules",
     discovery_ruleset_type=register.RuleSetType.ALL,

@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-# Copyright (C) 2019 tribe29 GmbH - License: GNU General Public License v2
+# Copyright (C) 2019 Checkmk GmbH - License: GNU General Public License v2
 # This file is part of Checkmk (https://checkmk.com). It is subject to the terms and
 # conditions defined in the file COPYING, which is part of this source code package.
 
-from contextlib import contextmanager
-import ctypes
-import ctypes.util
 import os
-from pathlib import Path
 import sys
-from typing import Generator
+from collections.abc import Generator
+from contextlib import contextmanager, suppress
+from pathlib import Path
 
 import cmk.utils.store as store
 from cmk.utils.exceptions import MKGeneralException
@@ -79,14 +76,15 @@ def lock_with_pid_file(path: Path) -> None:
     Use this after daemonizing or in foreground mode to ensure there is only
     one process running.
     """
-    if not store.try_aquire_lock(str(path)):
-        raise MKGeneralException("Failed to aquire PID file lock: "
-                                 "Another process is already running")
+    if not store.try_acquire_lock(str(path)):
+        raise MKGeneralException(
+            "Failed to acquire PID file lock: Another process is already running"
+        )
 
     # Now that we have the lock we are allowed to write our pid to the file.
     # The pid can then be used by the init script.
     with path.open("w", encoding="utf-8") as f:
-        f.write(u"%d\n" % os.getpid())
+        f.write("%d\n" % os.getpid())
 
 
 def _cleanup_locked_pid_file(path: Path) -> None:
@@ -96,10 +94,8 @@ def _cleanup_locked_pid_file(path: Path) -> None:
 
     store.release_lock(str(path))
 
-    try:
+    with suppress(OSError):
         path.unlink()
-    except OSError:
-        pass
 
 
 @contextmanager
@@ -110,44 +106,3 @@ def pid_file_lock(path: Path) -> Generator[None, None, None]:
         yield
     finally:
         _cleanup_locked_pid_file(path)
-
-
-def set_cmdline(cmdline: bytes) -> None:
-    """
-    Change the process name and process command line on of the running process
-    This works at least with Python 2.x on Linux
-    """
-    argv = ctypes.POINTER(ctypes.c_char_p)()
-    argc = ctypes.c_int()
-    ctypes.pythonapi.Py_GetArgcArgv(ctypes.byref(argc), ctypes.byref(argv))
-    # mypy: The type is not detected correctly
-    cmdlen = sum([len(argv[i]) for i in range(argc.value)]) + argc.value  # type: ignore[arg-type]
-    # TODO: This can probably be simplified...
-    _new_cmdline = ctypes.c_char_p(cmdline.ljust(cmdlen, b'\0'))  # noqa: F841
-
-    set_procname(cmdline)
-
-
-def set_procname(cmdline: bytes) -> None:
-    """
-    Change the process name of the running process
-    This works at least with Python 2.x on Linux
-    """
-    lib = ctypes.util.find_library('c')
-    if not lib:
-        return
-    libc = ctypes.cdll.LoadLibrary(lib)
-
-    #argv = ctypes.POINTER(ctypes.c_char_p)()
-
-    # replace the command line, which is available via /proc/<pid>/cmdline.
-    # This is .e.g used by ps
-    #libc.memcpy(argv.contents, new_cmdline, cmdlen)
-
-    # replace the prctl name, which is available via /proc/<pid>/status.
-    # This is for example used by top and killall
-    #libc.prctl(15, new_cmdline, 0, 0, 0)
-
-    name_buffer = ctypes.create_string_buffer(len(cmdline) + 1)
-    name_buffer.value = cmdline
-    libc.prctl(15, ctypes.byref(name_buffer), 0, 0, 0)
